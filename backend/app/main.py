@@ -17,7 +17,7 @@ from .database.base import Database
 from .execution.runtime import TradingRuntime
 from .notifications.service import EmailChannel, TelegramChannel
 from .security import users
-from .security.rate_limit import RateLimiter
+from .security.rate_limit import SECURITY_HEADERS, RateLimiter
 from .security.tokens import TokenService
 from .security.vault import CredentialVault
 
@@ -67,6 +67,23 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     )
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True,
                        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type", "X-Requested-With"])
+    api_limiter = RateLimiter(settings.api_rate_limit_per_minute)
+
+    @app.middleware("http")
+    async def protect(request, call_next):
+        """Per-client request budget for the API, plus conservative security headers on every response."""
+        if request.url.path.startswith("/api") and request.method != "OPTIONS":
+            client = request.client.host if request.client else "unknown"
+            if not api_limiter.allow(client):
+                from fastapi.responses import JSONResponse
+
+                return JSONResponse({"detail": "Too many requests; slow down"}, status_code=429, headers={"Retry-After": "60"})
+        response = await call_next(request)
+        if not request.url.path.startswith(("/docs", "/redoc", "/openapi.json")):
+            for name, value in SECURITY_HEADERS.items():
+                response.headers.setdefault(name, value)
+        return response
+
     for module in (routes_auth, routes_settings, routes_trading, routes_research):
         app.include_router(module.router)
     try:

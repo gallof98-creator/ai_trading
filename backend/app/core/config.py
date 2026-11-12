@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     credential_key: str = ""  # Fernet key used to encrypt broker credentials at rest
     cookie_secure: bool = False  # set true behind HTTPS
     login_rate_limit_per_minute: int = Field(10, gt=0)
+    api_rate_limit_per_minute: int = Field(600, gt=0)  # per client address, all /api routes
 
     # Optional first-run admin bootstrap (only used while the users table is empty).
     admin_email: str = ""

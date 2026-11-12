@@ -107,3 +107,23 @@ def test_production_requires_secrets(db):
         create_app(Settings(_env_file=None, environment="production"), db)
     with pytest.raises(RuntimeError, match="32 characters"):
         create_app(Settings(_env_file=None, environment="production", jwt_secret="short", credential_key="k"), db)
+
+
+def test_api_rate_limit_and_security_headers(db):
+    from fastapi.testclient import TestClient
+
+    app = create_app(Settings(_env_file=None, database_url="sqlite://", jwt_secret="t" * 48, api_rate_limit_per_minute=5), db)
+    c = TestClient(app)
+    codes = [c.get("/api/auth/me").status_code for _ in range(7)]
+    assert codes == [401] * 5 + [429, 429]
+    assert c.get("/health").status_code == 200  # health checks are not throttled
+    h = c.get("/health").headers
+    assert h["x-content-type-options"] == "nosniff" and h["x-frame-options"] == "DENY" and h["cache-control"] == "no-store"
+    assert "frame-ancestors 'none'" in h["content-security-policy"]
+
+
+def test_cors_only_allows_configured_origins(client):
+    ok = client.options("/api/auth/me", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"})
+    bad = client.options("/api/auth/me", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
+    assert ok.headers.get("access-control-allow-origin") == "http://localhost:3000"
+    assert "access-control-allow-origin" not in bad.headers

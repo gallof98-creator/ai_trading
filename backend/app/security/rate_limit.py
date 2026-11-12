@@ -20,3 +20,9 @@ class RateLimiter:
             return False
         hits.append(now)
         return True
+
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'", "Cache-Control": "no-store",
+}

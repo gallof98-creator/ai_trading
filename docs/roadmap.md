@@ -1,36 +1,67 @@
-# Roadmap and phase status
+# Phase status and limitations
+
+Status words mean exactly this: **Done** = implemented and covered by automated tests;
+**Done (mock-tested)** = implemented, tested only against mocks, never against the real external system;
+**Partial** = works but with the stated gaps; **Not built** = absent.
 
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Architecture and plan | Approved |
-| 2 | Repository, Docker Compose, CI, pinned dependencies | **Done** |
-| 3 | Domain models, database, migrations, auth, encrypted credentials | **Done** |
-| 4 | Market data, instruments, calendars, FX | Not started (draft modules exist, untested) |
-| 5 | Broker adapters and capability detection | Not started |
-| 6 | Strategies, registry, signals | Not started |
-| 7 | Centralised risk engine | Not started |
-| 8 | Backtesting | Not started |
-| 9 | Paper trading | Not started |
-| 10 | Portfolio engine | Not started |
-| 11 | Regime detection, ML, AI analyst | Not started |
-| 12 | Dashboard modules A-I | Shell, Overview (config only) and Settings only |
-| 13 | Monitoring and notifications | Audit trail only |
-| 14 | Full testing, security review, legal docs | Not started |
+| 2 | Repository, Docker Compose, CI definition, pinned dependencies | Done (CI workflow never executed: no remote) |
+| 3 | Domain models, database, migrations, auth, roles, encrypted credentials | Done |
+| 4 | Market data validation, instruments, calendars, timestamped FX, CSV import, bar store, continuous futures | Done; live feed is Partial (see below) |
+| 5 | Broker adapter framework and capability detection | Done; CCXT and IBKR adapters Done (mock-tested) |
+| 6 | 17 strategies, registry, signal engine | Done |
+| 7 | Central risk engine | Done |
+| 8 | Backtesting, metrics, walk-forward, comparison | Done; futures rollover Partial |
+| 9 | Paper trading | Done |
+| 10 | Portfolio engine | Done |
+| 11 | Regime detection, ML framework, AI analyst | Done as a research module; Partial against the full wish-list (below) |
+| 12 | Dashboard modules A–I | Done (verified by scripted browser runs; no automated frontend tests) |
+| 13 | Monitoring and notifications | Done; email and Telegram channels Done (mock-tested) |
+| 14 | Testing, security review, documentation, Docker verification | Done with the caveats below |
+
+## Verification performed
+
+- Backend test suite: 204 tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
+- Docker Compose stack (Postgres, Redis, API, worker, frontend): started healthy, migrations applied on Postgres, full browser flow passed (login, settings, paper account, data, deployment, replay, overview, portfolio, kill switch, backtest, comparison, model training, report), state identical after an API container restart, no errors or secrets in the logs.
+
+## Not verified or not built — read before relying on anything
+
+**Live trading**
+- No adapter has ever talked to a real exchange, testnet or IBKR gateway. `IbkrAdapter` in particular is written against the `ib_async` interface from its signatures and may need event-loop handling when run inside the API process.
+- On restart with a real broker, positions are reconciled against the broker (a mismatch trips a breaker), but open orders at the broker are not yet compared with the platform's records.
+- There is no UI or API for adding instruments or broker symbol mappings beyond the six starter instruments; CCXT symbols map automatically, IBKR symbols currently need a database row. This makes IBKR impractical from the dashboard today.
+
+**Market data**
+- The live feed polls completed bars from a CCXT exchange or a connected broker. No websockets, ticks, order book, trade tape or per-period funding rates are ingested (funding/borrow cost is a constant annual rate in the execution model). Bid/ask is available from adapters but not shown.
+- The CCXT public-data connection and the ECB rate download were not exercised against the real services from the build environment (the ECB parser is tested).
+- Exchange holidays are not bundled; equity calendars know regular sessions and weekends only.
+- No economic calendar module.
+- Survivorship-bias-free testing needs point-in-time universe data from a vendor; the platform has no universe management.
+
+**Backtesting**
+- Futures: the continuous-series builder and roll-cost charge exist and are tested, but roll schedules cannot yet be supplied through the API or dashboard.
+- Bars are the smallest unit of time: when a stop and a target fall inside one bar the stop is assumed first; intrabar paths are not modelled. Cross-instrument event ordering is exact at bar boundaries only.
+- Static FX assumptions are allowed and flagged; a full FX history is used when one is loaded.
+
+**Quant AI / ML**
+- Models are research artefacts. They do not filter or size orders, so signals never carry a confidence value.
+- The analyst is deterministic statistics; the optional LLM narrative layer was not built.
+- MLflow is not integrated (model records live in the database, artefacts on disk). Polars is not used: nothing measured needed it.
+- No dedicated time-series model family (ARIMA/GARCH); the five classifier types are implemented.
+
+**Platform**
+- Research jobs (backtests, walk-forward, training, parameter search) run inside the API request, not on the Celery worker, which currently only proves the queue works. Long runs block that request; inputs are capped (30,000 bars, 60 trials, 200 grid combinations).
+- The trading runtime lives in the API process and must run as a single instance; the rate limiter is in-memory.
+- The dashboard polls every 5–30 seconds; there is no push channel.
+- No password reset and no multi-factor authentication.
+- Engine arithmetic uses floating point (database columns are NUMERIC).
+- The Dockerfiles were built in the build environment only with an added proxy certificate, and the final verification layered the new code on earlier images because Docker Hub rate-limited base-image pulls. Build them once on your own network.
 
 ## Decisions taken at approval
 
-- AI analyst: deterministic analytics core; optional LLM narrative layer.
-- Single tenant with admin / trader / viewer roles.
-- Data: CCXT for crypto, IBKR for stocks/ETFs/forex/futures, CSV/Parquet import.
-- FX: timestamped rates (ECB reference + broker) with a configurable conversion cost.
-- Notifications: in-app first; email and Telegram behind one interface.
-- Emergency policies: block new risk (default), cancel open orders, flatten positions (explicit admin opt-in).
-- Futures: back-adjusted continuous series, roll N days before expiry.
-- Compliance documentation assumes the EU (MiFID II, MiCA, GDPR).
-
-## Known limitations after Phase 3
-
-- Rate limiting is in-memory and covers login only; it must move to Redis before running more than one API process.
-- `app/domain`, `app/instruments`, `app/market_data` contain draft code written before Phase 4; it has no tests yet and is not wired into the API.
-- The health-check test simulates a database failure crudely; a real connection-loss test comes with Phase 14.
-- No password reset or multi-factor authentication.
+AI analyst deterministic with optional LLM layer (layer not built) · single tenant with three roles ·
+CCXT for crypto, IBKR for other markets, CSV import · timestamped FX (ECB + manual) with conversion cost ·
+in-app notifications plus email and Telegram · three emergency policies, default never liquidates ·
+back-adjusted continuous futures · EU assumed for compliance notes.

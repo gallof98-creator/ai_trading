@@ -30,6 +30,7 @@ services:
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+    volumes: [models:/srv/models]
     ports: ["127.0.0.1:8000:8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,json,sys; sys.exit(json.load(urllib.request.urlopen('http://localhost:8000/health'))['status']!='ok')"]
@@ -56,3 +57,4 @@ services:
 
 volumes:
   pgdata:
+  models:

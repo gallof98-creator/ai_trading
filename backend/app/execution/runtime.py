@@ -487,8 +487,7 @@ class TradingRuntime:
                         self.engine.on_signal(signal, dep)
                 self.engine.end_of_timestamp(t_close, reconcile=True)
             self.bars[key] = cache.iloc[-CACHE_BARS:]
-            with self.db.session() as session:
-                self.store.save(session, instrument_id, timeframe, Dataset(new, dataset.kind, dataset.source))
+            self.journal._write(lambda session: self.store.save(session, instrument_id, timeframe, Dataset(new, dataset.kind, dataset.source)))
             if not report.ok:
                 self.notifier.notify(self.clock(), "system", "warning", f"Data quality issue: {instrument_id} {timeframe}",
                                      f"{report.duplicates_removed} duplicates, {report.invalid_rows_removed} invalid, {report.missing_bars} missing bars")

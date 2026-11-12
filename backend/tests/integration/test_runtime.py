@@ -280,3 +280,49 @@ def test_replay_never_blends_with_previously_stored_series():
         rt2.store.save(s, BTC, "1h", Dataset(synthetic_bars("1h", 100, seed=1).bars, DataKind.HISTORICAL, "exchange"))
     with pytest.raises(RuntimeError_, match="stored market data"):
         rt2.replay_synthetic(BTC, "1h", 50, seed=3, actor="admin", fx_assumptions={"USD": 0.92})
+
+
+def test_real_database_outage_during_trading_halts_new_risk_without_crashing():
+    from contextlib import contextmanager
+
+    db = make_db()
+    rt, _ = deployed(db)
+    rt.replay_synthetic(BTC, "1h", 100, seed=3, actor="admin", fx_assumptions={"USD": 0.92})
+    healthy = db.session
+
+    @contextmanager
+    def broken():
+        raise ConnectionError("database connection lost")
+        yield
+
+    db.session = broken
+    try:
+        series = synthetic_bars("1h", 3400, 3, start=rt.replays[BTC]["start"], start_price=rt.replays[BTC]["start_price"])
+        chunk = Dataset(series.bars.iloc[500:560], DataKind.SIMULATED, series.source)
+        rt.ingest(BTC, "1h", chunk)  # must not raise: bars keep flowing, stops keep working
+    finally:
+        db.session = healthy
+    assert rt.risk.kill_switch_on and "database" in rt.risk.kill_switch_reason
+    assert rt.portfolio.reconcile() == []
+
+
+def test_paper_and_live_are_isolated():
+    """Paper accounts are simulated venues by construction; nothing in the paper path can reach a real one."""
+    from app.live_trading.gate import LiveTradingNotAuthorized, authorize_live_trading
+    from app.paper_trading.broker import SimulatedBroker
+
+    db = make_db()
+    rt, _ = deployed(db)
+    paper = rt.brokers.get("paper-main")
+    assert isinstance(paper, SimulatedBroker) and paper.capabilities.is_simulated and not hasattr(paper, "exchange")
+    rt.replay_synthetic(BTC, "1h", 200, seed=3, actor="admin", fx_assumptions={"USD": 0.92})
+    assert rt.engine.orders and all(o.is_simulated and o.broker_id == "paper-main" for o in rt.engine.orders.values())
+    assert [a.broker_id for a in rt.brokers.all()] == ["paper-main"]  # no adapter appeared as a side effect
+    with pytest.raises(LiveTradingNotAuthorized):
+        authorize_live_trading(rt.settings)
+    assert rt.settings.live_trading_authorized is False
+    import inspect
+
+    import app.paper_trading.broker as paper_module
+    source = inspect.getsource(paper_module)
+    assert "ccxt" not in source and "ib_async" not in source and "live_trading" not in source

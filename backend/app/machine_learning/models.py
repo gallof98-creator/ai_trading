@@ -90,5 +90,10 @@ def create_model(name: str, params: dict | None = None, seed: int = 0):
                              subsample=p.get("subsample", 0.8), colsample_bytree=p.get("colsample_bytree", 0.8), reg_lambda=p.get("reg_lambda", 1.0),
                              random_state=seed, n_jobs=1, eval_metric="logloss", tree_method="hist")
     if name == "neural_network":
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            raise ValueError("The neural network model needs PyTorch, which is not installed in this deployment "
+                             "(install requirements-ml.txt)") from None
         return TorchMLPClassifier(hidden=p.get("hidden", 32), epochs=p.get("epochs", 60), lr=p.get("lr", 1e-3), seed=seed)
     raise ValueError(f"Unknown model {name!r}; available: {', '.join(MODEL_NAMES)}")
