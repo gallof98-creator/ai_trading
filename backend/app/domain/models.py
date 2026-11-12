@@ -126,6 +126,8 @@ class Signal(BaseModel):
 
 class Order(BaseModel):
     id: str = Field(default_factory=new_id)
+    # Sent to the broker as the client order id: resubmitting the same key can never create a second order.
+    client_order_id: str = ""
     broker_id: str
     instrument_id: str
     side: Side
@@ -141,7 +143,41 @@ class Order(BaseModel):
     signal_id: str | None = None
     strategy: str | None = None
     reduce_only: bool = False
+    is_simulated: bool = True  # False only for orders accepted by a real broker
     reason: str | None = None
+
+    def model_post_init(self, _ctx) -> None:
+        if not self.client_order_id:
+            self.client_order_id = self.id
+
+    @property
+    def remaining(self) -> float:
+        return self.qty - self.filled_qty
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in (OrderStatus.NEW, OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED)
+
+
+class Fill(BaseModel):
+    order_id: str
+    broker_id: str
+    instrument_id: str
+    side: Side
+    qty: float = Field(gt=0)
+    price: float
+    commission: float = 0.0  # in the instrument's quote currency
+    ts: datetime
+    strategy: str | None = None
+
+
+class Quote(BaseModel):
+    instrument_id: str
+    ts: datetime
+    bid: float | None = None
+    ask: float | None = None
+    last: float | None = None
+    kind: str = "realtime"  # realtime | delayed | simulated
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -150,7 +186,7 @@ class Position(BaseModel):
     broker_id: str
     instrument_id: str
     qty: float  # signed: >0 long, <0 short
-    avg_price: float
+    avg_price: float | None  # None when the broker does not report a cost basis
     realized_pnl: float = 0.0  # quote currency
     last_price: float | None = None
 
