@@ -22,8 +22,12 @@ class RiskLimits(BaseModel):
     max_exposure_per_broker: float = Field(1.0, gt=0, le=10)
     max_gross_leverage: float = Field(1.0, gt=0, le=20)
     max_concurrent_positions: int = Field(10, gt=0, le=500)
+    max_margin_utilization: float = Field(0.8, gt=0, le=1)
     max_correlated_exposure: float = Field(0.5, gt=0, le=10)
     correlation_threshold: float = Field(0.8, gt=0, le=1)
+    # Volatility-adjusted sizing: scale positions down when an instrument's realised annual volatility
+    # exceeds this target. null disables the adjustment.
+    target_volatility: float | None = Field(None, gt=0, le=5)
     # block_new_risk: reject risk-increasing orders only (default, never liquidates)
     # cancel_open_orders: additionally cancel working orders
     # flatten_positions: additionally close positions - must be chosen explicitly by an admin
