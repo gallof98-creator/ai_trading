@@ -157,8 +157,14 @@ def detect_anomalies(bars: pd.DataFrame, window: int = 200, threshold: float = 5
     out = []
     for name, series in measures.items():
         med = series.rolling(window, min_periods=window // 2).median().shift(1)
-        mad = (series - med).abs().rolling(window, min_periods=window // 2).median().shift(1)
-        z = (series - med) / (1.4826 * mad.replace(0, np.nan))
+        deviation = (series - med).abs()
+        mad = deviation.rolling(window, min_periods=window // 2).median().shift(1)
+        # When a measure is normally constant (e.g. no opening gaps in a 24h market) the MAD is zero;
+        # fall back to the mean deviation, with a floor so the score stays finite.
+        mean_dev = deviation.rolling(window, min_periods=window // 2).mean().shift(1)
+        floor = 0.01 * med.abs() if name == "volume" else 1e-4
+        scale = (1.4826 * mad).where(mad > 0, mean_dev).clip(lower=floor)
+        z = (series - med) / scale
         for ts, value in z.iloc[-recent:].items():
             if pd.notna(value) and value > threshold:
                 out.append({"ts": ts.isoformat(), "measure": name, "robust_z": float(value), "value": float(series.loc[ts]),
