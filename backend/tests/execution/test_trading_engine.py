@@ -309,3 +309,12 @@ def test_netting_venue_drops_native_reduce_only_when_strategies_share_an_instrum
     stop_b = h.engine.protections[other.key].stop_order
     assert "reduceOnly" not in h.exchange.orders[stop_b.broker_order_id]["params"]  # net position is flat: the venue would refuse it
     assert stop_b.reduce_only is True  # our own books still treat it as an exit
+
+
+def test_real_money_orders_wait_for_approval_even_in_auto_mode():
+    h = ccxt_harness()
+    h.engine._approval_required = lambda order: True  # what the runtime supplies for non-simulated accounts
+    (order,) = h.signal(1, T0, price=30000.0, stop=3000.0)
+    assert order.status is OrderStatus.PENDING_APPROVAL and h.exchange.create_calls == 0
+    sent = h.engine.resolve_approval(next(iter(h.engine.approvals)), True, "admin@example.com", T0)
+    assert sent.status is OrderStatus.SUBMITTED and h.exchange.create_calls == 1

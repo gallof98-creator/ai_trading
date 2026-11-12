@@ -223,3 +223,38 @@ def test_semi_auto_approval_flow_through_runtime():
     assert order.status.value in ("submitted", "rejected")
     with pytest.raises(RuntimeError_):
         rt.resolve_approval("missing", True, "x")
+
+
+def test_connecting_external_brokers_respects_the_live_gate_and_approval_default():
+    from app.database.models import BrokerAccount
+    from app.security.credentials import store_credentials
+    from app.security.vault import CredentialVault
+
+    db = make_db()
+    key = CredentialVault.generate_key()
+    with db.session() as s:
+        s.add(BrokerAccount(id="binance-test", adapter="ccxt", label="Testnet", is_live=False, currency="USDT", config={"exchange": "binance"}))
+        s.add(BrokerAccount(id="binance-live", adapter="ccxt", label="Live", is_live=True, currency="USDT", config={"exchange": "binance"}))
+        s.flush()
+        store_credentials(s, CredentialVault(key), "binance-test", {"api_key": "k123", "api_secret": "s"}, ["read", "trade"], "admin")
+    rt = TradingRuntime(db, Settings(_env_file=None, credential_key=key), clock=lambda: NOW)
+    rt.start()
+    made = {}
+
+    def factory(options):
+        made["options"] = options
+        made["ex"] = FakeCcxt(api_key=options.get("apiKey"))
+        return made["ex"]
+
+    out = rt.connect_broker("binance-test", "admin", exchange_factory=factory)
+    assert out["capabilities"]["trading_enabled"] and made["ex"].sandbox is True and made["options"]["apiKey"] == "k123"
+    with pytest.raises(RuntimeError_, match="Live trading is disabled"):
+        rt.connect_broker("binance-live", "admin", exchange_factory=factory)
+    with pytest.raises(RuntimeError_, match="already connected"):
+        rt.connect_broker("binance-test", "admin", exchange_factory=factory)
+    from app.domain.models import Order, Side
+    order = Order(broker_id="binance-test", instrument_id=BTC, side=Side.BUY, qty=0.01)
+    assert rt._needs_approval(order) is True  # non-simulated venue: human approval by default
+    assert [b["id"] for b in rt.broker_status()] == ["binance-test"]
+    rt.disconnect_broker("binance-test", "admin")
+    assert rt.broker_status() == []

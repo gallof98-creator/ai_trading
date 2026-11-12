@@ -99,13 +99,15 @@ class TradingEngine:
     def __init__(self, registry: InstrumentRegistry, brokers: BrokerManager, portfolio: PortfolioEngine, risk: RiskEngine,
                  fx: FxRateProvider, limits: Callable[[], RiskLimits], mode: Callable[[], TradingMode], journal: Journal | None = None,
                  base_currency: str = "EUR", retry: RetryPolicy | None = None, sleep: Callable[[float], None] = time.sleep,
-                 realized_vol: Callable[[str], float | None] | None = None) -> None:
+                 realized_vol: Callable[[str], float | None] | None = None,
+                 approval_required: Callable[[Order], bool] | None = None) -> None:
         self.registry, self.brokers, self.portfolio, self.risk, self.fx = registry, brokers, portfolio, risk, fx
         self._limits, self._mode = limits, mode
         self.journal = journal or Journal()
         self.base = base_currency
         self.retry, self._sleep = retry or RetryPolicy(), sleep
         self._realized_vol = realized_vol or (lambda instrument_id: None)
+        self._approval_required = approval_required or (lambda order: False)
         self.orders: dict[str, Order] = {}
         self._client_ids: dict[str, str] = {}  # client order id -> order id (duplicate-order guard)
         self._entry_protection: dict[str, tuple[Key, tuple]] = {}
@@ -367,7 +369,7 @@ class TradingEngine:
         if not decision.approved:
             self._client_ids[order.client_order_id] = order.id
             return self._reject(order, "; ".join(decision.reasons), ts)
-        if mode is TradingMode.SEMI_AUTO:
+        if mode is TradingMode.SEMI_AUTO or self._approval_required(order):
             self._client_ids[order.client_order_id] = order.id
             pending = order.model_copy(update={"status": OrderStatus.PENDING_APPROVAL})
             approval = PendingApproval(self._new_id("a"), pending, intent, protection, ts)

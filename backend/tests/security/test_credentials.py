@@ -57,7 +57,7 @@ def test_secrets_in_broker_config_are_refused(client):
 def test_live_broker_account_requires_deployment_authorization(client):
     admin = login(client)
     assert client.post("/api/brokers", headers=admin, json={**BROKER, "is_live": True}).status_code == 403
-    assert client.post("/api/brokers", headers=admin, json={**BROKER, "id": "p1", "adapter": "paper", "is_live": True}).status_code == 400
+    assert client.post("/api/brokers", headers=admin, json={**BROKER, "id": "p1", "adapter": "paper", "is_live": True}).status_code == 422
     assert client.get("/health").json()["live_trading_authorized"] is False
 
 

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..core.config import Settings
 from ..database.base import Database
 from ..database.models import User
+from ..execution.runtime import TradingRuntime
 from ..security.rate_limit import RateLimiter
 from ..security.roles import Role
 from ..security.tokens import TokenError, TokenService
@@ -27,6 +28,7 @@ class Container:
     tokens: TokenService
     vault: CredentialVault
     login_limiter: RateLimiter
+    runtime: TradingRuntime
 
 
 def get_container(request: Request) -> Container:
@@ -68,3 +70,7 @@ def require_role(minimum: Role) -> Callable[..., User]:
         return user
 
     return dependency
+
+
+def get_runtime(container: Container = Depends(get_container)) -> TradingRuntime:
+    return container.runtime

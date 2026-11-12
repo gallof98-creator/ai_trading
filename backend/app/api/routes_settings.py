@@ -22,17 +22,22 @@ def get_settings(_: User = Depends(require_role(Role.VIEWER)), session: Session 
 
 
 @router.put("/settings", response_model=UserSettings)
-def put_settings(body: UserSettings, admin: User = Depends(require_role(Role.ADMIN)),
-                 session: Session = Depends(get_session)) -> UserSettings:
+def put_settings(body: UserSettings, admin: User = Depends(require_role(Role.ADMIN)), session: Session = Depends(get_session),
+                 container: Container = Depends(get_container)) -> UserSettings:
     before = load_settings(session)
+    if body.base_currency != before.base_currency and container.runtime.brokers.all():
+        raise HTTPException(status.HTTP_409_CONFLICT, "The base currency cannot change while broker accounts exist")
     saved = save_settings(session, body)
     audit.record(session, admin.email, "settings.updated", before=before.model_dump(), after=saved.model_dump())
+    session.flush()
+    with container.runtime.lock:
+        container.runtime.reload_settings(session)
     return saved
 
 
 class BrokerAccountIn(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{1,62}$")
-    adapter: str = Field(pattern=r"^(paper|ccxt|ibkr)$")
+    adapter: str = Field(pattern=r"^(ccxt|ibkr)$")  # paper accounts are created via /api/paper/accounts
     label: str = Field(min_length=1, max_length=128)
     currency: str = Field(pattern=r"^[A-Z]{3,5}$")
     is_live: bool = False
@@ -40,6 +45,7 @@ class BrokerAccountIn(BaseModel):
 
 
 class BrokerAccountOut(BrokerAccountIn):
+    adapter: str
     has_credentials: bool = False
     key_hint: str | None = None
 
@@ -67,8 +73,6 @@ def create_broker(body: BrokerAccountIn, admin: User = Depends(require_role(Role
                   container: Container = Depends(get_container)) -> BrokerAccountOut:
     if session.get(BrokerAccount, body.id):
         raise HTTPException(status.HTTP_409_CONFLICT, "Broker account id already exists")
-    if body.adapter == "paper" and body.is_live:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A paper account cannot be live")
     if body.is_live and not container.settings.live_trading_authorized:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Live trading is not authorized in this deployment")
     if any(s in k.lower() for k in body.config for s in ("secret", "key", "password", "token")):

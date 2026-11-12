@@ -6,11 +6,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from . import __version__
-from .api import routes_auth, routes_settings
+import asyncio
+from contextlib import asynccontextmanager
+
+from .api import routes_auth, routes_research, routes_settings, routes_trading
 from .api.deps import Container, get_container
 from .core.config import Settings, get_settings
 from .core.logging import configure_logging, get_logger
 from .database.base import Database
+from .execution.runtime import TradingRuntime
+from .notifications.service import EmailChannel, TelegramChannel
 from .security import users
 from .security.rate_limit import RateLimiter
 from .security.tokens import TokenService
@@ -25,18 +30,51 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     configure_logging(settings.log_level)
     db = database or Database(settings.database_url)
 
-    app = FastAPI(title="QUANT AI TRADER", version=__version__,
+    channels = []
+    if settings.smtp_host and settings.notify_email_to:
+        channels.append(EmailChannel(settings.smtp_host, settings.smtp_port, settings.smtp_user, settings.smtp_password, settings.notify_email_to))
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        import httpx
+
+        channels.append(TelegramChannel(settings.telegram_bot_token, settings.telegram_chat_id, httpx.post))
+    runtime = TradingRuntime(db, settings, channels=channels)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = None
+        if settings.feed_interval_seconds > 0:
+            async def loop() -> None:
+                while True:
+                    await asyncio.sleep(settings.feed_interval_seconds)
+                    try:
+                        await asyncio.to_thread(runtime.tick)
+                    except Exception as exc:  # keep the loop alive; the next pass retries
+                        log.error("feed_tick_failed", error=str(exc))
+
+            task = asyncio.create_task(loop())
+        yield
+        if task:
+            task.cancel()
+
+    app = FastAPI(title="QUANT AI TRADER", version=__version__, lifespan=lifespan,
                   description="Multi-asset algorithmic trading and research platform. Simulated results are not a guarantee of future returns.")
     app.state.container = Container(
         settings=settings, db=db,
         tokens=TokenService(settings.jwt_secret, settings.jwt_ttl_minutes),
         vault=CredentialVault(settings.credential_key),
         login_limiter=RateLimiter(settings.login_rate_limit_per_minute),
+        runtime=runtime,
     )
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True,
-                       allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type", "X-Requested-With"])
-    app.include_router(routes_auth.router)
-    app.include_router(routes_settings.router)
+                       allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type", "X-Requested-With"])
+    for module in (routes_auth, routes_settings, routes_trading, routes_research):
+        app.include_router(module.router)
+    try:
+        runtime.start()
+        if settings.market_data_exchange:
+            runtime.connect_data_exchange(settings.market_data_exchange)
+    except Exception as exc:  # e.g. migrations not applied yet; /health reports it instead of crash-looping
+        log.error("runtime_start_failed", error=str(exc))
 
     if settings.admin_email and settings.admin_password:
         try:
@@ -55,11 +93,12 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
         except Exception:
             database_ok = False
         return {
-            "status": "ok" if database_ok else "degraded",
+            "status": "ok" if database_ok and runtime.started else "degraded",
             "version": __version__,
             "database": database_ok,
             "environment": settings.environment,
             "live_trading_authorized": settings.live_trading_authorized,
+            "runtime_started": runtime.started,
         }
 
     return app

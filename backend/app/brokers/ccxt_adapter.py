@@ -94,6 +94,22 @@ class CcxtAdapter(BrokerAdapter):
             if inst.asset_class is AssetClass.CRYPTO and inst.symbol in self.exchange.markets and not self.registry.is_mapped(self.broker_id, inst.id):
                 self.registry.map_symbol(self.broker_id, inst.id, inst.symbol)
 
+    def connect_data_only(self) -> None:
+        """Public market data from the real exchange endpoints, with trading permanently disabled.
+        (The sandbox/testnet of an exchange serves test prices, which are useless as market data.)"""
+        if getattr(self.exchange, "apiKey", None):
+            raise BrokerError("A data-only connection must not carry API keys")
+        self.exchange.enableRateLimit = True
+        self.exchange.load_markets()
+        has = self.exchange.has
+        self._caps = BrokerCapabilities(
+            asset_classes=frozenset({AssetClass.CRYPTO}), order_types=frozenset(), supports_short=False, supports_reduce_only=False,
+            supports_historical_data=bool(has.get("fetchOHLCV")), supports_bid_ask=bool(has.get("fetchTicker")),
+            timeframes=frozenset(set(self.exchange.timeframes or {}) & set(TIMEFRAMES)), is_simulated=False, trading_enabled=False)
+        for inst in self.registry.all():
+            if inst.asset_class is AssetClass.CRYPTO and inst.symbol in self.exchange.markets and not self.registry.is_mapped(self.broker_id, inst.id):
+                self.registry.map_symbol(self.broker_id, inst.id, inst.symbol)
+
     def _refuse_withdrawal_keys(self) -> None:
         """Least privilege: where the exchange exposes key permissions (Binance), refuse keys that can withdraw."""
         probe = getattr(self.exchange, "sapiGetAccountApiRestrictions", None)

@@ -47,6 +47,8 @@ class UserSettings(BaseModel):
     initial_paper_capital: float | None = Field(None, gt=0)
     trading_mode: Literal["manual", "semi_auto", "auto"] = "manual"
     fx_conversion_cost_bps: float = Field(5.0, ge=0, le=500)
+    # Orders for real-money accounts wait for a human approval even in automatic mode, unless this is switched off.
+    live_orders_require_approval: bool = True
     risk: RiskLimits = RiskLimits()
     notifications: NotificationSettings = NotificationSettings()
 

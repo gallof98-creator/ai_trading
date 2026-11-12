@@ -109,7 +109,8 @@ class TradingRuntime:
         self.portfolio = PortfolioEngine(self.registry, self.brokers, self.fx, self.user_settings.base_currency)
         self.risk = RiskEngine(lambda: self.user_settings.risk, self.journal.risk_event)
         self.engine = TradingEngine(self.registry, self.brokers, self.portfolio, self.risk, self.fx, lambda: self.user_settings.risk,
-                                    lambda: TradingMode(self.user_settings.trading_mode), self.journal, self.user_settings.base_currency)
+                                    lambda: TradingMode(self.user_settings.trading_mode), self.journal, self.user_settings.base_currency,
+                                    realized_vol=self._realized_vol, approval_required=self._needs_approval)
         self.signals = SignalEngine()
         self.store = BarStore()
         self.broker_monitor = BrokerMonitor(self.brokers, self.journal.alert)
@@ -121,6 +122,26 @@ class TradingRuntime:
         self.feed_status: dict[str, str] = {}
         self.replays: dict[str, dict] = {}
         self.started = False
+
+    def _needs_approval(self, order: Order) -> bool:
+        """Real-money orders wait for a human unless the user explicitly switched that off."""
+        if not self.user_settings.live_orders_require_approval:
+            return False
+        try:
+            return not self.brokers.get(order.broker_id).capabilities.is_simulated
+        except BrokerError:
+            return True
+
+    def _realized_vol(self, instrument_id: str) -> float | None:
+        """Annualised volatility of the instrument's recent bars, for volatility-adjusted sizing."""
+        tf = self._exec_tf(instrument_id)
+        frame = self.bars.get((instrument_id, tf)) if tf else None
+        if frame is None or len(frame) < 60:
+            return None
+        import numpy as np
+
+        rets = np.log(frame["close"]).diff().iloc[-250:].dropna()
+        return float(rets.std(ddof=1) * np.sqrt(pd.Timedelta(days=365) / tf_delta(tf)))
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -181,9 +202,15 @@ class TradingRuntime:
     def add_fx_rate(self, base: str, quote: str, rate: float, source: str, actor: str, ts: datetime | None = None) -> None:
         ts = ts or self.clock()
         with self.lock, self.db.session() as session:
-            self.fx.add_rate(base, quote, ts, rate, source)
+            existing = session.scalar(select(FxRate).where(FxRate.base == base, FxRate.quote == quote, FxRate.source == source, FxRate.ts == ts))
+            if existing is not None:
+                if abs(float(existing.rate) - rate) > 1e-12:
+                    raise RuntimeError_(f"A different {base}/{quote} rate from '{source}' is already recorded for {ts.isoformat()}")
+                return  # identical observation already stored
             session.add(FxRate(base=base, quote=quote, ts=ts, rate=rate, source=source))
             audit.record(session, actor, "fx.rate_added", base=base, quote=quote, rate=rate, source=source, ts=ts.isoformat())
+            session.flush()  # the database accepts it before the in-memory provider learns it
+            self.fx.add_rate(base, quote, ts, rate, source)
 
     def fx_rates(self) -> list[dict]:
         now, out = self.clock(), []
@@ -248,6 +275,85 @@ class TradingRuntime:
             with self.db.session() as session:
                 audit.record(session, actor, "paper.account_reset", account_id=account_id, capital=capital)
             self.persist()
+
+    def connect_broker(self, account_id: str, actor: str, exchange_factory: Callable | None = None, ib=None) -> dict:
+        """Connect a CCXT or IBKR account. Without live authorization: testnet / paper gateway only."""
+        from ..brokers.ccxt_adapter import CcxtAdapter
+        from ..brokers.ibkr_adapter import IbkrAdapter
+        from ..database.models import BrokerSymbol
+        from ..live_trading.gate import authorize_live_trading
+        from ..security.credentials import load_credentials
+        from ..security.vault import CredentialVault, VaultError
+
+        with self.lock, self.db.session() as session:
+            row = session.get(BrokerAccount, account_id)
+            if row is None or row.adapter == "paper":
+                raise RuntimeError_("Unknown external broker account")
+            if any(a.broker_id == account_id for a in self.brokers.all()):
+                raise RuntimeError_(f"{account_id} is already connected")
+            try:
+                authorization = authorize_live_trading(self.settings) if row.is_live else None
+            except PermissionError as exc:
+                raise RuntimeError_(str(exc)) from None
+            try:
+                creds = load_credentials(session, CredentialVault(self.settings.credential_key), account_id)
+            except LookupError:
+                creds = {}
+            except VaultError as exc:
+                raise RuntimeError_(str(exc)) from None
+            for sym in session.scalars(select(BrokerSymbol).where(BrokerSymbol.broker_account_id == account_id)):
+                self.registry.map_symbol(account_id, sym.instrument_id, sym.broker_symbol)
+            if row.adapter == "ccxt":
+                import ccxt
+
+                exchange_id = row.config.get("exchange", "")
+                if exchange_factory is None and not hasattr(ccxt, exchange_id):
+                    raise RuntimeError_(f"Unknown CCXT exchange {exchange_id!r}; set config.exchange (e.g. binance, bybit)")
+                options = {"apiKey": creds.get("api_key"), "secret": creds.get("api_secret"), "password": creds.get("passphrase"),
+                           "options": {"defaultType": row.config.get("market_type", "spot")}}
+                exchange = (exchange_factory or getattr(ccxt, exchange_id))({k: v for k, v in options.items() if v})
+                adapter: BrokerAdapter = CcxtAdapter(account_id, self.registry, exchange, row.currency, authorization)
+            else:
+                adapter = IbkrAdapter(account_id, self.registry, ib=ib, host=row.config.get("host", "127.0.0.1"), port=int(row.config.get("port", 7497)),
+                                      client_id=int(row.config.get("client_id", 1)), account_currency=row.currency, authorization=authorization)
+            try:
+                adapter.connect()
+            except Exception as exc:  # network, credentials, gateway not running
+                raise RuntimeError_(f"Could not connect {account_id}: {exc}") from None
+            self.brokers.register(adapter)
+            audit.record(session, actor, "broker.connected", broker_account_id=account_id, is_live=row.is_live,
+                         trading_enabled=adapter.capabilities.trading_enabled)
+            return {"id": account_id, "connected": True, "capabilities": adapter.capabilities.to_dict()}
+
+    def connect_data_exchange(self, exchange_id: str) -> None:
+        """Public (keyless) CCXT connection used only for market data; it can never place orders."""
+        import ccxt
+
+        from ..brokers.ccxt_adapter import CcxtAdapter
+
+        if not hasattr(ccxt, exchange_id):
+            log.error("unknown_market_data_exchange", exchange=exchange_id)
+            return
+        adapter = CcxtAdapter(f"data-{exchange_id}", self.registry, getattr(ccxt, exchange_id)())
+        try:
+            adapter.exchange.enableRateLimit = True
+            adapter.exchange.load_markets()
+            adapter.connect_data_only()
+            self.data_adapter = adapter
+        except Exception as exc:
+            log.error("market_data_exchange_unavailable", exchange=exchange_id, error=str(exc))
+
+    def disconnect_broker(self, account_id: str, actor: str) -> None:
+        with self.lock:
+            adapter = self.brokers.get(account_id)
+            if isinstance(adapter, SimulatedBroker):
+                raise RuntimeError_("Paper accounts are always available")
+            if any(k[0] == account_id for k in self.portfolio.slices):
+                raise RuntimeError_("This account holds open positions tracked by the platform; close them before disconnecting")
+            adapter.disconnect()
+            self.brokers.remove(account_id)
+            with self.db.session() as session:
+                audit.record(session, actor, "broker.disconnected", broker_account_id=account_id)
 
     def broker_status(self) -> list[dict]:
         with self.lock:

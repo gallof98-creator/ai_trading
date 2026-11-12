@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     admin_email: str = ""
     admin_password: str = ""
 
+    model_dir: str = "./models"  # trained model artefacts
+
     # Market data and FX
     market_data_exchange: str = ""  # CCXT exchange id used for public crypto data, e.g. "binance"; empty = none
     feed_interval_seconds: int = Field(0, ge=0)  # 0 disables the background market-data loop
