@@ -270,3 +270,65 @@ class VolumeBreakout(Strategy):
         confirmed = df.volume > p.volume_multiple * ind.sma(df.volume, p.volume_period).shift(1)
         return ind.latch((c > ind.prior_high(df, p.entry)) & confirmed, c < ind.prior_low(df, p.exit),
                          (c < ind.prior_low(df, p.entry)) & confirmed, c > ind.prior_high(df, p.exit))
+
+
+# ------------------------------------------------------------------ multi-timeframe
+@register
+class MultiTimeframeTrendFilter(Strategy):
+    name, category = "mtf_trend_filter", "multi_timeframe"
+    description = ("Runs any library strategy on the chart timeframe but only keeps positions that agree with the EMA trend of a "
+                   "higher timeframe. Only COMPLETED higher-timeframe bars are used.")
+
+    class Params(StrategyParams):
+        base: str = Field("donchian_breakout", description="Strategy that generates entries on the chart timeframe")
+        base_params: dict = Field(default_factory=dict)
+        filter_timeframe: str = Field("4h", description="Higher timeframe used for the trend filter")
+        filter_fast: int = Field(10, ge=2, le=200)
+        filter_slow: int = Field(30, ge=3, le=500)
+
+        @model_validator(mode="after")
+        def _check(self):
+            from ..market_data.timeframes import TIMEFRAMES
+            from .registry import create_strategy
+
+            if self.filter_timeframe not in TIMEFRAMES:
+                raise ValueError(f"unknown timeframe {self.filter_timeframe}")
+            if self.filter_fast >= self.filter_slow:
+                raise ValueError("filter_fast must be smaller than filter_slow")
+            if self.base == "mtf_trend_filter":
+                raise ValueError("base strategy cannot be the filter itself")
+            try:
+                create_strategy(self.base, self.base_params)  # validates the nested configuration
+            except KeyError as exc:
+                raise ValueError(str(exc)) from None
+            return self
+
+    def _chart_timeframe(self, df: pd.DataFrame) -> str:
+        from ..market_data.timeframes import TIMEFRAMES
+
+        step = pd.Series(df.index).diff().min()
+        for tf, delta in TIMEFRAMES.items():
+            if delta == step:
+                return tf
+        raise ValueError(f"Cannot determine the chart timeframe from bar spacing {step}")
+
+    def warmup(self) -> int:
+        from ..market_data.timeframes import tf_delta
+
+        return 3 * self.params.filter_slow * int(tf_delta(self.params.filter_timeframe) / pd.Timedelta(minutes=1)) + 5
+
+    def target(self, df):
+        from ..market_data.timeframes import align_higher_timeframe, resample, tf_delta
+        from .registry import create_strategy
+
+        p = self.params
+        base = pd.Series(np.asarray(create_strategy(p.base, p.base_params).target(df)), index=df.index).fillna(0)
+        if len(df) < 2:
+            return base * 0
+        tf = self._chart_timeframe(df)
+        if tf_delta(p.filter_timeframe) <= tf_delta(tf):
+            raise ValueError("filter_timeframe must be higher than the chart timeframe")
+        htf = resample(df, tf, p.filter_timeframe)
+        trend = sign(ind.ema(htf.close, p.filter_fast) - ind.ema(htf.close, p.filter_slow)).rename("trend").to_frame()
+        aligned = align_higher_timeframe(df[["close"]], trend, tf, p.filter_timeframe, prefix="htf_")["htf_trend"]
+        return base.where(base == aligned, 0)

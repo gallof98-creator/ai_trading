@@ -203,7 +203,7 @@ class CcxtAdapter(BrokerAdapter):
         if not self.capabilities.trading_enabled:
             raise UnsupportedOperation("trading is not enabled on this connection")
         params: dict = {"clientOrderId": order.client_order_id}
-        if order.reduce_only:
+        if order.reduce_only and self.capabilities.supports_reduce_only:
             params["reduceOnly"] = True
         if order.type in (OrderType.STOP, OrderType.STOP_LIMIT):
             params["triggerPrice"] = order.stop_price

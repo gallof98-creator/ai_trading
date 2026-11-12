@@ -83,8 +83,12 @@ class Instrument(BaseModel):
 
     def round_qty(self, qty: float) -> float:
         """Round a quantity DOWN to the lot size (never round a risk-sized order up)."""
-        steps = int(abs(qty) / self.lot_size + 1e-9)
+        steps = int(abs(qty) / self.lot_size + 1e-6)  # tolerance for binary floating point (e.g. 0.3 / 0.1)
         return round(steps * self.lot_size, 12) * (1 if qty >= 0 else -1)
+
+    def is_lot_multiple(self, qty: float) -> bool:
+        steps = abs(qty) / self.lot_size
+        return abs(steps - round(steps)) < 1e-6
 
     def round_price(self, price: float) -> float:
         return round(round(price / self.tick_size) * self.tick_size, 12)
@@ -145,6 +149,8 @@ class Order(BaseModel):
     reduce_only: bool = False
     is_simulated: bool = True  # False only for orders accepted by a real broker
     reason: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
     def model_post_init(self, _ctx) -> None:
         if not self.client_order_id:
@@ -153,6 +159,10 @@ class Order(BaseModel):
     @property
     def remaining(self) -> float:
         return self.qty - self.filled_qty
+
+    @property
+    def is_simulated_venue(self) -> bool:
+        return self.is_simulated
 
     @property
     def is_open(self) -> bool:
@@ -178,8 +188,6 @@ class Quote(BaseModel):
     ask: float | None = None
     last: float | None = None
     kind: str = "realtime"  # realtime | delayed | simulated
-    created_at: datetime = Field(default_factory=utcnow)
-    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class Position(BaseModel):

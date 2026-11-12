@@ -68,9 +68,9 @@ class FakeCcxt:
 
     def fill(self, oid, qty, price, fee=0.0):
         o = self.orders[oid]
+        o["average"] = ((o["average"] or 0.0) * o["filled"] + price * qty) / (o["filled"] + qty)  # cumulative average, as exchanges report
         o["filled"] += qty
-        o["average"] = price
-        o["fee"] = {"cost": fee}
+        o["fee"] = {"cost": ((o["fee"] or {}).get("cost") or 0.0) + fee}
         if o["filled"] >= o["amount"]:
             o["status"] = "closed"
 

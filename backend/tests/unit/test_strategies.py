@@ -82,8 +82,8 @@ def test_library_contains_the_specified_strategies():
     expected = {"ema_crossover", "sma_crossover", "macd", "adx_trend", "rsi_momentum", "rate_of_change", "momentum_breakout",
                 "bollinger_reversion", "rsi_reversion", "zscore_reversion", "atr_breakout", "volatility_expansion",
                 "volatility_contraction", "donchian_breakout", "support_resistance_breakout", "volume_breakout"}
-    assert set(NAMES) == expected
-    assert {s["category"] for s in list_strategies()} == {"trend", "momentum", "mean_reversion", "volatility", "breakout"}
+    assert set(NAMES) == expected | {"mtf_trend_filter"}
+    assert {s["category"] for s in list_strategies()} == {"trend", "momentum", "mean_reversion", "volatility", "breakout", "multi_timeframe"}
     assert all(s["description"] and s["versions"] == ["1.0.0"] and "properties" in s["params_schema"] for s in list_strategies())
 
 
@@ -184,3 +184,22 @@ def test_signal_engine_emits_at_bar_close_without_invented_confidence():
 def test_abstract_contract():
     with pytest.raises(TypeError):
         Strategy()
+
+
+def test_multi_timeframe_filter_only_keeps_trades_aligned_with_completed_higher_timeframe_trend():
+    from app.market_data.timeframes import align_higher_timeframe, resample
+
+    s = create_strategy("mtf_trend_filter", {"base": "ema_crossover", "base_params": {"fast": 5, "slow": 20}, "filter_timeframe": "4h"})
+    base = create_strategy("ema_crossover", {"fast": 5, "slow": 20}).generate(DATA).target
+    filtered = s.generate(DATA).target
+    assert filtered.abs().sum() > 0 and (filtered.abs() <= base.abs()).all()
+    htf = resample(DATA, "1h", "4h")
+    trend = np.sign(ind.ema(htf.close, 10) - ind.ema(htf.close, 30)).rename("trend").to_frame()
+    aligned = align_higher_timeframe(DATA[["close"]], trend, "1h", "4h", prefix="h_")["h_trend"]
+    held = filtered != 0
+    assert (filtered[held] == aligned[held]).all()
+    for bad in ({"filter_timeframe": "7h"}, {"base": "nope"}, {"base": "mtf_trend_filter"}, {"base_params": {"fast": 99, "slow": 3}}):
+        with pytest.raises(ValueError):
+            create_strategy("mtf_trend_filter", bad)
+    with pytest.raises(ValueError, match="higher than the chart"):
+        create_strategy("mtf_trend_filter", {"filter_timeframe": "1h"}).generate(DATA)

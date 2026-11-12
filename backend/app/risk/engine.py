@@ -151,6 +151,21 @@ class RiskEngine:
                        side=order.side.value, qty=order.qty, reasons=reasons)
         return RiskDecision(not reasons, reasons, risk_increasing=True)
 
+    def headroom(self, broker_id: str, instrument, strategy: str | None, state: PortfolioState) -> float:
+        """Largest additional notional (base currency) a new position in `instrument` may add without
+        breaching any exposure limit. Used by position sizing; `evaluate` remains the final gate."""
+        limits, eq = self._limits(), state.equity
+        if eq <= 0:
+            return 0.0
+        room = [
+            limits.max_exposure_per_asset * eq - abs(state.net_for(broker_id, instrument.id)),
+            limits.max_exposure_per_strategy * eq - sum(abs(e.signed_notional) for e in state.exposures if e.strategy == strategy),
+            limits.max_exposure_per_broker * eq - sum(abs(e.signed_notional) for e in state.exposures if e.broker_id == broker_id),
+            limits.max_gross_leverage * eq - state.gross_exposure,
+            (limits.max_margin_utilization * eq - state.margin_used) / instrument.margin_rate,
+        ]
+        return max(0.0, min(room)) * (1 - 1e-6)
+
     def status(self) -> dict:
         return {"halted": self.halted, "kill_switch": self.kill_switch_reason, "breakers": dict(self.breakers),
                 "emergency_policy": self._limits().emergency_policy}

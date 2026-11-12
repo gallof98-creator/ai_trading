@@ -42,12 +42,15 @@ class BrokerCapabilities:
     asset_classes: frozenset[AssetClass]
     order_types: frozenset[OrderType]
     supports_short: bool
-    supports_reduce_only: bool
+    supports_reduce_only: bool  # venue enforces reduce-only natively; otherwise the flag is advisory for our own books
     supports_historical_data: bool
     supports_bid_ask: bool
     timeframes: frozenset[str]
     is_simulated: bool
     trading_enabled: bool = True  # False => market data only
+    # True when the venue keeps a separate position per strategy tag (hedging-style sub-books).
+    # Netting venues (most real brokers) keep one net position per instrument.
+    per_strategy_positions: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +58,7 @@ class BrokerCapabilities:
             "supports_short": self.supports_short, "supports_reduce_only": self.supports_reduce_only,
             "supports_historical_data": self.supports_historical_data, "supports_bid_ask": self.supports_bid_ask,
             "timeframes": sorted(self.timeframes), "is_simulated": self.is_simulated, "trading_enabled": self.trading_enabled,
+            "per_strategy_positions": self.per_strategy_positions,
         }
 
 
@@ -138,13 +142,11 @@ class BrokerAdapter(ABC):
             reasons.append("limit price missing")
         if order.type in (OrderType.STOP, OrderType.STOP_LIMIT) and order.stop_price is None:
             reasons.append("stop price missing")
-        if order.reduce_only and not caps.supports_reduce_only:
-            reasons.append("reduce-only orders not supported")
         if order.side is Side.SELL and not order.reduce_only and not (caps.supports_short and inst.shortable):
             reasons.append("short selling not supported for this instrument/broker")
         if inst.min_qty and order.qty < inst.min_qty:
             reasons.append(f"quantity {order.qty} below minimum {inst.min_qty}")
-        if abs(inst.round_qty(order.qty) - order.qty) > 1e-9:
+        if not inst.is_lot_multiple(order.qty):
             reasons.append(f"quantity {order.qty} is not a multiple of lot size {inst.lot_size}")
         if not reasons:
             reasons.extend(self.instrument_reasons(order))
