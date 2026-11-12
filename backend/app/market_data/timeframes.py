@@ -64,3 +64,8 @@ def align_higher_timeframe(ltf: pd.DataFrame, htf: pd.DataFrame, ltf_tf: str, ht
     merged = merged.set_index("_ts").drop(columns="_avail")
     merged.index.name = ltf.index.name
     return ltf.join(merged)
+
+
+def epoch_ns(index: pd.DatetimeIndex):
+    """Epoch nanoseconds regardless of the index's storage resolution (pandas may use s/ms/us/ns)."""
+    return index.as_unit("ns").asi8

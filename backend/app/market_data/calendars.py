@@ -19,6 +19,14 @@ class SessionCalendar:
     weekdays: frozenset[int] = frozenset(range(7))
     holidays: frozenset[date] = field(default_factory=frozenset)
 
+    def is_trading_day(self, day: date) -> bool:
+        """Whether any regular session takes place on this local calendar date."""
+        if day in self.holidays:
+            return False
+        if self.name in ("FX", "CME"):
+            return day.weekday() < 5
+        return day.weekday() in self.weekdays
+
     def is_open(self, ts: datetime) -> bool:
         if ts.tzinfo is None:
             raise ValueError("Timestamp must be timezone-aware")

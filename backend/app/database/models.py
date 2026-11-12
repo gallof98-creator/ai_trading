@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, Float, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -84,6 +84,22 @@ class FxRate(Base):
     rate: Mapped[Decimal] = mapped_column(Numeric(20, 10))
     source: Mapped[str] = mapped_column(String(32))
     __table_args__ = (UniqueConstraint("base", "quote", "ts", "source"), Index("ix_fx_pair_ts", "base", "quote", "ts"))
+
+
+class BarRow(Base):
+    """OHLCV history. Timestamps are epoch milliseconds (bar open, UTC) to avoid any timezone ambiguity."""
+
+    __tablename__ = "bars"
+    instrument_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(8), primary_key=True)
+    ts_ms: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    open: Mapped[float] = mapped_column(Float)
+    high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float)
+    close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+    kind: Mapped[str] = mapped_column(String(12))  # realtime | delayed | historical | simulated
+    source: Mapped[str] = mapped_column(String(64))
 
 
 class StrategyDeployment(Base):
