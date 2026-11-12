@@ -25,15 +25,30 @@ Honest status of every feature, including what is **not** verified: [docs/roadma
 
 ## Quick start (Docker Compose)
 
+You need [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
+Open a terminal (Windows: PowerShell; macOS: Terminal) and run these four commands one at a time:
+
 ```bash
-cp .env.example .env
+git clone https://github.com/gallof98-creator/ai_trading
 ```
 
-Fill in the four empty secrets in `.env` (the commands to generate them are in the file), then:
+```bash
+cd ai_trading
+```
+
+```bash
+docker run --rm -v "${PWD}:/w" -w /w python:3.12-slim python infrastructure/scripts/make_env.py
+```
+
+That creates the `.env` configuration file with fresh secrets and prints your sign-in email and
+password (write the password down; pass your own email as a last argument if you like). Then:
 
 ```bash
 docker compose up -d --build
 ```
+
+The first build takes several minutes. To stop everything later: `docker compose down`.
+(To write `.env` by hand instead, copy `.env.example` and follow the comments in it.)
 
 - Dashboard: http://localhost:3000 — sign in with `QAT_ADMIN_EMAIL` / `QAT_ADMIN_PASSWORD`
 - API and interactive API reference: http://localhost:8000/docs
