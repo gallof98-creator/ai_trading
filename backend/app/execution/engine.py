@@ -315,8 +315,11 @@ class TradingEngine:
             target = 0
         if target == direction:
             return []
+        waiting = [a for a in self.approvals.values() if (a.order.broker_id, a.order.instrument_id, a.order.strategy) == key]
+        if signal.action.value == "HOLD" and (direction == 0 or waiting):
+            return []  # no fresh decision on this bar: keep whatever is already pending
         # A new signal supersedes approvals still waiting for the same slice.
-        for approval in [a for a in self.approvals.values() if (a.order.broker_id, a.order.instrument_id, a.order.strategy) == key]:
+        for approval in waiting:
             self.resolve_approval(approval.id, False, "system:superseded", ts)
 
         bar_tag = signal.meta.get("bar_open", ts.isoformat())
@@ -439,6 +442,37 @@ class TradingEngine:
             return order
         shared = any(k[0] == order.broker_id and k[1] == order.instrument_id and k[2] != order.strategy for k in self.portfolio.slices)
         return order.model_copy(update={"reduce_only": False}) if shared else order
+
+    # ------------------------------------------------------------------ persistence
+    def to_state(self) -> dict:
+        """Everything needed to resume after a restart without losing track of orders, stops or approvals."""
+        keep = {o.id for o in self.orders.values() if o.is_open or o.status is OrderStatus.PENDING_APPROVAL}
+        keep |= set(list(self.orders)[-1000:])
+        return {
+            "n": self._n, "orders": [self.orders[i].model_dump(mode="json") for i in self.orders if i in keep],
+            "client_ids": dict(list(self._client_ids.items())[-20000:]),
+            "entry_protection": [[oid, list(key), list(p)] for oid, (key, p) in self._entry_protection.items()],
+            "protections": [[list(key), p.direction, p.stop_distance, p.take_profit_distance, p.trailing_distance, p.stop_price,
+                             p.stop_order.id if p.stop_order else None, p.target_order.id if p.target_order else None, p.soft_stop]
+                            for key, p in self.protections.items()],
+            "approvals": [[a.id, a.order.model_dump(mode="json"), a.intent.price, a.intent.fx_rate, a.intent.stop_distance,
+                           list(a.protection) if a.protection else None, a.created_at.isoformat()] for a in self.approvals.values()],
+        }
+
+    def load_state(self, state: dict) -> None:
+        self._n = state["n"]
+        self.orders = {o["id"]: Order.model_validate(o) for o in state["orders"]}
+        self._client_ids = dict(state["client_ids"])
+        self._entry_protection = {oid: (tuple(key), tuple(p)) for oid, key, p in state["entry_protection"]}
+        self.protections = {}
+        for key, direction, stop, target, trailing, stop_price, stop_id, target_id, soft in state["protections"]:
+            self.protections[tuple(key)] = Protection(direction, stop, target, trailing, stop_price, self.orders.get(stop_id),
+                                                      self.orders.get(target_id), soft)
+        self.approvals = {}
+        for aid, order, price, fx_rate, stop_distance, protection, created in state["approvals"]:
+            o = Order.model_validate(order)
+            intent = OrderIntent(o, self.registry.get(o.instrument_id), price, fx_rate, stop_distance)
+            self.approvals[aid] = PendingApproval(aid, o, intent, tuple(protection) if protection else None, datetime.fromisoformat(created))
 
     # ------------------------------------------------------------------ emergency handling
     def engage_kill_switch(self, reason: str, actor: str, ts: datetime) -> None:

@@ -33,6 +33,22 @@ class Settings(BaseSettings):
     admin_email: str = ""
     admin_password: str = ""
 
+    # Market data and FX
+    market_data_exchange: str = ""  # CCXT exchange id used for public crypto data, e.g. "binance"; empty = none
+    feed_interval_seconds: int = Field(0, ge=0)  # 0 disables the background market-data loop
+    # MODELLING ASSUMPTION: currencies treated as trading 1:1 with another one for valuation.
+    fx_pegs: dict[str, str] = {"USDT": "USD", "USDC": "USD"}
+    fx_max_age_days: int = Field(5, gt=0)
+
+    # Optional external notification channels
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    notify_email_to: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Live trading is OFF unless both values are set explicitly in the live deployment.
     live_trading_enabled: bool = False
     live_trading_confirmation: str = ""

@@ -34,6 +34,13 @@ class RiskLimits(BaseModel):
     emergency_policy: Literal["block_new_risk", "cancel_open_orders", "flatten_positions"] = "block_new_risk"
 
 
+class NotificationSettings(BaseModel):
+    # In-app notifications are always recorded. External channels (email, Telegram) receive
+    # notifications at or above this severity, except for muted categories.
+    external_min_severity: Literal["info", "warning", "critical"] = "warning"
+    muted_categories: list[str] = Field(default_factory=list, max_length=50)
+
+
 class UserSettings(BaseModel):
     base_currency: str = Field("EUR", pattern=r"^[A-Z]{3,5}$")
     # No default on purpose: paper accounts cannot start until the user sets this.
@@ -41,6 +48,7 @@ class UserSettings(BaseModel):
     trading_mode: Literal["manual", "semi_auto", "auto"] = "manual"
     fx_conversion_cost_bps: float = Field(5.0, ge=0, le=500)
     risk: RiskLimits = RiskLimits()
+    notifications: NotificationSettings = NotificationSettings()
 
 
 def load_settings(session: Session) -> UserSettings:

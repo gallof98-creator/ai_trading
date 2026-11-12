@@ -181,6 +181,18 @@ class BacktestRun(Base):
     status: Mapped[str] = mapped_column(String(16))
 
 
+class ResearchItem(Base):
+    """AI research artefacts: reports, proposed strategy configurations, trained model records."""
+
+    __tablename__ = "research_items"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # report | proposal | model
+    status: Mapped[str] = mapped_column(String(16), default="new")
+    created_at: Mapped[datetime] = mapped_column(TS, default=_now, index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    payload: Mapped[dict] = mapped_column(JSON)
+
+
 class AuditEntry(Base):
     """Append-only audit trail. Never updated or deleted by application code."""
 

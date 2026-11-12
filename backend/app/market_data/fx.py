@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 
+# Rates entered as an explicit, user-stated assumption (backtests, simulated replays). They never
+# expire, and results that use them are flagged.
+STATIC_SOURCE = "static-assumption"
+
+
 class FxRateUnavailable(LookupError):
     pass
 
@@ -54,7 +59,7 @@ class FxRateProvider:
             i = bisect.bisect_right(times, ts) - 1
             if i < 0:
                 continue
-            if ts - times[i] > self.max_age:
+            if ts - times[i] > self.max_age and self._rows[key][i][1] != STATIC_SOURCE:
                 raise FxRateUnavailable(f"Newest {a}/{b} rate at {ts.isoformat()} is from {times[i].isoformat()} (older than {self.max_age})")
             rate, source = self._rows[key][i]
             return FxQuote(1 / rate if invert else rate, times[i], source)

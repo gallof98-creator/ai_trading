@@ -193,6 +193,29 @@ class PortfolioEngine:
         self.discrepancies, self.reconciled = problems, not problems
         return problems
 
+    # ------------------------------------------------------------------ persistence
+    def to_state(self, curve_tail: int = 5000) -> dict:
+        return {
+            "slices": [[*k, s.qty, s.avg_price, s.entry_ts.isoformat(), s.entry_commission] for k, s in self.slices.items()],
+            "trades": [t.to_dict() for t in self.trades[-5000:]], "prices": self.prices,
+            "equity_curve": [[t.isoformat(), e] for t, e in self.equity_curve[-curve_tail:]],
+            "exposure_curve": self.exposure_curve[-curve_tail:], "day_start_equity": self.day_start_equity, "peak_equity": self.peak_equity,
+            "day": self._day.isoformat() if self._day else None, "reconciled": self.reconciled, "discrepancies": self.discrepancies,
+        }
+
+    def load_state(self, state: dict) -> None:
+        from datetime import date
+
+        self.slices = {(b, i, st): Slice(q, a, datetime.fromisoformat(ts), c) for b, i, st, q, a, ts, c in state["slices"]}
+        self.trades = [ClosedTrade(**{**t, "entry_ts": datetime.fromisoformat(t["entry_ts"]), "exit_ts": datetime.fromisoformat(t["exit_ts"])})
+                       for t in state["trades"]]
+        self.prices = dict(state["prices"])
+        self.equity_curve = [(datetime.fromisoformat(t), e) for t, e in state["equity_curve"]]
+        self.exposure_curve = list(state["exposure_curve"])
+        self.day_start_equity, self.peak_equity = state["day_start_equity"], state["peak_equity"]
+        self._day = date.fromisoformat(state["day"]) if state["day"] else None
+        self.reconciled, self.discrepancies = state["reconciled"], list(state["discrepancies"])
+
     # ------------------------------------------------------------------ analytics
     @staticmethod
     def _group(exposures: list[Exposure], attr: str, equity: float) -> dict[str, dict]:

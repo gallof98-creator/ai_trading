@@ -166,6 +166,14 @@ class RiskEngine:
         ]
         return max(0.0, min(room)) * (1 - 1e-6)
 
+    def to_state(self) -> dict:
+        return {"kill_switch_reason": self.kill_switch_reason, "breakers": self.breakers,
+                "daily_breaker_day": self._daily_breaker_day.isoformat() if self._daily_breaker_day else None}
+
+    def load_state(self, state: dict) -> None:
+        self.kill_switch_reason, self.breakers = state["kill_switch_reason"], dict(state["breakers"])
+        self._daily_breaker_day = date.fromisoformat(state["daily_breaker_day"]) if state["daily_breaker_day"] else None
+
     def status(self) -> dict:
         return {"halted": self.halted, "kill_switch": self.kill_switch_reason, "breakers": dict(self.breakers),
                 "emergency_policy": self._limits().emergency_policy}
