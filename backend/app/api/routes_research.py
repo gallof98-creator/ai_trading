@@ -118,6 +118,8 @@ def generate_simulated(body: SimulatedIn, user: User = Depends(trader), session:
         rt.registry.get(body.instrument_id)
         if rt.kinds.get(body.instrument_id) not in (None, "simulated"):
             raise ValueError("This instrument is receiving market data in the trading runtime; simulated data cannot replace it")
+        if body.instrument_id in rt.replays:
+            raise ValueError("A simulated replay is driving the paper engine for this instrument; its bars are already stored and usable for research")
         out = bt.store_simulated(session, body.instrument_id, body.timeframe, body.bars, body.seed, body.replace)
         audit.record(session, user.email, "market.simulated_generated", instrument_id=body.instrument_id, timeframe=body.timeframe, **out)
         return out

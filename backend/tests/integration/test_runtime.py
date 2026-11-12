@@ -258,3 +258,25 @@ def test_connecting_external_brokers_respects_the_live_gate_and_approval_default
     assert [b["id"] for b in rt.broker_status()] == ["binance-test"]
     rt.disconnect_broker("binance-test", "admin")
     assert rt.broker_status() == []
+
+
+def test_replay_never_blends_with_previously_stored_series():
+    from app.backtesting.service import store_simulated
+
+    db = make_db()
+    rt, _ = deployed(db)
+    with db.session() as s:
+        store_simulated(s, BTC, "1h", 1000, seed=99, replace=False)  # an older research series (2022 timestamps)
+    rt.replay_synthetic(BTC, "1h", 50, seed=3, actor="admin", fx_assumptions={"USD": 0.92})
+    with db.session() as s:
+        stored = rt.store.load(s, BTC, "1h")
+        assert s.scalar(select(AuditEntry).where(AuditEntry.action == "market.simulated_replaced")).detail["removed_bars"] == 1000
+    gaps = stored.bars.index.to_series().diff().dropna().unique()
+    assert len(stored.bars) == 450 and list(gaps) == [pd.Timedelta(hours=1)]  # one continuous series only
+
+    db2 = make_db()
+    rt2, _ = deployed(db2)
+    with db2.session() as s:
+        rt2.store.save(s, BTC, "1h", Dataset(synthetic_bars("1h", 100, seed=1).bars, DataKind.HISTORICAL, "exchange"))
+    with pytest.raises(RuntimeError_, match="stored market data"):
+        rt2.replay_synthetic(BTC, "1h", 50, seed=3, actor="admin", fx_assumptions={"USD": 0.92})

@@ -548,6 +548,17 @@ class TradingRuntime:
             if state is None or state["timeframe"] != timeframe or state["seed"] != seed:
                 if self.kinds.get(instrument_id) not in (None, DataKind.SIMULATED.value):
                     raise RuntimeError_(f"{instrument_id} holds market data; simulated and market data are never mixed")
+                # One series per instrument and timeframe: a replay never blends into previously stored bars.
+                from ..database.models import BarRow
+
+                with self.db.session() as session:
+                    stored = self.store.load(session, instrument_id, timeframe)
+                    if stored is not None and stored.kind is not DataKind.SIMULATED:
+                        raise RuntimeError_(f"{instrument_id} {timeframe} holds stored market data; simulated and market data are never mixed")
+                    if stored is not None:
+                        session.execute(delete(BarRow).where(BarRow.instrument_id == instrument_id, BarRow.timeframe == timeframe))
+                        audit.record(session, actor, "market.simulated_replaced", instrument_id=instrument_id, timeframe=timeframe,
+                                     removed_bars=len(stored.bars), reason="new simulated replay")
                 delta = tf_delta(timeframe)
                 end = pd.Timestamp(self.clock()).floor(f"{int(delta.total_seconds())}s")
                 start = end - (REPLAY_WARMUP + REPLAY_MAX) * delta

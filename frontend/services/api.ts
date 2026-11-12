@@ -29,10 +29,11 @@ export type Health = { status: string; version: string; database: boolean; envir
 export type RiskLimits = {
   risk_per_trade: number; max_daily_loss: number; max_drawdown: number; max_exposure_per_asset: number;
   max_exposure_per_strategy: number; max_exposure_per_broker: number; max_gross_leverage: number;
-  max_concurrent_positions: number; max_correlated_exposure: number; correlation_threshold: number;
+  max_concurrent_positions: number; max_margin_utilization: number; target_volatility: number | null; max_correlated_exposure: number; correlation_threshold: number;
   emergency_policy: "block_new_risk" | "cancel_open_orders" | "flatten_positions";
 };
 export type UserSettings = {
   base_currency: string; initial_paper_capital: number | null; trading_mode: "manual" | "semi_auto" | "auto";
-  fx_conversion_cost_bps: number; risk: RiskLimits;
+  fx_conversion_cost_bps: number; live_orders_require_approval: boolean; risk: RiskLimits;
+  notifications: { external_min_severity: "info" | "warning" | "critical"; muted_categories: string[] };
 };
