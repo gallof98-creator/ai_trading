@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+node_modules/
+.next/
+next-env.d.ts
+mlruns/
+*.pem
+*.key

@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0d12;
+  --color-panel: #11161d;
+  --color-line: #1f2732;
+  --color-ink: #d7dde6;
+  --color-dim: #7d8896;
+  --color-accent: #4da3ff;
+  --color-up: #2ebd85;
+  --color-down: #f6465d;
+  --color-warn: #f0b90b;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+body { background: var(--color-bg); color: var(--color-ink); font-family: var(--font-sans); }
+input, select { background: var(--color-bg); border: 1px solid var(--color-line); border-radius: 4px; padding: 6px 8px; width: 100%; font-family: var(--font-mono); font-size: 13px; }
+input:focus, select:focus { outline: 1px solid var(--color-accent); }
