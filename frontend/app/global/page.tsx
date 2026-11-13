@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Shell } from "@/components/Shell";
 import { Badge, Button, Field, type Json, Meter, Msg, Notice, num, Panel, post, Stat, Table, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
+import { Analysis, Scanner, Strategies } from "./tabs";
 
 const TYPES = ["common_stock", "preferred_stock", "etf", "reit", "adr", "depositary_receipt", "closed_end_fund", "other"];
 const label = (t: string) => t.replace(/_/g, " ");
@@ -170,17 +171,23 @@ function Universe({ user, exchange, setExchange }: { user: User; exchange: strin
   );
 }
 
+const TABS = [["analysis", "Market analysis"], ["scanner", "Scanner"], ["strategies", "Global strategies"], ["universe", "Stock universe"], ["coverage", "Exchanges and coverage"]] as const;
+type Tab = (typeof TABS)[number][0];
+
 function GlobalMarkets({ user }: { user: User }) {
-  const [tab, setTab] = useState<"coverage" | "universe">("coverage");
+  const [tab, setTab] = useState<Tab>("analysis");
   const [exchange, setExchange] = useState<string[]>([]);
   return (
     <div className="space-y-4">
-      <div className="flex gap-1">
-        {(["coverage", "universe"] as const).map((t) => (
-          <button key={t} onClick={() => setTab(t)} className={`rounded border px-3 py-1.5 text-sm ${tab === t ? "border-accent text-accent" : "border-line text-dim hover:text-ink"}`}>
-            {t === "coverage" ? "Exchanges and coverage" : "Stock universe"}</button>))}
+      <div className="flex flex-wrap gap-1">
+        {TABS.map(([t, name]) => (
+          <button key={t} onClick={() => setTab(t)} className={`rounded border px-3 py-1.5 text-sm ${tab === t ? "border-accent text-accent" : "border-line text-dim hover:text-ink"}`}>{name}</button>))}
       </div>
-      {tab === "coverage" ? <Coverage user={user} onExchange={(code) => { setExchange([code]); setTab("universe"); }} /> : <Universe user={user} exchange={exchange} setExchange={setExchange} />}
+      {tab === "coverage" && <Coverage user={user} onExchange={(code) => { setExchange([code]); setTab("universe"); }} />}
+      {tab === "universe" && <Universe user={user} exchange={exchange} setExchange={setExchange} />}
+      {tab === "scanner" && <Scanner user={user} />}
+      {tab === "analysis" && <Analysis user={user} />}
+      {tab === "strategies" && <Strategies user={user} />}
     </div>
   );
 }

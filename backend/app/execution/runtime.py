@@ -123,6 +123,7 @@ class TradingRuntime:
         self.kinds: dict[str, str] = {}  # instrument -> data kind currently in use
         self.feed_status: dict[str, str] = {}
         self.replays: dict[str, dict] = {}
+        self.driven: dict[str, str] = {}  # instrument -> last stored daily bar fed to the engine for global (portfolio) strategies
         from ..global_markets.service import GlobalMarkets
 
         self.global_markets = GlobalMarkets(self)
@@ -172,6 +173,7 @@ class TradingRuntime:
             meta = session.get(AppSetting, "runtime:meta")
             if meta is not None:
                 self.kinds, self.replays = dict(meta.value.get("kinds", {})), dict(meta.value.get("replays", {}))
+                self.driven = dict(meta.value.get("driven", {}))
             for row in session.scalars(select(StrategyDeployment).where(StrategyDeployment.is_active.is_(True))):
                 self._activate(row)
             for iid, tf in {(d.instrument_id, self._exec_tf(d.instrument_id)) for d in self.deployments.values()}:
@@ -188,7 +190,7 @@ class TradingRuntime:
     def persist(self) -> None:
         def write(session: Session) -> None:
             values = {"runtime:portfolio": self.portfolio.to_state(), "runtime:risk": self.risk.to_state(), "runtime:engine": self.engine.to_state(),
-                      "runtime:meta": {"kinds": self.kinds, "replays": self.replays}}
+                      "runtime:meta": {"kinds": self.kinds, "replays": self.replays, "driven": self.driven}}
             for adapter in self.brokers.all():
                 if isinstance(adapter, SimulatedBroker):
                     values[f"paper:{adapter.broker_id}"] = adapter.to_state()
@@ -661,6 +663,11 @@ class TradingRuntime:
                 finally:
                     try:
                         self._record_usage(name, job.requests, [i.id for i in job.instruments[: job.snapshot()["done"]]])
+                        if job.snapshot()["stored"]:
+                            try:
+                                self.drive_stored()
+                            except Exception as exc:  # a settlement problem must not hide the download result
+                                self.notifier.notify(self.clock(), "system", "warning", "Paper orders of global strategies were not advanced", str(exc))
                         if job.snapshot()["stored"] and self.auto_metrics:
                             try:
                                 self.global_markets.start_metrics("system:after_download")
@@ -799,6 +806,51 @@ class TradingRuntime:
                 self.performance_monitor.check(self.portfolio.trades, self.clock())
             self.persist()
             return len(new)
+
+    def drive_stored(self) -> dict:
+        """Global (portfolio) strategies hold instruments that no live feed drives. Their paper orders and
+        positions advance on the stored daily bars instead: each bar not seen yet is fed to the engine in
+        time order, so orders fill at the next bar's open and stops are checked against its range.
+        A bar is only used if it opened after the order was created."""
+        from ..global_markets.cross_section import STRATEGY_PREFIX
+
+        with self.lock:
+            mine = lambda name: (name or "").startswith(STRATEGY_PREFIX)  # noqa: E731
+            open_orders = [o for o in self.engine.orders.values() if o.is_open and mine(o.strategy)]
+            ids = {o.instrument_id for o in open_orders} | {k[1] for k, s in self.portfolio.slices.items() if mine(k[2]) and s.qty}
+            ids = {i for i in ids if self._exec_tf(i) is None}  # instruments with a deployed strategy are driven by their feed
+            self.driven = {i: ts for i, ts in self.driven.items() if i in ids}
+            events: dict[pd.Timestamp, list[tuple[str, pd.Series]]] = {}
+            with self.db.session() as session:
+                for iid in sorted(ids):
+                    since = pd.Timestamp(self.driven[iid]) if iid in self.driven else pd.Timestamp(min(o.created_at for o in open_orders if o.instrument_id == iid))
+                    ds = self.store.load(session, iid, "1d", start=since)
+                    if ds is None or ds.kind is DataKind.SIMULATED:
+                        continue
+                    for ts, row in ds.bars[ds.bars.index > since].iterrows():
+                        events.setdefault(ts, []).append((iid, row))
+            delta, bars_used = pd.Timedelta(days=1), 0
+            fills_before = len(self.portfolio.trades) + sum(1 for s in self.portfolio.slices.values() if s.qty)
+            for ts in sorted(events):
+                t_open = ts.to_pydatetime()
+                try:
+                    for iid, _ in events[ts]:
+                        self._require_fx(iid, t_open)
+                except RuntimeError_ as exc:
+                    self.notifier.notify(self.clock(), "system", "warning", "Paper orders of global strategies are waiting for an exchange rate", str(exc))
+                    break
+                for iid, row in events[ts]:
+                    self.engine.on_bar_open(iid, t_open, float(row.open), float(row.volume), delta)
+                for iid, row in events[ts]:
+                    self.engine.on_bar_close(iid, t_open, float(row.high), float(row.low), float(row.close), delta)
+                    self.driven[iid] = ts.isoformat()
+                    self.kinds.setdefault(iid, DataKind.HISTORICAL.value)
+                    bars_used += 1
+                self.engine.end_of_timestamp(t_open + delta, reconcile=True)
+            if bars_used:
+                self.persist()
+            changed = len(self.portfolio.trades) + sum(1 for s in self.portfolio.slices.values() if s.qty) - fills_before
+            return {"instruments": len(ids), "bars": bars_used, "days": len(events), "position_changes": changed}
 
     def _feed_for(self, instrument_id: str) -> BrokerAdapter | None:
         candidates = ([self.data_adapter] if self.data_adapter is not None else []) + self.brokers.all()

@@ -7,10 +7,10 @@ against a real service says so.
 |---|---|---|
 | 1 | Global catalog: exchange registry, discovery, identifiers, types, history, de-duplication, synchronisation, coverage report, dashboard section | **Done** |
 | 2 | Prices at scale: bulk downloads, incremental updates, instruments and currency units for every registered exchange, provider usage counters | **Done**, with the limits listed below |
-| 3 | Market scanner: daily metrics for every instrument, filters, saved and scheduled scans | Not started |
-| 4 | AI stock analyst and transparent rankings | Not started |
-| 5 | Cross-sectional strategies and portfolio optimisation, connected to the risk engine and backtester | Not started |
-| 6 | Remaining dashboard parts: heatmaps, top movers, watchlists | Not started |
+| 3 | Market scanner: daily metrics for every instrument, filters, saved and scheduled scans | Done |
+| 4 | AI stock analyst and transparent rankings | Done |
+| 5 | Cross-sectional strategies and portfolio optimisation, connected to the risk engine and backtester | Done |
+| 6 | Remaining dashboard parts: heatmaps, top movers, watchlists | Done |
 
 Live trading is not touched by this module.
 
@@ -87,3 +87,51 @@ Measured on SQLite on the build machine: storing 10 years of daily bars takes ab
 - **No real-time or delayed quotes** are connected for the catalog; the report states zero for both.
 - **Identifier enrichment without an OpenFIGI key is slow** (about 250 securities a minute); a free key makes it about 40 times faster.
 - Synchronisation runs as a background thread inside the API process, not on a separate worker queue.
+
+## Phase 3: scanner
+
+- **Daily metrics** (`app/global_markets/metrics.py`): about thirty values per instrument (returns, relative volume, volatility, ATR, RSI, MACD,
+  moving-average distances, ADX, 12-1 momentum, 52-week high, breakouts, regime). A value at date D uses bars up to D only; a field
+  that needs more history than is stored is empty, never estimated. Recomputed automatically after each price download.
+- **Scanner** (`scanner.py`, `/api/scanner/*`): filters on any metric, sorting, universe by market, country, type or watchlist; nine presets;
+  saved scans that run after every update and notify new matches; watchlists.
+
+## Phase 4: analysis and rankings
+
+- **Rankings** (`rankings.py`): seven documented models (momentum 12-1, relative strength, trend quality, low volatility, short-term reversal,
+  breakout, multi-factor). Each factor is winsorised at the 2.5th/97.5th percentile, standardised across eligible instruments, signed and
+  weighted; the per-factor contributions are returned with each row. Eligibility: equity-like, price and traded-value floors.
+  Every ranking shows whether it has been backtested on your data and with what result.
+- **Market overview**: breadth, performance by exchange / country / sector, top movers, unusual volume, volatility expansion, breakout
+  candidates, abnormal moves (robust z-score above 5 against the day's cross-section), regime counts and changes. A written report can be
+  stored with the other research reports.
+- This is descriptive statistics. No language model writes it and nothing in it is a forecast.
+
+## Phase 5: portfolio strategies
+
+- **Selection and weights** (`cross_section.py`): the ranking model picks the top N; weights are equal, inverse-volatility or long-only
+  minimum-variance; caps per instrument, country, currency and sector; optional volatility target and country/sector rotation.
+  A cap only ever reduces weight: the remainder stays in cash.
+- **Backtest**: decisions at the close of the first trading day of each week or month, fills at the next open, whole shares, flat cost per
+  traded value, participation limit against 20-day traded value, protective stop per position (filled at the stop, or at the open after a gap).
+  Compared with an equal-weight universe and split into two sub-periods. Tests check it against a hand calculation and against tampered future data.
+- **Paper rebalancing** (`rebalance.py`): a proposal lists the orders, each sized by the tightest of target weight, risk per trade at the stop
+  and the exposure headroom, then judged by the central risk engine. Nothing is ordered until a person sends the proposal; each order is
+  judged again at that moment. Orders fill at the open of the next stored daily bar and each purchase gets a protective stop.
+  Only paper accounts are accepted; a live account is refused.
+
+### Known limits of Phases 3-5
+
+- **Survivorship bias**: the catalog holds what is listed now plus delistings seen since the first sync. Backtests therefore miss companies
+  that disappeared earlier, which flatters results by an unknown amount.
+- **No currency conversion in backtests and rankings**: prices in different currencies are compared in local terms (as if currency were hedged
+  at no cost), and the price / traded-value floors are in local units, so they are far looser for currencies such as JPY. Restrict a test to
+  markets with one currency for clean numbers. Paper rebalancing does convert, using the platform's exchange rates.
+- **Sectors are mostly empty**: none of the free sources connected supplies sector or industry, so sector heatmaps, sector caps and sector
+  rotation only work for instruments that have one. The SEC EDGAR enrichment discussed for US companies is not built.
+- **No fundamentals**: value and quality factors are not available; every model is price- and volume-based.
+- **Positions are not resized between rebalances** and buys refused for lack of room are not retried automatically: prepare a new proposal
+  after the sells have filled.
+- **At most 2,000 instruments per backtest**, loaded in memory; a larger selection is refused rather than sampled.
+- **Daily data only**: paper orders of these strategies fill on the next daily bar you download, not in real time.
+- Rebalancing is not scheduled: a person prepares and sends each proposal.
