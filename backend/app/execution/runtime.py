@@ -20,7 +20,7 @@ from ..database.models import (AppSetting, BrokerAccount, FillRow, FxRate, Instr
 from ..database.settings_store import UserSettings, load_settings
 from ..domain.models import Fill, Order, Side, Signal, TradingMode
 from ..domain.models import AssetClass, Instrument
-from ..instruments.registry import InstrumentRegistry, default_instruments, make_equity
+from ..instruments.registry import InstrumentRegistry, default_instruments, make_equity, market_of
 from ..market_data.calendars import get_calendar
 from ..market_data.fx import STATIC_SOURCE, FxRateProvider, FxRateUnavailable
 from ..market_data.quality import DataKind, validate_bars
@@ -124,6 +124,11 @@ class TradingRuntime:
         self.kinds: dict[str, str] = {}  # instrument -> data kind currently in use
         self.feed_status: dict[str, str] = {}
         self.replays: dict[str, dict] = {}
+        from ..market_data.live import LiveFeed, LiveHub
+
+        self.live_hub = LiveHub(clock, on_bar=self._on_live_bar)
+        self.live = LiveFeed(self.live_hub)
+        self.live_source_factory = None  # test hook: callable(runtime) -> list[(LiveSource, route)]
         self.driven: dict[str, str] = {}  # instrument -> last stored daily bar fed to the engine for global (portfolio) strategies
         from ..global_markets.service import GlobalMarkets
 
@@ -181,7 +186,12 @@ class TradingRuntime:
                 ds = self.store.load(session, iid, tf)
                 if ds is not None:
                     self.bars[(iid, tf)] = ds.bars.iloc[-CACHE_BARS:]
+            saved = session.get(AppSetting, "live:subscriptions")
+            live_ids = [i for i in (saved.value.get("instrument_ids", []) if saved else []) if self._known(i)]
             self.started = True
+        if live_ids and self.settings.live_feed_autostart:
+            self.configure_live()
+            self.live.subscribe([self.registry.get(i) for i in live_ids])
 
     def reload_settings(self, session: Session) -> None:
         self.user_settings = load_settings(session)
@@ -389,7 +399,15 @@ class TradingRuntime:
         with self.lock, self.db.session() as session:
             for ticker in dict.fromkeys(t for t in tickers if t.strip()):
                 try:
-                    inst = make_equity(ticker, market, AssetClass(asset_class))
+                    if asset_class == "crypto":
+                        pair = ticker.strip().upper()
+                        base, _, quote = pair.partition("/")
+                        if not (base.isalnum() and quote.isalnum() and 2 <= len(base) <= 10 and 3 <= len(quote) <= 5):
+                            raise ValueError("a crypto pair looks like BTC/USD")
+                        inst = Instrument(id=f"CRYPTO:{pair}", asset_class=AssetClass.CRYPTO, symbol=pair, base_currency=base, quote_currency=quote,
+                                          calendar="24x7", tick_size=0.01, lot_size=0.00001, min_qty=0.00001)
+                    else:
+                        inst = make_equity(ticker, market, AssetClass(asset_class))
                 except ValueError as exc:
                     out["invalid"].append({"ticker": ticker, "reason": str(exc)})
                     continue
@@ -756,8 +774,9 @@ class TradingRuntime:
             except FxRateUnavailable as exc:
                 raise RuntimeError_(f"No usable FX rate to value {instrument_id}: {exc}. Add a rate under Settings.") from None
 
-    def ingest(self, instrument_id: str, timeframe: str, dataset: Dataset, trade: bool = True) -> int:
-        """Feed completed bars into the engine in time order. Returns the number of new bars processed."""
+    def ingest(self, instrument_id: str, timeframe: str, dataset: Dataset, trade: bool = True, drive_without_deployment: bool = False) -> int:
+        """Feed completed bars into the engine in time order. Returns the number of new bars processed.
+        `drive_without_deployment` lets live bars fill paper orders and check stops on instruments no strategy is deployed on."""
         with self.lock:
             inst = self.registry.get(instrument_id)
             clean, report = validate_bars(dataset.bars, timeframe, get_calendar(inst.calendar))
@@ -772,7 +791,7 @@ class TradingRuntime:
                 return 0
             exec_tf = self._exec_tf(instrument_id)
             delta = tf_delta(timeframe)
-            drive = trade and timeframe == exec_tf
+            drive = trade and (timeframe == exec_tf or (exec_tf is None and drive_without_deployment))
             if drive:
                 self._require_fx(instrument_id, new.index[0].to_pydatetime())
             self.kinds[instrument_id] = dataset.kind.value
@@ -825,11 +844,7 @@ class TradingRuntime:
             ts = self.clock()
             key = (broker_id, instrument_id, MANUAL_STRATEGY)
             held = self.portfolio.qty(key)
-            with self.db.session() as session:
-                ds = self.store.load(session, instrument_id, self._exec_tf(instrument_id) or "1d", start=pd.Timestamp(ts) - pd.Timedelta(days=30))
-            if ds is None or ds.bars.empty:
-                raise RuntimeError_("No recent stored price for this instrument: download prices first")
-            price = float(ds.bars["close"].iloc[-1])
+            price = self.reference_price(instrument_id)["price"]
             try:
                 fx = self.engine._fx(inst.quote_currency, ts)
             except FxRateUnavailable as exc:
@@ -860,6 +875,131 @@ class TradingRuntime:
                     "stop_price": inst.round_price(price * (1 - stop_pct)) if action == "buy" else None,
                     "note": "Fills at the open of the next bar received or downloaded for this instrument." if sent.status.value == "submitted" else ""}
 
+    # ------------------------------------------------------------------ live market data
+    def configure_live(self) -> list[str]:
+        """(Re)build the live sources from the credentials available now. Crypto needs no key; US stocks need
+        an Alpaca key (IEX feed) or a Finnhub key."""
+        from ..market_data.live import AlpacaLive, FinnhubLive
+
+        def crypto(inst) -> str | None:
+            return inst.symbol if inst.asset_class is AssetClass.CRYPTO and inst.quote_currency == "USD" else None
+
+        def us_equity(inst) -> str | None:
+            return inst.symbol if inst.asset_class in (AssetClass.STOCK, AssetClass.ETF) and market_of(inst) == "US" else None
+
+        if self.live_source_factory is not None:
+            pairs = self.live_source_factory(self)
+        else:
+            alpaca = self._provider_credentials("alpaca")
+            key, secret = (alpaca[0].get("api_key", ""), alpaca[0].get("api_secret", "")) if alpaca else ("", "")
+            pairs = [(AlpacaLive(self.live_hub, "crypto", key, secret), crypto)]
+            if key:
+                pairs.append((AlpacaLive(self.live_hub, "stocks", key, secret), us_equity))
+            finnhub = self._provider_key("finnhub")
+            if finnhub and not key:
+                pairs.append((FinnhubLive(self.live_hub, finnhub[0]), us_equity))
+        wanted = list(self.live.subscribed)
+        for name in list(self.live.sources):
+            self.live.remove_source(name)
+        for source, route in pairs:
+            self.live.add_source(source, route)
+        if wanted:
+            self.live.subscribe([self.registry.get(i) for i in wanted if self._known(i)])
+        return [s.name for s, _ in pairs]
+
+    def _known(self, instrument_id: str) -> bool:
+        try:
+            self.registry.get(instrument_id)
+            return True
+        except KeyError:
+            return False
+
+    def live_subscribe(self, instrument_ids: list[str], actor: str) -> dict:
+        unknown = [i for i in instrument_ids if not self._known(i)]
+        if unknown:
+            raise RuntimeError_(f"Unknown instruments: {', '.join(unknown[:5])}")
+        blocked = [i for i in instrument_ids if self.kinds.get(i) == DataKind.SIMULATED.value]
+        if blocked:
+            raise RuntimeError_(f"{', '.join(blocked[:5])} use simulated data; live and simulated prices are never mixed")
+        if not self.live.sources:
+            self.configure_live()
+        out = self.live.subscribe([self.registry.get(i) for i in instrument_ids])
+        self._save_live(actor)
+        out["backfilled"] = {}
+        for iid, name in out["subscribed"].items():
+            source = self.live.sources[name]
+            if not hasattr(source, "recent_bars"):
+                continue
+            try:  # recent minutes from the same provider, so the chart has context; the forming minute is left to the live feed
+                frame = source.recent_bars(self.live.routes[name](self.registry.get(iid)))
+                frame = frame[frame.index < pd.Timestamp(self.clock()).floor("min")]
+                if len(frame):
+                    out["backfilled"][iid] = self.ingest(iid, "1m", Dataset(frame, DataKind.REALTIME, f"live:{name}"), trade=False)
+            except Exception as exc:
+                self.live_hub.record_error(name, f"backfill of {iid}: {type(exc).__name__}: {str(exc)[:150]}")
+        return out
+
+    def live_unsubscribe(self, instrument_ids: list[str], actor: str) -> None:
+        self.live.unsubscribe(instrument_ids)
+        self._save_live(actor)
+
+    def _save_live(self, actor: str) -> None:
+        ids = sorted(self.live.subscribed)
+
+        def write(session: Session) -> None:
+            row = session.get(AppSetting, "live:subscriptions")
+            if row is None:
+                session.add(AppSetting(key="live:subscriptions", value={"instrument_ids": ids}))
+            else:
+                row.value = {"instrument_ids": ids}
+            audit.record(session, actor, "live.subscriptions", count=len(ids))
+
+        self.journal._write(write)
+
+    def _on_live_bar(self, instrument_id: str, frame: pd.DataFrame, provider: str) -> None:
+        """A one-minute bar built from live ticks has completed: store it, and hand the engine every bar of a
+        deployed timeframe that this minute completes."""
+        source = f"live:{provider}"
+        exec_tf = self._exec_tf(instrument_id)
+        self.ingest(instrument_id, "1m", Dataset(frame, DataKind.REALTIME, source), trade=exec_tf in (None, "1m"), drive_without_deployment=True)
+        if exec_tf in (None, "1m") or tf_delta(exec_tf) >= pd.Timedelta(days=1):
+            return
+        delta = tf_delta(exec_tf)
+        closes = frame.index[-1] + pd.Timedelta(minutes=1)
+        if (closes - pd.Timestamp(0, tz="UTC")) % delta != pd.Timedelta(0):
+            return
+        with self.db.session() as session:
+            ds = self.store.load(session, instrument_id, "1m", start=closes - delta, end=closes - pd.Timedelta(minutes=1))
+        if ds is None or ds.kind is DataKind.SIMULATED:
+            return
+        bar = resample(ds.bars, "1m", exec_tf, drop_incomplete=False)
+        self.ingest(instrument_id, exec_tf, Dataset(bar[bar.index == closes - delta], DataKind.REALTIME, source))
+
+    def reference_price(self, instrument_id: str) -> dict:
+        """The price an order may be sized on, with where it came from. A live-subscribed instrument must have a
+        fresh tick; otherwise the newest stored bar is used, and refused when it is more than 30 days old."""
+        ts = self.clock()
+        if instrument_id in self.live.subscribed:
+            q = self.live_hub.quote(instrument_id)
+            if q is None or not q["fresh"]:
+                raise RuntimeError_(f"The live price of {instrument_id} is stale or missing"
+                                    + (f" (last update {q['age_seconds']:.0f}s ago)" if q else "") + "; nothing is sized on an outdated price")
+            return {"price": q["price"], "source": f"live:{q['provider']}", "status": q["status"], "age_seconds": q["age_seconds"], "spread": q["spread"]}
+        with self.db.session() as session:
+            cov = self.store.coverage_for(session, instrument_id)
+            if not cov:
+                raise RuntimeError_("No recent stored price for this instrument: download prices first")
+            newest = max(cov, key=lambda c: c["last_ms"])
+            ds = self.store.load(session, instrument_id, newest["timeframe"], start=pd.Timestamp(ts) - pd.Timedelta(days=30))
+        if ds is None or ds.bars.empty:
+            raise RuntimeError_("No recent stored price for this instrument: download prices first")
+        age = (pd.Timestamp(ts) - ds.bars.index[-1]).total_seconds()
+        return {"price": float(ds.bars["close"].iloc[-1]), "source": ds.source, "status": "END_OF_DAY" if ds.kind is not DataKind.REALTIME else "LIVE",
+                "age_seconds": age, "spread": None}
+
+    def live_price(self, instrument_id: str) -> dict | None:
+        return self.live_hub.quote(instrument_id)
+
     def drive_stored(self) -> dict:
         """Global (portfolio) strategies hold instruments that no live feed drives. Their paper orders and
         positions advance on the stored daily bars instead: each bar not seen yet is fed to the engine in
@@ -871,7 +1011,8 @@ class TradingRuntime:
             mine = lambda name: (name or "").startswith((STRATEGY_PREFIX, MANUAL_STRATEGY))  # noqa: E731
             open_orders = [o for o in self.engine.orders.values() if o.is_open and mine(o.strategy)]
             ids = {o.instrument_id for o in open_orders} | {k[1] for k, s in self.portfolio.slices.items() if mine(k[2]) and s.qty}
-            ids = {i for i in ids if self._exec_tf(i) is None}  # instruments with a deployed strategy are driven by their feed
+            # Instruments with a deployed strategy or a live subscription are driven by their feed, not by stored daily bars.
+            ids = {i for i in ids if self._exec_tf(i) is None and i not in self.live.subscribed}
             self.driven = {i: ts for i, ts in self.driven.items() if i in ids}
             events: dict[pd.Timestamp, list[tuple[str, pd.Series]]] = {}
             with self.db.session() as session:

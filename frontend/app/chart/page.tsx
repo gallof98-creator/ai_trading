@@ -3,6 +3,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { Shell } from "@/components/Shell";
+import { useLiveQuote, useNow } from "@/components/live";
 import { useActiveSymbol } from "@/components/symbol";
 import { Badge, Button, Field, type Json, Msg, Notice, num, Panel, pct, post, Table, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
@@ -31,10 +32,19 @@ function Chart({ user }: { user: User }) {
   const usable: string[] = info.data?.supported_resolutions ?? [];
   const res = usable.includes(resolution) ? resolution : usable.includes("1D") ? "1D" : usable[0];
   const ready = info.data?.has_data && res;
-  const bars = useApi(ready ? `/api/charts/history?symbol=${enc}&resolution=${res}&countback=1500` : null, 20_000);
+  const bars = useApi(ready ? `/api/charts/history?symbol=${enc}&resolution=${res}&countback=1500` : null, 60_000);
   const studies = useApi(ready ? `/api/charts/studies?symbol=${enc}&resolution=${res}&bars=1500` : null, 60_000);
   const position = useApi(info.data?.instrument_id ? `/api/charts/position?symbol=${enc}` : null, 15_000);
   const search = useApi(`/api/charts/search?q=${encodeURIComponent(q)}${exchange ? `&exchange=${exchange}` : ""}${type ? `&type=${type}` : ""}${sector ? `&sector=${encodeURIComponent(sector)}` : ""}${priced ? "&has_data=true" : ""}&limit=40`);
+  const liveStatus = useApi("/api/live/status", 5_000);
+  const subscribedLive = (liveStatus.data?.subscriptions ?? []).some((x: Json) => x.instrument_id === info.data?.instrument_id);
+  const { quote: live, connected } = useLiveQuote(subscribedLive ? info.data.instrument_id : null);
+  const now = useNow();
+  const liveAge = live ? Math.max(0, (now - new Date(live.tsSource).getTime()) / 1000) : null;
+  const liveFresh = liveAge !== null && liveAge <= (liveStatus.data?.stale_after_seconds ?? 60);
+  const liveTick = useMemo(() => (live ? { time: Math.floor(new Date(live.tsSource).getTime() / 1000), price: live.price } : null), [live]);
+  const source = (liveStatus.data?.subscriptions ?? []).find((x: Json) => x.instrument_id === info.data?.instrument_id)?.source;
+  const feed = source ? liveStatus.data?.providers?.[source] : null;
   const coverage = useApi("/api/global/coverage");
   const lists = useApi("/api/scanner/watchlists");
   const brokers = useApi("/api/brokers/status");
@@ -43,7 +53,7 @@ function Chart({ user }: { user: User }) {
   useEffect(() => { act.setMsg(null); }, [symbol]); // eslint-disable-line react-hooks/exhaustive-deps
   const chartBars = useMemo(() => (bars.data?.s === "ok" ? bars.data : null), [bars.data]);
   const d = info.data;
-  const last = chartBars ? chartBars.c[chartBars.c.length - 1] : null;
+  const last = live ? live.price : chartBars ? chartBars.c[chartBars.c.length - 1] : null;
   const prev = chartBars && chartBars.c.length > 1 ? chartBars.c[chartBars.c.length - 2] : null;
   const watch = (lists.data ?? []).find((w: Json) => w.name === list);
   const canTrade = user.role !== "viewer";
@@ -94,12 +104,19 @@ function Chart({ user }: { user: User }) {
         {d && (
           <Panel title={`${d.ticker} · ${d.exchange}${d.mic ? ` (${d.mic})` : ""}`} right={
             <span className="flex flex-wrap items-center gap-2">
-              <Badge kind={KIND[d.data.kind] ?? "dim"}>{d.data.kind === "none" ? "NO DATA" : d.data.kind.toUpperCase()}</Badge>
+              {subscribedLive
+                ? <Badge kind={live && liveFresh ? "up" : "warn"}>{live ? (liveFresh ? `● ${live.status}` : "STALE") : connected ? "WAITING FOR FIRST TICK" : "CONNECTING"}</Badge>
+                : <Badge kind={KIND[d.data.kind] ?? "dim"}>{d.data.kind === "none" ? "NO DATA" : d.data.kind.toUpperCase()}</Badge>}
+              {subscribedLive && live && <span className="font-mono text-xs text-dim">{live.provider}{live.venue ? ` · ${live.venue}` : ""} · {live.ticks} updates · last {liveAge!.toFixed(0)}s ago · delay {live.latencyMs === null ? "—" : `${Math.round(live.latencyMs)} ms`}</span>}
+              {canTrade && d.instrument_id && (subscribedLive
+                ? <button className="text-xs text-dim underline" onClick={() => post("/api/live/unsubscribe", { instrument_ids: [d.instrument_id] }).then(liveStatus.reload)}>stop live</button>
+                : <button className="text-xs text-accent underline" onClick={() => act.run(async () => { const r = await post("/api/live/subscribe", { instrument_ids: [d.instrument_id] }); liveStatus.reload(); if (r.unavailable[d.instrument_id]) throw new Error(`No live source for this instrument: ${r.unavailable[d.instrument_id]}. US stocks need an Alpaca or Finnhub key; other markets have no free live feed.`); }, "Live feed requested.")}>go live</button>)}
               {d.data.last_bar && <span className="text-xs text-dim">last bar {when(d.data.last_bar)}{d.data.age_days > 4 ? ` · ${num(d.data.age_days, 0)} days old` : ""}</span>}
             </span>}>
             <div className="mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-1">
               <span className="text-sm">{d.description || nice(d.type)}</span>
-              {last !== null && <span className="font-mono text-lg">{num(last)} <span className="text-xs text-dim">{d.currency}</span></span>}
+              {last !== null && <span className={`font-mono text-lg transition-colors ${live ? (live.direction > 0 ? "text-up" : live.direction < 0 ? "text-down" : "") : ""}`}>{num(last)} <span className="text-xs text-dim">{d.currency}</span></span>}
+              {live?.bid && live?.ask ? <span className="font-mono text-xs text-dim">bid {num(live.bid)} · ask {num(live.ask)}</span> : null}
               {last !== null && prev ? <span className={`font-mono text-sm ${last >= prev ? "text-up" : "text-down"}`}>{last >= prev ? "+" : ""}{((last / prev - 1) * 100).toFixed(2)}%</span> : null}
               <span className="font-mono text-xs text-dim">{nice(d.type)} · ISIN {d.isin ?? "—"} · FIGI {d.figi ?? "—"}{d.sector ? ` · ${d.sector}` : ""}{d.other_matches ? ` · ${d.other_matches} other listing(s) share this identifier` : ""}</span>
             </div>
@@ -111,8 +128,9 @@ function Chart({ user }: { user: User }) {
             </div>
             {!d.has_data ? <Notice>{d.data.note} {d.instrument_id ? <>Download prices from <Link className="underline" href="/markets">Markets</Link>.</> : <>Open <Link className="underline" href="/global">Global Markets</Link> to add it.</>}</Notice>
               : bars.error ? <Notice kind="down">{bars.error}</Notice>
-              : chartBars ? <ProChart bars={chartBars} studies={studies.data} show={show} intraday={!["1D", "1W", "1M"].includes(res)} />
+              : chartBars ? <ProChart bars={chartBars} studies={studies.data} show={show} intraday={!["1D", "1W", "1M"].includes(res)} live={liveTick} resolution={res} />
               : <p className="text-sm text-dim">{bars.data?.s === "no_data" ? "No bars in this range." : "Loading…"}</p>}
+            {subscribedLive && feed && <p className="mt-2 text-xs text-dim">Live feed {source}: {feed.state}{feed.transport ? ` (${feed.transport})` : ""}{feed.detail ? ` — ${feed.detail}` : ""}. {feed.ticks_last_minute} updates in the last minute{feed.median_latency_ms !== null ? `, median delay ${Math.round(feed.median_latency_ms)} ms` : ""}.{feed.last_error ? ` Last problem: ${feed.last_error}` : ""}</p>}
             <p className="mt-2 text-xs text-dim">{d.data.note} Source: {d.data.sources.join(", ") || "—"}. {usable.length < RES.length && d.has_data ? "Greyed-out resolutions need intraday bars, which arrive only from a connected broker feed." : ""} Chart by TradingView Lightweight Charts.</p>
           </Panel>)}
 

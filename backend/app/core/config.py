@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     finnhub_base_url: str = "https://finnhub.io/api/v1"
     openfigi_api_key: str = ""  # optional: OpenFIGI works without one, more slowly
     catalog_sync_hours: int = Field(0, ge=0)  # re-synchronise the global catalog every N hours; 0 = only on request
+    live_feed_autostart: bool = True  # reconnect the live subscriptions saved by the user when the API starts
     # MODELLING ASSUMPTION: currencies treated as trading 1:1 with another one for valuation.
     fx_pegs: dict[str, str] = {"USDT": "USD", "USDC": "USD"}
     fx_max_age_days: int = Field(5, gt=0)

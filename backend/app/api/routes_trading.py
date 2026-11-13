@@ -92,15 +92,15 @@ def markets(_: User = Depends(viewer)) -> list[dict]:
 
 class InstrumentsIn(BaseModel):
     tickers: list[str] = Field(min_length=1, max_length=2000)
-    market: str = Field(max_length=4)
-    asset_class: Literal["stock", "etf"] = "stock"
+    market: str = Field("", max_length=8)  # ignored for crypto pairs
+    asset_class: Literal["stock", "etf", "crypto"] = "stock"
 
 
 @router.post("/instruments")
 def add_instruments(body: InstrumentsIn, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
     from ..instruments.registry import MARKETS
 
-    if body.market not in MARKETS:
+    if body.asset_class != "crypto" and body.market not in MARKETS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown market; supported: {', '.join(MARKETS)}")
     return rt.add_instruments(body.tickers, body.market, body.asset_class, user.email)
 

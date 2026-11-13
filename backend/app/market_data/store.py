@@ -78,7 +78,7 @@ class BarStore:
 
     def coverage_for(self, session: Session, instrument_id: str) -> list[dict]:
         rows = session.scalars(select(BarSeries).where(BarSeries.instrument_id == instrument_id))
-        return [{"instrument_id": r.instrument_id, "timeframe": r.timeframe, "kind": r.kind, "bars": r.bars} for r in rows]
+        return [{"instrument_id": r.instrument_id, "timeframe": r.timeframe, "kind": r.kind, "bars": r.bars, "last_ms": r.last_ms} for r in rows]
 
     def coverage(self, session: Session) -> list[dict]:
         return [

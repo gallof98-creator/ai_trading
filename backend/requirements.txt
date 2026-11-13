@@ -22,4 +22,5 @@ scipy==1.18.1
 SQLAlchemy==2.1.8
 structlog==26.1.0
 uvicorn==0.54.0
+websockets==17.4
 xgboost==3.4.1

@@ -2,12 +2,15 @@
 import { CandlestickSeries, ColorType, createChart, createSeriesMarkers, HistogramSeries, LineSeries, LineStyle, type UTCTimestamp } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 
+export type LiveTick = { time: number; price: number };
+const STEP: Record<string, number> = { "1": 60, "5": 300, "15": 900, "30": 1800, "60": 3600, "240": 14400, "1D": 86400 };
+
 export type Bars = { t: number[]; o: number[]; h: number[]; l: number[]; c: number[]; v: number[] };
 export type Studies = {
   t: number[]; overlays: Record<string, (number | null)[]>; panes: Record<string, (number | null)[]>;
   levels: { price: number; kind: string; touches: number }[]; signals: { time: number; action: string; strategy: string }[];
 };
-type Props = { bars: Bars; studies?: Studies | null; show: Record<string, boolean>; intraday: boolean; height?: number };
+type Props = { bars: Bars; studies?: Studies | null; show: Record<string, boolean>; intraday: boolean; height?: number; live?: LiveTick | null; resolution?: string };
 
 const OVERLAY: Record<string, { color: string; title: string; dashed?: boolean }> = {
   sma_20: { color: "#f0b90b", title: "SMA 20" }, sma_50: { color: "#4da3ff", title: "SMA 50" }, sma_200: { color: "#c084fc", title: "SMA 200" },
@@ -15,8 +18,11 @@ const OVERLAY: Record<string, { color: string; title: string; dashed?: boolean }
 };
 const GROUP: Record<string, string[]> = { sma: ["sma_20", "sma_50", "sma_200"], ema: ["ema_20"], bollinger: ["bb_upper", "bb_lower"] };
 
-export default function ProChart({ bars, studies, show, intraday, height = 560 }: Props) {
+export default function ProChart({ bars, studies, show, intraday, height = 560, live, resolution = "1D" }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const series = useRef<any>(null);
+  const lastBar = useRef<{ time: number; open: number; high: number; low: number; close: number } | null>(null);
   useEffect(() => {
     if (!ref.current || !bars.t.length) return;
     const chart = createChart(ref.current, {
@@ -28,6 +34,9 @@ export default function ProChart({ bars, studies, show, intraday, height = 560 }
     const time = (s: number) => s as UTCTimestamp;
     const candles = chart.addSeries(CandlestickSeries, { upColor: "#2ebd85", downColor: "#f6465d", borderVisible: false, wickUpColor: "#2ebd85", wickDownColor: "#f6465d" });
     candles.setData(bars.t.map((t, i) => ({ time: time(t), open: bars.o[i], high: bars.h[i], low: bars.l[i], close: bars.c[i] })));
+    const k = bars.t.length - 1;
+    series.current = candles;
+    lastBar.current = { time: bars.t[k], open: bars.o[k], high: bars.h[k], low: bars.l[k], close: bars.c[k] };
     if (show.volume) {
       const vol = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "vol", lastValueVisible: false, priceLineVisible: false });
       vol.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
@@ -76,7 +85,19 @@ export default function ProChart({ bars, studies, show, intraday, height = 560 }
     }
     const n = bars.t.length;
     chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 220), to: n + 4 });
-    return () => chart.remove();
+    return () => { series.current = null; chart.remove(); };
   }, [bars, studies, show, intraday, height]);
+  // A live tick moves the last candle, or opens the next one when its time bucket has started. Nothing else is redrawn.
+  useEffect(() => {
+    const last = lastBar.current;
+    if (!live || !series.current || !last) return;
+    const step = STEP[resolution];
+    const bucket = step ? Math.floor(live.time / step) * step : last.time;
+    if (bucket < last.time) return;
+    const next = bucket > last.time ? { time: bucket, open: live.price, high: live.price, low: live.price, close: live.price }
+      : { ...last, high: Math.max(last.high, live.price), low: Math.min(last.low, live.price), close: live.price };
+    lastBar.current = next;
+    series.current.update({ ...next, time: next.time as UTCTimestamp });
+  }, [live, resolution]);
   return <div ref={ref} style={{ height }} className="w-full" />;
 }
