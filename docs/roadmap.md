@@ -23,7 +23,7 @@ Status words mean exactly this: **Done** = implemented and covered by automated 
 
 ## Verification performed
 
-- Backend test suite:  tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
+- Backend test suite: 243 tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
 - Docker Compose stack (Postgres, Redis, API, worker, frontend): started healthy, migrations applied on Postgres, full browser flow passed (login, settings, paper account, data, deployment, replay, overview, portfolio, kill switch, backtest, comparison, model training, report), state identical after an API container restart, no errors or secrets in the logs.
 
 ## Not verified or not built — read before relying on anything
