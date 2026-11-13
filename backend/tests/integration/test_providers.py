@@ -171,6 +171,7 @@ def api(client):
     rt = client.app.state.container.runtime
     rt.provider_factory = lambda name, key: EodhdProvider(key, http_get=http)
     rt.download_options = {"sleep": lambda s: None, "min_interval": 0}
+    rt.auto_metrics = False  # the scanner's automatic refresh is tested separately
     return client, admin, http, rt
 
 

@@ -14,7 +14,7 @@ from ..database.settings_store import NotificationSettings
 
 log = get_logger(__name__)
 SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
-CATEGORIES = ("signal", "execution", "order_rejected", "approval", "broker", "risk", "reconciliation", "sizing", "model", "strategy", "system")
+CATEGORIES = ("signal", "execution", "order_rejected", "approval", "broker", "risk", "reconciliation", "sizing", "model", "strategy", "scanner", "system")
 
 
 class Channel:

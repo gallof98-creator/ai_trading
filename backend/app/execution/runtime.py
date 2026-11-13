@@ -129,6 +129,7 @@ class TradingRuntime:
         self.provider_factory = None  # test hook: callable(name, api_key) -> PriceProvider
         self.download = None
         self.download_options: dict = {}
+        self.auto_metrics = True  # recompute scanner metrics after each price download
         self.started = False
 
     def _needs_approval(self, order: Order) -> bool:
@@ -660,6 +661,11 @@ class TradingRuntime:
                 finally:
                     try:
                         self._record_usage(name, job.requests, [i.id for i in job.instruments[: job.snapshot()["done"]]])
+                        if job.snapshot()["stored"] and self.auto_metrics:
+                            try:
+                                self.global_markets.start_metrics("system:after_download")
+                            except ValueError:
+                                pass  # already running; the next download or a manual run picks the rest up
                     finally:
                         job.completed.set()
 

@@ -256,6 +256,38 @@ class SyncRun(Base):
     message: Mapped[str] = mapped_column(Text, default="")
 
 
+class InstrumentMetrics(Base):
+    """Latest daily metrics per instrument (one row each), recomputed after price updates. Feeds the scanner and rankings."""
+
+    __tablename__ = "instrument_metrics"
+    instrument_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    as_of: Mapped[str] = mapped_column(String(10), index=True)  # date of the last bar used (YYYY-MM-DD)
+    computed_at: Mapped[datetime] = mapped_column(TS, default=_now)
+    data_kind: Mapped[str] = mapped_column(String(12))
+    values: Mapped[dict] = mapped_column(JSON)
+    previous_regime: Mapped[str | None] = mapped_column(String(32), nullable=True)  # regime at the previous computation
+
+
+class SavedScan(Base):
+    __tablename__ = "saved_scans"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    definition: Mapped[dict] = mapped_column(JSON)
+    run_after_update: Mapped[bool] = mapped_column(Boolean, default=False)  # event-triggered: runs whenever metrics are recomputed
+    notify: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    last_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TS, default=_now)
+
+
+class Watchlist(Base):
+    __tablename__ = "watchlists"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    instrument_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(TS, default=_now)
+
+
 class ResearchItem(Base):
     """AI research artefacts: reports, proposed strategy configurations, trained model records."""
 

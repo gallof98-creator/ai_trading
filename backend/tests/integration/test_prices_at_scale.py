@@ -147,6 +147,7 @@ def api(client):
     client.put("/api/settings", headers=admin, json=UserSettings(initial_paper_capital=100_000).model_dump())
     rt = client.app.state.container.runtime
     rt.download_options = {"sleep": lambda s: None, "min_interval": 0}
+    rt.auto_metrics = False  # the scanner's automatic refresh is tested separately
     return client, admin, rt
 
 

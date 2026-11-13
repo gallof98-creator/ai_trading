@@ -101,6 +101,81 @@ class CatalogJob:
         self._set(status=outcome, message=message, current=None, finished_at=datetime.now(timezone.utc).isoformat())
 
 
+class MetricsJob:
+    """Recompute daily metrics for every instrument whose price series changed since its last computation,
+    then run the saved scans that are triggered by a data update."""
+
+    def __init__(self, service: "GlobalMarkets", series: list[dict], force: bool) -> None:
+        self.service, self.series, self.force = service, series, force
+        self._cancel, self._lock = threading.Event(), threading.Lock()
+        self.completed = threading.Event()
+        self.state = {"status": "pending", "total": len(series), "done": 0, "computed": 0, "skipped": 0, "failed": 0, "scans": [], "message": "",
+                      "started_at": None, "finished_at": None}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {**self.state, "scans": list(self.state["scans"])}
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:
+        import pandas as pd
+
+        from ..database.models import InstrumentMetrics
+        from .metrics import LOOKBACK_BARS, compute_metrics
+        from .scanner import run_saved_scans
+
+        rt = self.service.runtime
+        with self._lock:
+            self.state.update(status="running", started_at=datetime.now(timezone.utc).isoformat())
+        outcome = "finished"
+        try:
+            for c in self.series:
+                if self._cancel.is_set():
+                    outcome = "cancelled"
+                    break
+                key = "failed"
+                try:
+                    as_of = c["last"][:10]
+                    with rt.db.session() as session:
+                        row = session.get(InstrumentMetrics, c["instrument_id"])
+                        if row is not None and row.as_of == as_of and not self.force:
+                            key = "skipped"
+                        else:
+                            start = pd.Timestamp(c["last"]) - pd.Timedelta(days=int(LOOKBACK_BARS * 1.6))
+                            ds = rt.store.load(session, c["instrument_id"], "1d", start=start)
+                            values = compute_metrics(ds.bars) if ds is not None else None
+                            if values is None:
+                                key = "skipped"  # too little history for any metric
+                            else:
+                                values["bars"] = c["bars"]
+                                if row is None:
+                                    session.add(InstrumentMetrics(instrument_id=c["instrument_id"], as_of=as_of, data_kind=c["kind"], values=values))
+                                else:
+                                    row.previous_regime = (row.values or {}).get("regime")
+                                    row.as_of, row.data_kind, row.values, row.computed_at = as_of, c["kind"], values, datetime.now(timezone.utc)
+                                key = "computed"
+                except Exception as exc:
+                    log.error("metrics_failed", instrument=c["instrument_id"], error=str(exc))
+                with self._lock:
+                    self.state[key] += 1
+                    self.state["done"] += 1
+            if outcome == "finished":
+                with rt.db.session() as session:
+                    scans = run_saved_scans(session, rt.registry, rt.notifier.notify)
+                with self._lock:
+                    self.state["scans"] = scans
+        except Exception as exc:
+            outcome = "failed"
+            with self._lock:
+                self.state["message"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        finally:
+            with self._lock:
+                self.state.update(status=outcome, finished_at=datetime.now(timezone.utc).isoformat())
+            self.completed.set()
+
+
 class GlobalMarkets:
     KEYS = ("finnhub", "openfigi")  # keys this module adds to the runtime's provider key store
 
@@ -109,6 +184,7 @@ class GlobalMarkets:
         self.discovery_factory: Callable | None = None  # test hook: (name, key) -> DiscoveryProvider
         self.figi_factory: Callable | None = None  # test hook: (key) -> OpenFigi
         self.job: CatalogJob | None = None
+        self.metrics_job: MetricsJob | None = None
         self.job_options: dict = {}
         self._lock = threading.Lock()
 
@@ -195,6 +271,22 @@ class GlobalMarkets:
     def cancel(self) -> None:
         if self.job is not None:
             self.job.cancel()
+
+    # ---- metrics
+    def start_metrics(self, actor: str, force: bool = False) -> dict:
+        """Compute metrics for every daily series that changed (or all of them with force)."""
+        with self._lock:
+            if self.metrics_job is not None and not self.metrics_job.completed.is_set():
+                raise ValueError("Metrics are already being computed")
+            with self.runtime.db.session() as session:
+                series = [c for c in self.runtime.store.coverage(session) if c["timeframe"] == "1d"]
+                audit.record(session, actor, "scanner.metrics_started", series=len(series), force=force)
+            self.metrics_job = MetricsJob(self, series, force)
+            threading.Thread(target=self.metrics_job.run, name="metrics", daemon=True).start()
+            return self.metrics_job.snapshot()
+
+    def metrics_status(self) -> dict:
+        return self.metrics_job.snapshot() if self.metrics_job is not None else {"status": "idle"}
 
     # ---- link to tradable instruments
     def _instrument_id(self, security: Security) -> str | None:
