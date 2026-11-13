@@ -9,7 +9,7 @@ from . import __version__
 import asyncio
 from contextlib import asynccontextmanager
 
-from .api import routes_auth, routes_research, routes_settings, routes_trading
+from .api import routes_auth, routes_global, routes_research, routes_settings, routes_trading
 from .api.deps import Container, get_container
 from .core.config import Settings, get_settings
 from .core.logging import configure_logging, get_logger
@@ -52,9 +52,21 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
                         log.error("feed_tick_failed", error=str(exc))
 
             task = asyncio.create_task(loop())
+        catalog_task = None
+        if settings.catalog_sync_hours > 0:
+            async def catalog_loop() -> None:
+                while True:
+                    try:
+                        await asyncio.to_thread(runtime.global_markets.run_scheduled, settings.catalog_sync_hours)
+                    except Exception as exc:
+                        log.error("catalog_schedule_failed", error=str(exc))
+                    await asyncio.sleep(600)
+
+            catalog_task = asyncio.create_task(catalog_loop())
         yield
-        if task:
-            task.cancel()
+        for t in (task, catalog_task):
+            if t:
+                t.cancel()
 
     app = FastAPI(title="QUANT AI TRADER", version=__version__, lifespan=lifespan,
                   description="Multi-asset algorithmic trading and research platform. Simulated results are not a guarantee of future returns.")
@@ -84,7 +96,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
                 response.headers.setdefault(name, value)
         return response
 
-    for module in (routes_auth, routes_settings, routes_trading, routes_research):
+    for module in (routes_auth, routes_settings, routes_trading, routes_research, routes_global):
         app.include_router(module.router)
     try:
         runtime.start()

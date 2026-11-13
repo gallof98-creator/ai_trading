@@ -19,6 +19,7 @@ through one engine, with backtesting, paper trading, a central risk engine and a
 | Brokers | Adapter framework with capability detection; CCXT (Binance, Bybit, …) and Interactive Brokers adapters; simulated venue |
 | Quant AI | Market-regime detection, 5 model types with purged out-of-sample validation and calibration, drift checks, analyst reports, gated parameter proposals |
 | Stock universe | Stocks and ETFs for the US and six European markets. Prices come from official data APIs with your own key (Tiingo and Alpha Vantage are free and US-only; EODHD is paid and covers US and Europe) or from price files imported in bulk. One strategy can be scanned across every instrument |
+| Global Markets | Catalog of listed securities discovered from providers, exchange by exchange (43 exchanges registered): stable internal id, ISIN and FIGI, instrument types kept apart, history of ticker changes and delistings, de-duplication across providers, coverage report. Phase 1 of the global module; scanner, rankings and global strategies are not built yet |
 | Dashboard | Overview, Markets, Strategies, Quant AI, Backtesting, Portfolio, Execution, Risk Center, Settings |
 | Security | Argon2 passwords, httpOnly sessions, roles, encrypted broker credentials, audit trail, rate limiting |
 
@@ -90,7 +91,7 @@ QAT_ADMIN_EMAIL=you@example.com QAT_ADMIN_PASSWORD='a-long-password' uvicorn app
 ```
 
 ```bash
-cd backend && pytest          # 219 tests, 4-5 minutes; never contacts a real broker
+cd backend && pytest          # 236 tests, 4-5 minutes; never contacts a real broker
 ```
 
 ```bash

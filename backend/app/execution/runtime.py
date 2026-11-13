@@ -123,7 +123,10 @@ class TradingRuntime:
         self.kinds: dict[str, str] = {}  # instrument -> data kind currently in use
         self.feed_status: dict[str, str] = {}
         self.replays: dict[str, dict] = {}
-        self.provider_factory = None  # test hook: callable(api_key) -> PriceProvider
+        from ..global_markets.service import GlobalMarkets
+
+        self.global_markets = GlobalMarkets(self)
+        self.provider_factory = None  # test hook: callable(name, api_key) -> PriceProvider
         self.download = None
         self.download_options: dict = {}
         self.started = False
@@ -422,6 +425,7 @@ class TradingRuntime:
 
     # ------------------------------------------------------------------ data providers
     PROVIDERS = ("tiingo", "alphavantage", "eodhd")
+    EXTRA_KEYS = ("finnhub", "openfigi")  # keys used by the global catalog only
 
     def _provider_key(self, name: str) -> tuple[str, str] | None:
         """(key, where it comes from) for a provider, or None. A stored key takes precedence over the environment."""
@@ -457,7 +461,7 @@ class TradingRuntime:
         """Store (encrypted) or remove a data-provider API key."""
         from ..security.vault import CredentialVault, VaultError
 
-        if name not in self.PROVIDERS:
+        if name not in self.PROVIDERS + self.EXTRA_KEYS:
             raise RuntimeError_(f"Unknown data provider {name}")
         with self.lock, self.db.session() as session:
             row = session.get(AppSetting, f"provider:{name}")

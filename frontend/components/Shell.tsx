@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError, Health, User } from "@/services/api";
 
 const NAV: { label: string; href: string }[] = [
-  { label: "Overview", href: "/" }, { label: "Markets", href: "/markets" }, { label: "Strategies", href: "/strategies" },
+  { label: "Overview", href: "/" }, { label: "Markets", href: "/markets" }, { label: "Global Markets", href: "/global" }, { label: "Strategies", href: "/strategies" },
   { label: "Quant AI", href: "/quant-ai" }, { label: "Backtesting", href: "/backtesting" }, { label: "Portfolio", href: "/portfolio" },
   { label: "Execution", href: "/execution" }, { label: "Risk Center", href: "/risk" }, { label: "Settings", href: "/settings" },
 ];

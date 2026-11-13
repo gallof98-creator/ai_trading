@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     tiingo_base_url: str = "https://api.tiingo.com"
     alphavantage_api_key: str = ""
     alphavantage_base_url: str = "https://www.alphavantage.co"
+    finnhub_api_key: str = ""
+    finnhub_base_url: str = "https://finnhub.io/api/v1"
+    openfigi_api_key: str = ""  # optional: OpenFIGI works without one, more slowly
+    catalog_sync_hours: int = Field(0, ge=0)  # re-synchronise the global catalog every N hours; 0 = only on request
     # MODELLING ASSUMPTION: currencies treated as trading 1:1 with another one for valuation.
     fx_pegs: dict[str, str] = {"USDT": "USD", "USDC": "USD"}
     fx_max_age_days: int = Field(5, gt=0)

@@ -19,6 +19,7 @@ Cookie-authenticated writes must send an `X-Requested-With` header. Roles: viewe
 | Notifications, FX | `GET /api/notifications`, `POST /api/notifications/read-all`, `GET/POST /api/fx`, `POST /api/fx/refresh-ecb` | viewer / admin |
 | Market data | `GET /api/market/coverage|analysis|quality`, `POST /api/market/import-csv`, `POST /api/market/import-csv-bulk`, `POST /api/market/generate-simulated` | viewer / trader |
 | Data provider | `GET /api/market/providers`, `PUT/DELETE /api/market/providers/{name}/key` (admin), `POST /api/market/providers/{name}/test`, `POST /api/market/providers/{name}/symbols`, `POST/GET /api/market/download`, `POST /api/market/download/cancel`, `GET /api/instruments/stats` | viewer / trader |
+| Global Markets | `GET /api/global/coverage`, `GET /api/global/providers`, `GET /api/global/securities`, `GET /api/global/securities/{id}`, `POST/GET /api/global/sync`, `POST /api/global/sync/cancel`, `POST /api/global/securities/activate` | viewer / trader |
 | Backtesting | `POST/GET /api/backtests`, `GET /api/backtests/{id}`, `POST /api/backtests/walk-forward`, `POST /api/backtests/compare`, `POST /api/backtests/scan` | trader / viewer |
 | Quant AI | `GET /api/ai/regime`, `GET /api/ai/anomalies`, `POST /api/ai/models/train`, `GET /api/ai/models`, `GET /api/ai/models/{id}/drift`, `POST/GET /api/ai/reports`, `POST/GET /api/ai/proposals`, `POST /api/ai/proposals/{id}/apply` (admin), `POST /api/ai/proposals/{id}/dismiss` | viewer / trader |
 | System | `GET /health` | – |

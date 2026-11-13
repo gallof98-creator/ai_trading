@@ -196,6 +196,66 @@ class BacktestRun(Base):
     status: Mapped[str] = mapped_column(String(16))
 
 
+class Security(Base):
+    """Global security master: one row per listing (a security on an exchange).
+
+    `id` is the platform's stable identifier. Tickers change and are reused, so they are never
+    used on their own to recognise a security: matching goes FIGI -> (ISIN, exchange) -> ticker.
+    """
+
+    __tablename__ = "securities"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    figi: Mapped[str | None] = mapped_column(String(12), index=True, nullable=True)
+    composite_figi: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    share_class_figi: Mapped[str | None] = mapped_column(String(12), index=True, nullable=True)
+    isin: Mapped[str | None] = mapped_column(String(12), index=True, nullable=True)
+    ticker: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(200), default="")
+    exchange: Mapped[str] = mapped_column(String(8), index=True)  # platform exchange code
+    mic: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    country: Mapped[str] = mapped_column(String(2), index=True)
+    currency: Mapped[str] = mapped_column(String(8))
+    security_type: Mapped[str] = mapped_column(String(24), index=True)
+    raw_type: Mapped[str] = mapped_column(String(64), default="")
+    sector: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    industry: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    market_cap: Mapped[Decimal | None] = mapped_column(Numeric(24, 2), nullable=True)
+    listing_status: Mapped[str] = mapped_column(String(12), index=True, default="active")  # active | delisted
+    trading_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    sources: Mapped[dict] = mapped_column(JSON, default=dict)  # provider -> {symbol, synced_at, missing_since}
+    instrument_id: Mapped[str | None] = mapped_column(String(64), nullable=True)  # linked tradable instrument, if any
+    figi_checked_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    first_seen: Mapped[datetime] = mapped_column(TS, default=_now)
+    last_seen: Mapped[datetime] = mapped_column(TS, default=_now)
+    last_synced: Mapped[datetime] = mapped_column(TS, default=_now)
+    __table_args__ = (Index("ix_securities_exchange_ticker", "exchange", "ticker"), Index("ix_securities_name", "name"))
+
+
+class SecurityEvent(Base):
+    """Append-only history of what changed for a security and which source reported it."""
+
+    __tablename__ = "security_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    security_id: Mapped[int] = mapped_column(ForeignKey("securities.id", ondelete="CASCADE"), index=True)
+    ts: Mapped[datetime] = mapped_column(TS, default=_now, index=True)
+    kind: Mapped[str] = mapped_column(String(24))  # listed | delisted | relisted | ticker_changed | name_changed | type_changed | identifier_added
+    old: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    new: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source: Mapped[str] = mapped_column(String(24))
+
+
+class SyncRun(Base):
+    __tablename__ = "sync_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(24), index=True)
+    exchange: Mapped[str] = mapped_column(String(8), index=True)
+    started_at: Mapped[datetime] = mapped_column(TS, default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    status: Mapped[str] = mapped_column(String(12))  # ok | failed
+    counts: Mapped[dict] = mapped_column(JSON, default=dict)
+    message: Mapped[str] = mapped_column(Text, default="")
+
+
 class ResearchItem(Base):
     """AI research artefacts: reports, proposed strategy configurations, trained model records."""
 
