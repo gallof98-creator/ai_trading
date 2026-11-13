@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     feed_interval_seconds: int = Field(0, ge=0)  # 0 disables the background market-data loop
     eodhd_api_key: str = ""  # optional: can also be stored (encrypted) from the dashboard
     eodhd_base_url: str = "https://eodhd.com/api"
+    tiingo_api_key: str = ""
+    tiingo_base_url: str = "https://api.tiingo.com"
+    alphavantage_api_key: str = ""
+    alphavantage_base_url: str = "https://www.alphavantage.co"
     # MODELLING ASSUMPTION: currencies treated as trading 1:1 with another one for valuation.
     fx_pegs: dict[str, str] = {"USDT": "USD", "USDC": "USD"}
     fx_max_age_days: int = Field(5, gt=0)

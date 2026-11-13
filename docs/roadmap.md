@@ -23,7 +23,7 @@ Status words mean exactly this: **Done** = implemented and covered by automated 
 
 ## Verification performed
 
-- Backend test suite: 216 tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
+- Backend test suite: 219 tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
 - Docker Compose stack (Postgres, Redis, API, worker, frontend): started healthy, migrations applied on Postgres, full browser flow passed (login, settings, paper account, data, deployment, replay, overview, portfolio, kill switch, backtest, comparison, model training, report), state identical after an API container restart, no errors or secrets in the logs.
 
 ## Not verified or not built — read before relying on anything
@@ -34,8 +34,12 @@ Status words mean exactly this: **Done** = implemented and covered by automated 
 - Stocks and ETFs can be added from the dashboard and are tradable on paper accounts, but there is no UI for broker symbol mappings: CCXT symbols map automatically, IBKR symbols currently need a database row, which makes IBKR impractical from the dashboard today. Forex pairs, futures and crypto pairs beyond the starter set cannot be added from the dashboard yet.
 
 **Market data**
-- Stock prices can be downloaded from EODHD (official API, user's own key, paid plan for full coverage). **The connector has never talked to the real service**: it was written from the vendor's documented endpoints and tested against a local stand-in that returns responses of the documented shape. The first thing to do is press "Test connection"; if the real response differs from the documentation, the connector needs adjusting.
-- Free websites such as Yahoo Finance and Stooq are not connected on purpose: they offer no official API and reject or forbid automated access, so a connector would have to pose as a browser.
+- Stock prices can be downloaded from three vendors with an official API and the user's own key. What was verified against the real services:
+  - **EODHD** (paid for real coverage; US and Europe): the price endpoint was run live with the vendor's public demo key, including continuity across a stock split. The symbol-list endpoint needs a real key and was only tested against responses of the documented shape.
+  - **Alpha Vantage** (free, about 25 requests a day; US only here): the US symbol list (about 8,150 stocks and 5,900 ETFs imported) and a daily series were run live with the public demo key, followed by a backtest on the downloaded data. How much history a personal free key returns is not verified; if only 100 days are allowed the series is labelled `last100`. Prices are unadjusted.
+  - **Tiingo** (free; US only): only the rejection of a wrong key was observed live. Price parsing is written from the documented format and has not seen a real response; press "Test connection" first.
+- No free official API covers European stocks at scale. TradingView, Yahoo Finance and Stooq are not connected on purpose: they offer no official data API and reject or forbid automated access, so a connector would have to pose as a browser.
+- Free plans are slow by design: Tiingo is paced at one request every 75 seconds (about 500 stocks take over ten hours and a month's symbol allowance), Alpha Vantage at about 25 series a day.
 - EODHD prices are stored adjusted for splits and dividends (open/high/low/close scaled by adjusted_close / close); volume is as reported. A refresh replaces the whole history of an instrument.
 - Listings contain only companies listed today. Delisted and bankrupt companies are missing, so results across "all stocks" are biased upwards (survivorship bias).
 - A universe scan runs at most 300 instruments per request; storing 10+ years for several thousand stocks means tens of millions of rows, which Postgres handles but SQLite does not handle well.

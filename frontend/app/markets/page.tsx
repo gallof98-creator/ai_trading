@@ -82,12 +82,15 @@ function Universe({ onChange }: { onChange: () => void }) {
   );
 }
 
+type Provider = { name: string; label: string; markets: string[]; listing_markets: string[]; pricing: string; signup_url: string; seconds_per_request: number;
+  configured: boolean; key_hint: string | null; source: string | null; error?: string };
+
 function DataProvider({ user, onChange }: { user: User; onChange: () => void }) {
-  const providers = useApi("/api/market/providers");
+  const providers = useApi<Provider[]>("/api/market/providers");
   const markets = useApi("/api/markets");
   const stats = useApi("/api/instruments/stats", 15_000);
-  const [polling, setPolling] = useState(true);
-  const job = useApi("/api/market/download", polling ? 2_000 : 0);
+  const job = useApi("/api/market/download", 2_000);
+  const [name, setName] = useState("tiingo");
   const [key, setKey] = useState("");
   const [market, setMarket] = useState("US");
   const [etfs, setEtfs] = useState(false);
@@ -95,72 +98,93 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
   const [test, setTest] = useState<{ ok: boolean; message: string } | null>(null);
   const [importing, setImporting] = useState(false);
   const act = useAction();
-  const p = providers.data?.[0];
+  const p = (providers.data ?? []).find((x) => x.name === name);
   const running = job.data && ["pending", "running"].includes(job.data.status);
   const isAdmin = user.role === "admin";
-  const m = stats.data?.by_market?.[market];
   const refresh = () => { providers.reload(); stats.reload(); job.reload(); onChange(); };
+  const pick = (n: string) => { setName(n); setKey(""); setTest(null); act.setMsg(null); const np = (providers.data ?? []).find((x) => x.name === n); if (np && !np.markets.includes(market)) setMarket(np.markets[0]); };
+  const m = stats.data?.by_market?.[market];
+  const missing = m ? m.instruments - m.with_data : 0;
+  const eta = p ? Math.round((missing * p.seconds_per_request) / 60) : 0;
+  const start = (onlyMissing: boolean) => act.run(() => post("/api/market/download", { provider: name, market, years, only_missing: onlyMissing }), "Download started.").then(() => job.reload());
 
   return (
-    <Panel title="Data provider: EODHD (US and European stocks, official API)" right={p && <Badge kind={p.configured ? "up" : "dim"}>{p.configured ? `key ${p.key_hint} (${p.source})` : "no key"}</Badge>}>
-      <div className="space-y-4">
-        <p className="text-xs text-dim">Downloads daily prices, adjusted for splits and dividends, straight from eodhd.com with your own API key. A paid plan is needed for full US and European coverage. The key is stored encrypted and never shown again.</p>
-        {isAdmin && (
-          <div className="flex flex-wrap items-end gap-3">
-            <Field label="EODHD API key"><input type="password" autoComplete="new-password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={p?.configured ? "replace stored key" : ""} /></Field>
-            <Button kind="ghost" disabled={act.busy || key.trim().length < 4} onClick={() => act.run(() => post("/api/market/providers/eodhd/key", { api_key: key }, "PUT"), "Key stored.").then((ok) => { if (ok) { setKey(""); setTest(null); refresh(); } })}>Save key</Button>
-            {p?.configured && p.source === "stored" && <Button kind="ghost" disabled={act.busy} onClick={() => window.confirm("Remove the stored EODHD key?") && act.run(() => post("/api/market/providers/eodhd/key", undefined, "DELETE"), "Key removed.").then(refresh)}>Remove key</Button>}
+    <Panel title="Data providers (official APIs, your own key)" right={
+      <div className="flex flex-wrap gap-1">{(providers.data ?? []).map((x) => (
+        <button key={x.name} onClick={() => pick(x.name)} className={`rounded border px-2 py-1 font-mono text-xs ${x.name === name ? "border-accent text-accent" : "border-line text-dim hover:text-ink"}`}>
+          {x.label}{x.configured ? " ✓" : ""}
+        </button>))}
+      </div>}>
+      {!p ? <p className="text-sm text-dim">Loading…</p> : (
+        <div className="space-y-4">
+          <div className="space-y-1 text-xs text-dim">
+            <p><span className="text-ink">{p.label}</span> · prices for: {p.markets.join(", ")} · symbol lists for: {p.listing_markets.join(", ") || "none"} · {p.configured ? <Badge kind="up">key {p.key_hint} ({p.source})</Badge> : <Badge>no key</Badge>}</p>
+            <p>{p.pricing} Get a key at <span className="font-mono text-ink">{p.signup_url.replace("https://", "")}</span>. Keys are stored encrypted and never shown again.</p>
+            {p.error && <p className="text-down">{p.error}</p>}
           </div>
-        )}
-        {p?.configured && (
-          <>
-            <div className="flex flex-wrap items-center gap-3">
-              <Button kind="ghost" disabled={act.busy} onClick={() => act.run(async () => setTest(await post("/api/market/providers/eodhd/test")), "Test done.")}>Test connection</Button>
-              {test && <span className={`text-sm ${test.ok ? "text-up" : "text-down"}`}>{test.message}</span>}
+          {isAdmin && (
+            <div className="flex flex-wrap items-end gap-3">
+              <Field label={`${p.label} API key`}><input type="password" autoComplete="new-password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={p.configured ? "replace stored key" : ""} /></Field>
+              <Button kind="ghost" disabled={act.busy || key.trim().length < 4} onClick={() => act.run(() => post(`/api/market/providers/${name}/key`, { api_key: key }, "PUT"), "Key stored.").then((ok) => { if (ok) { setKey(""); setTest(null); refresh(); } })}>Save key</Button>
+              {p.configured && p.source === "stored" && <Button kind="ghost" disabled={act.busy} onClick={() => window.confirm(`Remove the stored ${p.label} key?`) && act.run(() => post(`/api/market/providers/${name}/key`, undefined, "DELETE"), "Key removed.").then(refresh)}>Remove key</Button>}
             </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-              <div className="space-y-3 rounded border border-line p-3">
-                <h3 className="text-sm font-semibold">1 · Import the list of listed companies</h3>
-                <div className="flex flex-wrap items-end gap-3">
-                  <Field label="Market"><select value={market} onChange={(e) => setMarket(e.target.value)}>{(markets.data ?? []).map((x: { code: string; label: string }) => <option key={x.code} value={x.code}>{x.label}</option>)}</select></Field>
-                  <label className="flex items-center gap-2 pb-2 text-xs text-dim"><input type="checkbox" className="!w-auto" checked={etfs} onChange={(e) => setEtfs(e.target.checked)} /> include ETFs</label>
-                  <Button kind="ghost" disabled={act.busy || importing} onClick={async () => {
-                    setImporting(true);
-                    try {
-                      const r = await post("/api/market/providers/eodhd/symbols", { market, types: etfs ? ["stock", "etf"] : ["stock"] });
-                      act.setMsg({ ok: true, text: `${r.created} instruments added, ${r.existing} already present (${r.listed} listed by the provider).` });
-                      refresh();
-                    } catch (e) {
-                      act.setMsg({ ok: false, text: e instanceof Error ? e.message : "Request failed" });
-                    } finally {
-                      setImporting(false);
-                    }
-                  }}>Import symbol list</Button>
-                </div>
-                <p className="text-xs text-dim">In the universe for this market: {m ? `${m.instruments} instruments, ${m.with_data} with stored prices` : "none yet"}. US over-the-counter listings are skipped.</p>
+          )}
+          {p.configured && (
+            <>
+              <div className="flex flex-wrap items-center gap-3">
+                <Button kind="ghost" disabled={act.busy} onClick={() => act.run(async () => setTest(await post(`/api/market/providers/${name}/test`)), "Test done.")}>Test connection</Button>
+                {test && <span className={`text-sm ${test.ok ? "text-up" : "text-down"}`}>{test.message}</span>}
               </div>
-              <div className="space-y-3 rounded border border-line p-3">
-                <h3 className="text-sm font-semibold">2 · Download price history</h3>
-                <div className="flex flex-wrap items-end gap-3">
-                  <Field label="Years of history"><input type="number" min="1" max="40" value={years} onChange={(e) => setYears(Number(e.target.value))} /></Field>
-                  <Button disabled={act.busy || running} onClick={() => act.run(() => post("/api/market/download", { market, years, only_missing: true }), "Download started.").then(() => { setPolling(true); job.reload(); })}>Download missing ({market})</Button>
-                  <Button kind="ghost" disabled={act.busy || running} onClick={() => window.confirm(`Download again and replace the stored history of every ${market} instrument?`) && act.run(() => post("/api/market/download", { market, years, only_missing: false }), "Download started.").then(() => { setPolling(true); job.reload(); })}>Refresh all ({market})</Button>
-                  {running && <Button kind="ghost" onClick={() => post("/api/market/download/cancel").then(job.reload)}>Cancel</Button>}
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="space-y-3 rounded border border-line p-3">
+                  <h3 className="text-sm font-semibold">1 · Import the list of listed companies</h3>
+                  {p.listing_markets.length === 0 ? <p className="text-xs text-dim">{p.label} has no symbol list here. Import the US list with Alpha Vantage (one request), or add tickers by hand in the panel below.</p> : (
+                    <div className="flex flex-wrap items-end gap-3">
+                      <Field label="Market"><select aria-label="Listing market" value={p.listing_markets.includes(market) ? market : p.listing_markets[0]} onChange={(e) => setMarket(e.target.value)}>
+                        {(markets.data ?? []).filter((x: { code: string }) => p.listing_markets.includes(x.code)).map((x: { code: string; label: string }) => <option key={x.code} value={x.code}>{x.label}</option>)}</select></Field>
+                      <label className="flex items-center gap-2 pb-2 text-xs text-dim"><input type="checkbox" className="!w-auto" checked={etfs} onChange={(e) => setEtfs(e.target.checked)} /> include ETFs</label>
+                      <Button kind="ghost" disabled={act.busy || importing} onClick={async () => {
+                        setImporting(true);
+                        try {
+                          const r = await post(`/api/market/providers/${name}/symbols`, { market: p.listing_markets.includes(market) ? market : p.listing_markets[0], types: etfs ? ["stock", "etf"] : ["stock"] });
+                          act.setMsg({ ok: true, text: `${r.created} instruments added, ${r.existing} already present (${r.listed} listed by the provider).` });
+                          refresh();
+                        } catch (e) {
+                          act.setMsg({ ok: false, text: e instanceof Error ? e.message : "Request failed" });
+                        } finally {
+                          setImporting(false);
+                        }
+                      }}>{importing ? "Importing…" : "Import symbol list"}</Button>
+                    </div>
+                  )}
+                  <p className="text-xs text-dim">Universe for {market}: {m ? `${m.instruments} instruments, ${m.with_data} with stored prices` : "none yet"}.</p>
                 </div>
-                <p className="text-xs text-dim">One request per instrument, in the background; you can leave this page. A whole exchange can take from minutes to over an hour.</p>
+                <div className="space-y-3 rounded border border-line p-3">
+                  <h3 className="text-sm font-semibold">2 · Download price history</h3>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <Field label="Market"><select aria-label="Download market" value={p.markets.includes(market) ? market : p.markets[0]} onChange={(e) => setMarket(e.target.value)}>
+                      {(markets.data ?? []).filter((x: { code: string }) => p.markets.includes(x.code)).map((x: { code: string; label: string }) => <option key={x.code} value={x.code}>{x.label}</option>)}</select></Field>
+                    <Field label="Years of history"><input type="number" min="1" max="40" value={years} onChange={(e) => setYears(Number(e.target.value))} /></Field>
+                    <Button disabled={act.busy || running || !p.markets.includes(market)} onClick={() => start(true)}>Download missing</Button>
+                    <Button kind="ghost" disabled={act.busy || running || !p.markets.includes(market)} onClick={() => window.confirm(`Download again and replace the stored history of every ${market} instrument?`) && start(false)}>Refresh all</Button>
+                    {running && <Button kind="ghost" onClick={() => post("/api/market/download/cancel").then(job.reload)}>Cancel</Button>}
+                  </div>
+                  <p className="text-xs text-dim">One request per instrument every {p.seconds_per_request >= 1 ? `${p.seconds_per_request} seconds` : "fraction of a second"} to stay within the plan, in the background.
+                    {missing > 0 && p.markets.includes(market) ? ` ${missing} instruments without prices: about ${eta >= 120 ? `${Math.round(eta / 60)} hours` : `${Math.max(eta, 1)} minutes`} if the plan's allowance lasts.` : ""} When the allowance runs out the download stops and "Download missing" resumes it later.</p>
+                </div>
               </div>
+            </>
+          )}
+          {job.data && job.data.status !== "idle" && (
+            <div className="space-y-2 rounded border border-line p-3">
+              <Meter label={`Download via ${job.data.provider}: ${job.data.status}${job.data.current ? ` · ${job.data.current}` : ""}`} value={job.data.done} limit={job.data.total} format={(v) => String(v)} />
+              <p className="font-mono text-xs"><span className="text-up">{job.data.stored} stored</span> · {num(job.data.bars, 0)} bars · <span className={job.data.failed_count ? "text-down" : "text-dim"}>{job.data.failed_count} failed</span>{job.data.message ? ` · ${job.data.message}` : ""}</p>
+              {job.data.failed.length > 0 && <Table max="max-h-40" head={["Instrument", "Reason"]} rows={job.data.failed.map((f: { instrument_id: string; reason: string }) => [f.instrument_id, <span key="r" className="whitespace-normal text-dim">{f.reason}</span>])} />}
             </div>
-            {job.data && job.data.status !== "idle" && (
-              <div className="space-y-2 rounded border border-line p-3">
-                <Meter label={`Download ${job.data.status}${job.data.current ? ` · ${job.data.current}` : ""}`} value={job.data.done} limit={job.data.total} format={(v) => String(v)} />
-                <p className="font-mono text-xs"><span className="text-up">{job.data.stored} stored</span> · {num(job.data.bars, 0)} bars · <span className={job.data.failed_count ? "text-down" : "text-dim"}>{job.data.failed_count} failed</span>{job.data.message ? ` · ${job.data.message}` : ""}</p>
-                {job.data.failed.length > 0 && <Table max="max-h-40" head={["Instrument", "Reason"]} rows={job.data.failed.map((f: { instrument_id: string; reason: string }) => [f.instrument_id, <span key="r" className="whitespace-normal text-dim">{f.reason}</span>])} />}
-              </div>
-            )}
-          </>
-        )}
-        <Msg msg={act.msg} />
-      </div>
+          )}
+          <Msg msg={act.msg} />
+        </div>
+      )}
     </Panel>
   );
 }

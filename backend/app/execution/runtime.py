@@ -421,7 +421,7 @@ class TradingRuntime:
             audit.record(session, actor, "instruments.removed", instrument_id=instrument_id)
 
     # ------------------------------------------------------------------ data providers
-    PROVIDERS = ("eodhd",)
+    PROVIDERS = ("tiingo", "alphavantage", "eodhd")
 
     def _provider_key(self, name: str) -> tuple[str, str] | None:
         """(key, where it comes from) for a provider, or None. A stored key takes precedence over the environment."""
@@ -435,16 +435,22 @@ class TradingRuntime:
         return (env_key, "environment") if env_key else None
 
     def provider_status(self) -> list[dict]:
+        from ..market_data.providers import PROVIDER_CLASSES
         from ..security.vault import VaultError
 
         out = []
         for name in self.PROVIDERS:
+            cls = PROVIDER_CLASSES[name]
+            info = {"name": name, "label": cls.label, "markets": sorted(cls.markets), "listing_markets": sorted(cls.listing_markets),
+                    "pricing": cls.pricing, "signup_url": cls.signup_url, "seconds_per_request": cls.min_interval,
+                    "configured": False, "key_hint": None, "source": None}
             try:
                 found = self._provider_key(name)
-                out.append({"name": name, "configured": found is not None, "key_hint": f"…{found[0][-4:]}" if found else None,
-                            "source": found[1] if found else None})
+                if found:
+                    info.update(configured=True, key_hint=f"…{found[0][-4:]}", source=found[1])
             except VaultError as exc:
-                out.append({"name": name, "configured": False, "key_hint": None, "source": None, "error": str(exc)})
+                info["error"] = str(exc)
+            out.append(info)
         return out
 
     def set_provider_key(self, name: str, api_key: str | None, actor: str) -> None:
@@ -471,7 +477,7 @@ class TradingRuntime:
             audit.record(session, actor, "provider.key_stored", provider=name, key_hint=api_key[-4:])
 
     def _provider(self, name: str):
-        from ..market_data.providers import EodhdProvider
+        from ..market_data.providers import PROVIDER_CLASSES
         from ..security.vault import VaultError
 
         if name not in self.PROVIDERS:
@@ -481,10 +487,10 @@ class TradingRuntime:
         except VaultError as exc:
             raise RuntimeError_(str(exc)) from None
         if found is None:
-            raise RuntimeError_(f"No API key is configured for {name}. Add it under Markets → Data provider.")
+            raise RuntimeError_(f"No API key is configured for {PROVIDER_CLASSES[name].label}. Add it under Markets → Data providers.")
         if self.provider_factory is not None:
-            return self.provider_factory(found[0])
-        return EodhdProvider(found[0], base_url=self.settings.eodhd_base_url)
+            return self.provider_factory(name, found[0])
+        return PROVIDER_CLASSES[name](found[0], base_url=getattr(self.settings, f"{name}_base_url"))
 
     def test_provider(self, name: str) -> dict:
         """One real request for a well-known symbol, so the user can confirm key, plan and data format."""
@@ -507,6 +513,8 @@ class TradingRuntime:
         from ..market_data.providers import ProviderError
 
         provider = self._provider(name)
+        if market not in provider.listing_markets:
+            raise RuntimeError_(f"{provider.label} cannot list the symbols of this market")
         try:
             listed = provider.list_symbols(market)
         except ProviderError as exc:
@@ -553,7 +561,9 @@ class TradingRuntime:
                     raise RuntimeError_(f"Unknown instrument {exc}") from None
             else:
                 selected = [i for i in self.registry.all() if market_of(i) is not None and (market is None or market_of(i) == market)]
-            selected = [i for i in selected if market_of(i) is not None]
+            selected = [i for i in selected if market_of(i) in provider.markets]
+            if not selected:
+                raise RuntimeError_(f"{provider.label} does not cover the selected instruments (it covers: {', '.join(sorted(provider.markets))})")
             if only_missing:
                 with self.db.session() as session:
                     have = {c["instrument_id"] for c in self.store.coverage(session) if c["timeframe"] == "1d" and c["kind"] != "simulated"}

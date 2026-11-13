@@ -32,8 +32,9 @@ class FakeHttp:
     def __init__(self):
         self.calls, self.responses, self.fail = [], {}, {}
 
-    def __call__(self, url, params=None, timeout=None):
+    def __call__(self, url, params=None, timeout=None, headers=None):
         self.calls.append((url, dict(params)))
+        self.headers = headers
         path = url.split("/api/")[1]
         if path in self.fail:
             outcome = self.fail[path].pop(0) if isinstance(self.fail[path], list) else self.fail[path]
@@ -145,7 +146,8 @@ def test_download_job_isolates_failures_retries_rate_limits_and_stops_on_bad_key
     assert st["status"] == "finished" and (st["total"], st["done"], st["stored"], st["failed_count"]) == (4, 4, 2, 2)
     assert set(stored) == {"STOCK:AAA", "STOCK:CCC"} and st["bars"] == sum(stored.values())
     assert {f["instrument_id"]: f["reason"] for f in st["failed"]} == {"STOCK:BBB": "EODHD has no data for this symbol", "STOCK:DDD": "RuntimeError: disk full"}
-    assert 30.0 in sleeps and sleeps.count(0.25) == 4  # backed off after the 429, paced between symbols
+    assert 30.0 in sleeps and sleeps.count(0.25) == 3  # backed off after the 429, paced between symbols (not after the last)
+    assert DownloadJob(provider(http), instruments, store).min_interval == EodhdProvider.min_interval  # default pacing comes from the provider
     assert http.calls[0][1]["from"] == "2019-06-03" and http.calls[0][1]["to"] == "2024-06-03"
 
     http.fail = {"eod/AAA.US": 401}
@@ -167,7 +169,7 @@ def api(client):
     client.put("/api/settings", headers=admin, json=UserSettings(initial_paper_capital=100_000).model_dump())
     http = FakeHttp()
     rt = client.app.state.container.runtime
-    rt.provider_factory = lambda key: EodhdProvider(key, http_get=http)
+    rt.provider_factory = lambda name, key: EodhdProvider(key, http_get=http)
     rt.download_options = {"sleep": lambda s: None, "min_interval": 0}
     return client, admin, http, rt
 
@@ -183,14 +185,18 @@ def wait(client, admin):
 
 def test_provider_key_is_encrypted_never_returned_and_role_protected(api, db):
     client, admin, http, rt = api
-    assert client.get("/api/market/providers", headers=admin).json() == [{"name": "eodhd", "configured": False, "key_hint": None, "source": None}]
+    def eodhd():
+        return next(p for p in client.get("/api/market/providers", headers=admin).json() if p["name"] == "eodhd")
+
+    assert [p["name"] for p in client.get("/api/market/providers", headers=admin).json()] == ["tiingo", "alphavantage", "eodhd"]
+    assert (eodhd()["configured"], eodhd()["key_hint"], eodhd()["source"]) == (False, None, None) and "IT" in eodhd()["markets"]
     assert "No API key" in client.post("/api/market/providers/eodhd/test", headers=admin).json()["detail"]
     viewer = login(client, VIEWER)
     assert client.put("/api/market/providers/eodhd/key", headers=viewer, json={"api_key": KEY}).status_code == 403
     assert client.put("/api/market/providers/nope/key", headers=admin, json={"api_key": KEY}).status_code == 400
     assert client.put("/api/market/providers/eodhd/key", headers=admin, json={"api_key": KEY}).status_code == 204
     status = client.get("/api/market/providers", headers=admin)
-    assert status.json() == [{"name": "eodhd", "configured": True, "key_hint": "…ABCD", "source": "stored"}]
+    assert (eodhd()["configured"], eodhd()["key_hint"], eodhd()["source"]) == (True, "…ABCD", "stored")
     from sqlalchemy import select
 
     from app.database.models import AppSetting, AuditEntry
@@ -205,7 +211,7 @@ def test_provider_key_is_encrypted_never_returned_and_role_protected(api, db):
     http.fail["eod/AAPL.US"] = 401
     assert client.post("/api/market/providers/eodhd/test", headers=admin).json() == {"ok": False, "message": "EODHD rejected the API key, or the plan does not include this data"}
     assert client.delete("/api/market/providers/eodhd/key", headers=admin).status_code == 204
-    assert client.get("/api/market/providers", headers=admin).json()[0]["configured"] is False
+    assert eodhd()["configured"] is False
 
 
 def test_import_listing_download_and_backtest_end_to_end(api):
@@ -266,3 +272,130 @@ def test_download_refuses_to_overwrite_simulated_data(api):
     st = wait(client, admin)
     assert st["stored"] == 0 and "simulated" in st["failed"][0]["reason"]
     assert client.get("/api/market/coverage", headers=admin).json()[0]["kind"] == "simulated"
+
+
+# ---------------------------------------------------------------- free providers
+from app.market_data.providers import AlphaVantageProvider, TiingoProvider  # noqa: E402
+
+
+class Resp(SimpleNamespace):
+    pass
+
+
+def tiingo_rows(seed, n=400):
+    f = synthetic_bars("1d", n, seed=seed, start="2021-01-04", start_price=100, annual_vol=0.3).bars
+    f = f[f.index.day_of_week < 5]
+    return f, [{"date": ts.strftime("%Y-%m-%dT00:00:00.000Z"), "open": r.open * 4, "high": r.high * 4, "low": r.low * 4, "close": r.close * 4, "volume": int(r.volume),
+                "adjOpen": r.open, "adjHigh": r.high, "adjLow": r.low, "adjClose": r.close, "adjVolume": int(r.volume) * 4, "divCash": 0.0, "splitFactor": 1.0}
+               for ts, r in f.iterrows()]
+
+
+def test_tiingo_uses_adjusted_prices_sends_key_in_header_and_classifies_errors():
+    seen = {}
+    truth, rows = tiingo_rows(2)
+
+    def get(url, params=None, timeout=None, headers=None):
+        seen.update(url=url, params=params, headers=headers)
+        return Resp(status_code=seen.get("code", 200), json=lambda: seen.get("body", rows))
+
+    p = TiingoProvider(KEY, http_get=get)
+    ds = p.daily_bars(make_equity("BRK.B", "US"), date(2021, 1, 1), date(2022, 6, 1))
+    assert seen["url"] == "https://api.tiingo.com/tiingo/daily/brk-b/prices" and seen["headers"]["Authorization"] == f"Token {KEY}"
+    assert KEY not in json.dumps(seen["params"]) and seen["params"] == {"format": "json", "startDate": "2021-01-01", "endDate": "2022-06-01"}
+    assert ds.source == "tiingo" and (ds.bars.index == truth.index).all()
+    pd.testing.assert_series_equal(ds.bars.close, truth.close, check_names=False)  # adjusted values, not the raw ones
+    for code, exc in ((401, ProviderAuthError), (403, ProviderAuthError), (404, SymbolNotFound), (429, ProviderRateLimited), (500, ProviderError)):
+        seen["code"] = code
+        with pytest.raises(exc):
+            p.daily_bars(make_equity("AAPL", "US"))
+    seen.update(code=200, body={"detail": "Error: You have run over your hourly request allocation."})
+    with pytest.raises(ProviderRateLimited):
+        p.daily_bars(make_equity("AAPL", "US"))
+    with pytest.raises(SymbolNotFound, match="US stocks only"):
+        p.daily_bars(make_equity("ENI", "IT"))
+    assert TiingoProvider.markets == {"US"} and TiingoProvider.min_interval >= 72  # 50 requests an hour
+
+
+AV_DAILY = {"Meta Data": {"2. Symbol": "IBM", "4. Output Size": "Full size"}, "Time Series (Daily)": {
+    "2026-11-12": {"1. open": "248.3000", "2. high": "248.7700", "3. low": "244.3700", "4. close": "244.6700", "5. volume": "2816978"},
+    "2026-11-11": {"1. open": "244.7200", "2. high": "249.3100", "3. low": "244.0000", "4. close": "248.1000", "5. volume": "3100000"},
+    "2026-11-10": {"1. open": "0", "2. high": "0", "3. low": "0", "4. close": "0", "5. volume": "0"}}}
+AV_LISTING = """symbol,name,exchange,assetType,ipoDate,delistingDate,status
+-P-HIZ,Presurance Holdings Inc,NASDAQ,Stock,2023-08-30,null,Active
+A,Agilent Technologies Inc,NYSE,Stock,1999-11-18,null,Active
+BRK-B,Berkshire Hathaway Inc - Class B,NYSE,Stock,1996-05-09,null,Active
+ABR-P-D,Arbor Realty Trust Inc,NYSE,Stock,2021-06-02,null,Active
+AACTWS,Ares Acquisition Corp II Warrant,NYSE,Stock,2023-06-12,null,Active
+SPY,SPDR S&P 500 ETF Trust,NYSE ARCA,ETF,1993-01-29,null,Active
+OLD,Gone Corp,NYSE,Stock,1990-01-01,2020-01-01,Delisted
+"""
+AV_LIMIT = {"Information": "We have detected your API key as XXXX and our standard API rate limit is 25 requests per day. Please subscribe to any of the premium plans."}
+AV_PREMIUM = {"Information": "Thank you for using Alpha Vantage! The outputsize=full parameter value is a premium feature for the TIME_SERIES_DAILY endpoint."}
+AV_DEMO = {"Information": "The **demo** API key is for demo purposes only. Please claim your free API key at (https://www.alphavantage.co/support/#api-key)."}
+
+
+def test_alpha_vantage_parsing_free_plan_fallback_and_message_classification():
+    """Payload shapes below were captured from the live service with its public demo key."""
+    script, calls = [], []
+
+    def get(url, params=None, timeout=None, headers=None):
+        calls.append(dict(params))
+        body = script.pop(0)
+        return Resp(status_code=200, json=lambda: body, text=body if isinstance(body, str) else json.dumps(body))
+
+    p = AlphaVantageProvider(KEY, http_get=get)
+    script[:] = [AV_DAILY]
+    ds = p.daily_bars(make_equity("IBM", "US"))
+    assert calls[-1] == {"function": "TIME_SERIES_DAILY", "symbol": "IBM", "outputsize": "full", "apikey": KEY}
+    assert list(ds.bars.index.strftime("%Y-%m-%d")) == ["2026-11-11", "2026-11-12"] and ds.bars.close.iloc[-1] == 244.67  # sorted; the all-zero row is dropped
+    assert ds.source == "alphavantage:unadjusted"
+    script[:] = [AV_PREMIUM, AV_DAILY]  # free keys: full history refused -> falls back to the latest 100 days and says so
+    assert p.daily_bars(make_equity("IBM", "US")).source == "alphavantage:unadjusted:last100" and calls[-1]["outputsize"] == "compact"
+    for body, exc in ((AV_LIMIT, ProviderRateLimited), (AV_DEMO, ProviderAuthError), ({"Error Message": "Invalid API call."}, SymbolNotFound), ({}, ProviderError)):
+        script[:] = [body]
+        with pytest.raises(exc) as info:
+            p.daily_bars(make_equity("IBM", "US"))
+        assert KEY not in str(info.value)
+    script[:] = [AV_LISTING]
+    listed = p.list_symbols("US")
+    assert [(r["ticker"], r["type"], r["exchange"]) for r in listed] == [("A", "stock", "NYSE"), ("BRK.B", "stock", "NYSE"), ("SPY", "etf", "NYSE ARCA")]
+    script[:] = [json.dumps(AV_LIMIT)]
+    with pytest.raises(ProviderRateLimited):
+        p.list_symbols("US")
+    with pytest.raises(ProviderError):
+        p.list_symbols("IT")
+
+
+def test_exhausted_allowance_stops_the_job_and_download_missing_resumes(api):
+    client, admin, http, rt = api
+    state = {"allowed": 2}
+
+    class Limited(EodhdProvider):
+        label, markets, listing_markets = "Limited", frozenset({"US"}), frozenset()
+
+        def daily_bars(self, instrument, start=None, end=None):
+            if state["allowed"] <= 0:
+                raise ProviderRateLimited("daily limit reached")
+            state["allowed"] -= 1
+            return super().daily_bars(instrument, start, end)
+
+    rt.provider_factory = lambda name, key: Limited(key, http_get=http)
+    client.put("/api/market/providers/tiingo/key", headers=admin, json={"api_key": KEY})
+    client.post("/api/instruments", headers=admin, json={"tickers": ["AAA", "BBB", "CCC", "DDD"], "market": "US"})
+    client.post("/api/instruments", headers=admin, json={"tickers": ["ENI"], "market": "IT"})
+    for i, t in enumerate(("AAA", "BBB", "CCC", "DDD"), start=1):
+        http.responses[f"eod/{t}.US"] = eod_rows(i, n=300)[1]
+    ids = [f"STOCK:{t}" for t in ("AAA", "BBB", "CCC", "DDD")]
+    assert client.post("/api/market/download", headers=admin, json={"provider": "tiingo", "instrument_ids": ids}).json()["total"] == 4
+    st = wait(client, admin)
+    assert st["status"] == "stopped" and st["stored"] == 2 and st["failed_count"] == 0 and "resumes" in st["message"]
+    state["allowed"] = 10  # the next day
+    assert client.post("/api/market/download", headers=admin, json={"provider": "tiingo", "instrument_ids": ids}).json()["total"] == 2
+    assert wait(client, admin)["status"] == "finished"
+    assert len([c for c in client.get("/api/market/coverage", headers=admin).json() if c["instrument_id"] in ids]) == 4
+    # A provider is never asked for markets it does not cover.
+    r = client.post("/api/market/download", headers=admin, json={"provider": "tiingo", "instrument_ids": ["STOCK:ENI.MI"]})
+    assert r.status_code == 400 and "does not cover" in r.json()["detail"]
+    r = client.post("/api/market/providers/tiingo/symbols", headers=admin, json={"market": "US"})
+    assert r.status_code == 400 and "cannot list" in r.json()["detail"]
+    assert client.post("/api/market/download", headers=admin, json={"provider": "nope"}).status_code == 400
