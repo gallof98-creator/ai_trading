@@ -61,6 +61,7 @@ function Backtesting({ user }: { user: User }) {
   const [wf, setWf] = useState<Json>(null);
   const [cmpSel, setCmpSel] = useState<string[]>(["ema_crossover", "donchian_breakout", "rsi_reversion"]);
   const [cmp, setCmp] = useState<Json>(null);
+  const [scan, setScan] = useState<Json>(null);
   const act = useAction();
   const canWrite = user.role !== "viewer";
   const meta = (library.data ?? []).find((s: Json) => s.name === form.strategy);
@@ -152,6 +153,31 @@ function Backtesting({ user }: { user: User }) {
           </div>
         </Panel>
       </div>
+      <Panel title="Universe scan: one strategy across every instrument with stored data">
+        <div className="space-y-3">
+          <p className="text-xs text-dim">Runs the strategy and parameters selected at the top independently on each instrument that has stored bars on the selected timeframe ({form.timeframe}). Use it to see whether a result holds across many stocks instead of one.</p>
+          {canWrite && <Button kind="ghost" disabled={act.busy} onClick={() => act.run(async () => {
+            setScan(await post("/api/backtests/scan", { strategy: form.strategy, params: p, timeframe: form.timeframe, ...common(),
+              execution: { spread_bps: Number(form.spread_bps), slippage_bps: Number(form.slippage_bps), participation_rate: Number(form.participation_rate) || null } }));
+          }, "Scan finished.")}>{act.busy ? "Running…" : `Scan all instruments (${form.timeframe})`}</Button>}
+          {scan && (
+            <>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+                <Stat label="Instruments tested" value={scan.summary.instruments_tested} hint={scan.summary.instruments_skipped ? `${scan.summary.instruments_skipped} skipped` : undefined} />
+                <Stat label="Profitable" value={pct(scan.summary.share_profitable, 0)} />
+                <Stat label="Median return" value={pct(scan.summary.median_return)} cls={tone(scan.summary.median_return)} />
+                <Stat label="Best / worst" value={`${pct(scan.summary.best_return, 0)} / ${pct(scan.summary.worst_return, 0)}`} />
+                <Stat label="Median Sharpe" value={num(scan.summary.median_sharpe)} />
+              </div>
+              {scan.notes.map((n: string) => <p key={n} className="text-xs text-warn">{n}</p>)}
+              <Table head={["Instrument", "Data", "Period", "Return", "Max DD", "Sharpe", "Profit factor", "Win rate", "Trades"]}
+                rows={scan.rows.map((r: Json) => [r.instrument_id, <Badge key="k" kind={r.data_kind === "simulated" ? "accent" : "up"}>{r.data_kind}</Badge>, `${r.first.slice(0, 10)} → ${r.last.slice(0, 10)}`,
+                  <span key="r" className={tone(r.total_return)}>{pct(r.total_return)}</span>, pct(r.max_drawdown), num(r.sharpe_ratio), num(r.profit_factor), pct(r.win_rate, 1), r.number_of_trades])} />
+              {scan.skipped.length > 0 && <p className="text-xs text-dim">Skipped: {scan.skipped.map((k: Json) => `${k.instrument_id} (${k.reason})`).join("; ")}</p>}
+            </>
+          )}
+        </div>
+      </Panel>
       <Panel title="Previous runs">
         <Table head={["When", "Label", "Data", "Return", "Max DD", "Sharpe", "Trades", ""]}
           rows={(runs.data ?? []).map((r: Json) => [when(r.created_at), r.label, r.data_kinds.map((k: string) => <Badge key={k} kind={k === "simulated" ? "accent" : "up"}>{k}</Badge>),

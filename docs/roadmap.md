@@ -23,7 +23,7 @@ Status words mean exactly this: **Done** = implemented and covered by automated 
 
 ## Verification performed
 
-- Backend test suite: 204 tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
+- Backend test suite: 208 tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
 - Docker Compose stack (Postgres, Redis, API, worker, frontend): started healthy, migrations applied on Postgres, full browser flow passed (login, settings, paper account, data, deployment, replay, overview, portfolio, kill switch, backtest, comparison, model training, report), state identical after an API container restart, no errors or secrets in the logs.
 
 ## Not verified or not built — read before relying on anything
@@ -31,9 +31,12 @@ Status words mean exactly this: **Done** = implemented and covered by automated 
 **Live trading**
 - No adapter has ever talked to a real exchange, testnet or IBKR gateway. `IbkrAdapter` in particular is written against the `ib_async` interface from its signatures and may need event-loop handling when run inside the API process.
 - On restart with a real broker, positions are reconciled against the broker (a mismatch trips a breaker), but open orders at the broker are not yet compared with the platform's records.
-- There is no UI or API for adding instruments or broker symbol mappings beyond the six starter instruments; CCXT symbols map automatically, IBKR symbols currently need a database row. This makes IBKR impractical from the dashboard today.
+- Stocks and ETFs can be added from the dashboard and are tradable on paper accounts, but there is no UI for broker symbol mappings: CCXT symbols map automatically, IBKR symbols currently need a database row, which makes IBKR impractical from the dashboard today. Forex pairs, futures and crypto pairs beyond the starter set cannot be added from the dashboard yet.
 
 **Market data**
+- There is no automatic download of stock prices from a data vendor. Prices come from CSV/TXT files (single or bulk import). Free websites such as Yahoo Finance and Stooq were not connected on purpose: they offer no official API and reject or forbid automated access, so a connector would have to pose as a browser. A proper connector needs a vendor with an official API and the user's own key.
+- The bulk-file parser was tested with files generated in the two documented layouts, not with a real vendor download. London-listed shares (quoted in pence) are not supported.
+- Imported stock prices are used exactly as supplied: if the file is not adjusted for splits and dividends, backtests will see artificial jumps.
 - The live feed polls completed bars from a CCXT exchange or a connected broker. No websockets, ticks, order book, trade tape or per-period funding rates are ingested (funding/borrow cost is a constant annual rate in the execution model). Bid/ask is available from adapters but not shown.
 - The CCXT public-data connection and the ECB rate download were not exercised against the real services from the build environment (the ECB parser is tested).
 - Exchange holidays are not bundled; equity calendars know regular sessions and weekends only.

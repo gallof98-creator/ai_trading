@@ -18,6 +18,7 @@ through one engine, with backtesting, paper trading, a central risk engine and a
 | Paper trading | Simulated accounts in the base currency that survive restarts; reset with typed confirmation |
 | Brokers | Adapter framework with capability detection; CCXT (Binance, Bybit, …) and Interactive Brokers adapters; simulated venue |
 | Quant AI | Market-regime detection, 5 model types with purged out-of-sample validation and calibration, drift checks, analyst reports, gated parameter proposals |
+| Stock universe | Add stocks and ETFs for the US and six European markets, import many daily price files at once, scan one strategy across every instrument |
 | Dashboard | Overview, Markets, Strategies, Quant AI, Backtesting, Portfolio, Execution, Risk Center, Settings |
 | Security | Argon2 passwords, httpOnly sessions, roles, encrypted broker credentials, audit trail, rate limiting |
 
@@ -58,7 +59,7 @@ First steps in the dashboard:
 
 1. **Settings** → set the initial paper capital (there is no default) and review the risk limits.
 2. **Execution** → create a paper account.
-3. **Markets** → import a CSV of real bars, or generate clearly labelled simulated data to try things out.
+3. **Markets** → add tickers and import price files (one CSV per ticker, many at once), or generate clearly labelled simulated data to try things out.
 4. **Strategies** → pick a strategy, create a deployment, then activate it.
 5. **Execution** → with no market-data connection, use *Simulated market replay* to watch the pipeline run.
 6. **Backtesting**, **Quant AI**, **Portfolio**, **Risk Center** work on the same data.
@@ -76,7 +77,7 @@ QAT_ADMIN_EMAIL=you@example.com QAT_ADMIN_PASSWORD='a-long-password' uvicorn app
 ```
 
 ```bash
-cd backend && pytest          # 204 tests, 4-5 minutes; never contacts a real broker
+cd backend && pytest          # 208 tests, 4-5 minutes; never contacts a real broker
 ```
 
 ```bash

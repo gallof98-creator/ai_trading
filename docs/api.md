@@ -12,13 +12,13 @@ Cookie-authenticated writes must send an `X-Requested-With` header. Roles: viewe
 | Settings | `GET/PUT /api/settings`, `GET /api/audit` | viewer / admin / admin |
 | Brokers | `GET/POST /api/brokers`, `PUT /api/brokers/{id}/credentials`, `POST /api/brokers/{id}/connect|disconnect`, `GET /api/brokers/status` | viewer / admin |
 | Paper | `POST /api/paper/accounts`, `POST /api/paper/accounts/{id}/reset`, `POST /api/paper/replay` | admin / admin / trader |
-| Portfolio | `GET /api/overview`, `GET /api/portfolio/equity`, `GET /api/trades`, `GET /api/instruments` | viewer |
+| Portfolio | `GET /api/overview`, `GET /api/portfolio/equity`, `GET /api/trades`, `GET /api/instruments`, `GET /api/markets`, `POST /api/instruments`, `DELETE /api/instruments/{id}` | viewer / trader |
 | Strategies | `GET /api/strategies`, `GET/POST /api/deployments`, `PATCH/DELETE /api/deployments/{id}`, `GET /api/deployments/{id}/history` | viewer / trader |
 | Execution | `GET /api/orders`, `GET /api/fills`, `GET /api/signals`, `GET /api/approvals`, `POST /api/approvals/{id}`, `POST /api/feed/tick` | viewer / trader |
 | Risk | `GET /api/risk`, `POST /api/risk/kill-switch` (engage: trader, release: admin), `POST /api/risk/breakers/{name}/reset` | viewer / trader / admin |
 | Notifications, FX | `GET /api/notifications`, `POST /api/notifications/read-all`, `GET/POST /api/fx`, `POST /api/fx/refresh-ecb` | viewer / admin |
-| Market data | `GET /api/market/coverage|analysis|quality`, `POST /api/market/import-csv`, `POST /api/market/generate-simulated` | viewer / trader |
-| Backtesting | `POST/GET /api/backtests`, `GET /api/backtests/{id}`, `POST /api/backtests/walk-forward`, `POST /api/backtests/compare` | trader / viewer |
+| Market data | `GET /api/market/coverage|analysis|quality`, `POST /api/market/import-csv`, `POST /api/market/import-csv-bulk`, `POST /api/market/generate-simulated` | viewer / trader |
+| Backtesting | `POST/GET /api/backtests`, `GET /api/backtests/{id}`, `POST /api/backtests/walk-forward`, `POST /api/backtests/compare`, `POST /api/backtests/scan` | trader / viewer |
 | Quant AI | `GET /api/ai/regime`, `GET /api/ai/anomalies`, `POST /api/ai/models/train`, `GET /api/ai/models`, `GET /api/ai/models/{id}/drift`, `POST/GET /api/ai/reports`, `POST/GET /api/ai/proposals`, `POST /api/ai/proposals/{id}/apply` (admin), `POST /api/ai/proposals/{id}/dismiss` | viewer / trader |
 | System | `GET /health` | – |
 
