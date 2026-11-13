@@ -2,7 +2,7 @@
 import dynamic from "next/dynamic";
 import { useState } from "react";
 import { Shell } from "@/components/Shell";
-import { Badge, Button, Field, Msg, Notice, num, Panel, pct, post, Table, TIMEFRAMES, useAction, useApi, when } from "@/components/ui";
+import { Badge, Button, Field, Meter, Msg, Notice, num, Panel, pct, post, Table, TIMEFRAMES, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
 
 const CandleChart = dynamic(() => import("@/components/charts/CandleChart"), { ssr: false });
@@ -82,8 +82,93 @@ function Universe({ onChange }: { onChange: () => void }) {
   );
 }
 
+function DataProvider({ user, onChange }: { user: User; onChange: () => void }) {
+  const providers = useApi("/api/market/providers");
+  const markets = useApi("/api/markets");
+  const stats = useApi("/api/instruments/stats", 15_000);
+  const [polling, setPolling] = useState(true);
+  const job = useApi("/api/market/download", polling ? 2_000 : 0);
+  const [key, setKey] = useState("");
+  const [market, setMarket] = useState("US");
+  const [etfs, setEtfs] = useState(false);
+  const [years, setYears] = useState(10);
+  const [test, setTest] = useState<{ ok: boolean; message: string } | null>(null);
+  const [importing, setImporting] = useState(false);
+  const act = useAction();
+  const p = providers.data?.[0];
+  const running = job.data && ["pending", "running"].includes(job.data.status);
+  const isAdmin = user.role === "admin";
+  const m = stats.data?.by_market?.[market];
+  const refresh = () => { providers.reload(); stats.reload(); job.reload(); onChange(); };
+
+  return (
+    <Panel title="Data provider: EODHD (US and European stocks, official API)" right={p && <Badge kind={p.configured ? "up" : "dim"}>{p.configured ? `key ${p.key_hint} (${p.source})` : "no key"}</Badge>}>
+      <div className="space-y-4">
+        <p className="text-xs text-dim">Downloads daily prices, adjusted for splits and dividends, straight from eodhd.com with your own API key. A paid plan is needed for full US and European coverage. The key is stored encrypted and never shown again.</p>
+        {isAdmin && (
+          <div className="flex flex-wrap items-end gap-3">
+            <Field label="EODHD API key"><input type="password" autoComplete="new-password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={p?.configured ? "replace stored key" : ""} /></Field>
+            <Button kind="ghost" disabled={act.busy || key.trim().length < 4} onClick={() => act.run(() => post("/api/market/providers/eodhd/key", { api_key: key }, "PUT"), "Key stored.").then((ok) => { if (ok) { setKey(""); setTest(null); refresh(); } })}>Save key</Button>
+            {p?.configured && p.source === "stored" && <Button kind="ghost" disabled={act.busy} onClick={() => window.confirm("Remove the stored EODHD key?") && act.run(() => post("/api/market/providers/eodhd/key", undefined, "DELETE"), "Key removed.").then(refresh)}>Remove key</Button>}
+          </div>
+        )}
+        {p?.configured && (
+          <>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button kind="ghost" disabled={act.busy} onClick={() => act.run(async () => setTest(await post("/api/market/providers/eodhd/test")), "Test done.")}>Test connection</Button>
+              {test && <span className={`text-sm ${test.ok ? "text-up" : "text-down"}`}>{test.message}</span>}
+            </div>
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div className="space-y-3 rounded border border-line p-3">
+                <h3 className="text-sm font-semibold">1 · Import the list of listed companies</h3>
+                <div className="flex flex-wrap items-end gap-3">
+                  <Field label="Market"><select value={market} onChange={(e) => setMarket(e.target.value)}>{(markets.data ?? []).map((x: { code: string; label: string }) => <option key={x.code} value={x.code}>{x.label}</option>)}</select></Field>
+                  <label className="flex items-center gap-2 pb-2 text-xs text-dim"><input type="checkbox" className="!w-auto" checked={etfs} onChange={(e) => setEtfs(e.target.checked)} /> include ETFs</label>
+                  <Button kind="ghost" disabled={act.busy || importing} onClick={async () => {
+                    setImporting(true);
+                    try {
+                      const r = await post("/api/market/providers/eodhd/symbols", { market, types: etfs ? ["stock", "etf"] : ["stock"] });
+                      act.setMsg({ ok: true, text: `${r.created} instruments added, ${r.existing} already present (${r.listed} listed by the provider).` });
+                      refresh();
+                    } catch (e) {
+                      act.setMsg({ ok: false, text: e instanceof Error ? e.message : "Request failed" });
+                    } finally {
+                      setImporting(false);
+                    }
+                  }}>Import symbol list</Button>
+                </div>
+                <p className="text-xs text-dim">In the universe for this market: {m ? `${m.instruments} instruments, ${m.with_data} with stored prices` : "none yet"}. US over-the-counter listings are skipped.</p>
+              </div>
+              <div className="space-y-3 rounded border border-line p-3">
+                <h3 className="text-sm font-semibold">2 · Download price history</h3>
+                <div className="flex flex-wrap items-end gap-3">
+                  <Field label="Years of history"><input type="number" min="1" max="40" value={years} onChange={(e) => setYears(Number(e.target.value))} /></Field>
+                  <Button disabled={act.busy || running} onClick={() => act.run(() => post("/api/market/download", { market, years, only_missing: true }), "Download started.").then(() => { setPolling(true); job.reload(); })}>Download missing ({market})</Button>
+                  <Button kind="ghost" disabled={act.busy || running} onClick={() => window.confirm(`Download again and replace the stored history of every ${market} instrument?`) && act.run(() => post("/api/market/download", { market, years, only_missing: false }), "Download started.").then(() => { setPolling(true); job.reload(); })}>Refresh all ({market})</Button>
+                  {running && <Button kind="ghost" onClick={() => post("/api/market/download/cancel").then(job.reload)}>Cancel</Button>}
+                </div>
+                <p className="text-xs text-dim">One request per instrument, in the background; you can leave this page. A whole exchange can take from minutes to over an hour.</p>
+              </div>
+            </div>
+            {job.data && job.data.status !== "idle" && (
+              <div className="space-y-2 rounded border border-line p-3">
+                <Meter label={`Download ${job.data.status}${job.data.current ? ` · ${job.data.current}` : ""}`} value={job.data.done} limit={job.data.total} format={(v) => String(v)} />
+                <p className="font-mono text-xs"><span className="text-up">{job.data.stored} stored</span> · {num(job.data.bars, 0)} bars · <span className={job.data.failed_count ? "text-down" : "text-dim"}>{job.data.failed_count} failed</span>{job.data.message ? ` · ${job.data.message}` : ""}</p>
+                {job.data.failed.length > 0 && <Table max="max-h-40" head={["Instrument", "Reason"]} rows={job.data.failed.map((f: { instrument_id: string; reason: string }) => [f.instrument_id, <span key="r" className="whitespace-normal text-dim">{f.reason}</span>])} />}
+              </div>
+            )}
+          </>
+        )}
+        <Msg msg={act.msg} />
+      </div>
+    </Panel>
+  );
+}
+
 function Markets({ user }: { user: User }) {
-  const instruments = useApi("/api/instruments", 15_000);
+  const [search, setSearch] = useState("");
+  const instruments = useApi(`/api/instruments?limit=200&q=${encodeURIComponent(search)}`, 15_000);
+  const stats = useApi("/api/instruments/stats", 15_000);
   const strategies = useApi("/api/strategies");
   const [iid, setIid] = useState("CRYPTO:BTC/USDT");
   const [tf, setTf] = useState("1h");
@@ -95,24 +180,23 @@ function Markets({ user }: { user: User }) {
   const [csv, setCsv] = useState("");
   const [tz, setTz] = useState("UTC");
   const canWrite = user.role !== "viewer";
-  const coverage = useApi("/api/market/coverage", 30_000);
-  const refreshAll = () => { instruments.reload(); coverage.reload(); chart.reload(); };
+  const refreshAll = () => { instruments.reload(); stats.reload(); chart.reload(); };
   const rs = chart.data?.regime_summary;
 
   return (
     <div className="space-y-4">
-      <Panel title={`Watchlist (${instruments.data?.length ?? 0} instruments)`}>
+      <Panel title={`Watchlist · ${stats.data?.total ?? "…"} instruments, ${stats.data?.with_data ?? "…"} with stored prices`}
+        right={<input aria-label="Search instruments" placeholder="Search ticker…" value={search} onChange={(e) => setSearch(e.target.value)} className="!w-44" />}>
         <Table max="max-h-72" head={["Instrument", "Class", "Currency", "Stored data", "Last price", "Feed", ""]}
-          rows={(instruments.data ?? []).map((i: { id: string; asset_class: string; quote_currency: string; last_price: number | null; data_kind: string | null; feed_status: string | null; removable: boolean }) => {
-            const stored = (coverage.data ?? []).filter((c: { instrument_id: string }) => c.instrument_id === i.id);
-            return [
-              <button key="i" className={`underline-offset-2 hover:underline ${i.id === iid ? "text-accent" : ""}`} onClick={() => { setIid(i.id); if (stored.length && !stored.some((c: { timeframe: string }) => c.timeframe === tf)) setTf(stored[0].timeframe); }}>{i.id}</button>,
-              i.asset_class, i.quote_currency,
-              stored.length ? stored.map((c: { timeframe: string; bars: number; kind: string }) => <span key={c.timeframe} className="mr-2"><Badge kind={c.kind === "simulated" ? "accent" : "up"}>{c.timeframe} · {c.bars} {c.kind}</Badge></span>) : <span className="text-dim">none</span>,
-              num(i.last_price, 4), i.feed_status ?? "—",
-              canWrite && i.removable ? <button key="x" className="text-down hover:underline" onClick={() => window.confirm(`Remove ${i.id} and its stored prices?`) && act.run(() => post(`/api/instruments/${encodeURIComponent(i.id)}`, undefined, "DELETE"), "Removed.").then(refreshAll)}>Remove</button> : ""];
-          })} />
+          rows={(instruments.data ?? []).map((i: { id: string; asset_class: string; quote_currency: string; last_price: number | null; feed_status: string | null; removable: boolean; series: { timeframe: string; bars: number; kind: string }[] }) => [
+            <button key="i" className={`underline-offset-2 hover:underline ${i.id === iid ? "text-accent" : ""}`} onClick={() => { setIid(i.id); if (i.series.length && !i.series.some((c) => c.timeframe === tf)) setTf(i.series[0].timeframe); }}>{i.id}</button>,
+            i.asset_class, i.quote_currency,
+            i.series.length ? i.series.map((c) => <span key={c.timeframe} className="mr-2"><Badge kind={c.kind === "simulated" ? "accent" : "up"}>{c.timeframe} · {c.bars} {c.kind}</Badge></span>) : <span className="text-dim">none</span>,
+            num(i.last_price, 4), i.feed_status ?? "—",
+            canWrite && i.removable ? <button key="x" className="text-down hover:underline" onClick={() => window.confirm(`Remove ${i.id} and its stored prices?`) && act.run(() => post(`/api/instruments/${encodeURIComponent(i.id)}`, undefined, "DELETE"), "Removed.").then(refreshAll)}>Remove</button> : ""])} />
+        {(instruments.data?.length ?? 0) >= 200 && <p className="mt-2 text-xs text-dim">Showing the first 200 matches (instruments with stored prices first). Use the search box to find others.</p>}
       </Panel>
+      {canWrite && <DataProvider user={user} onChange={refreshAll} />}
       {canWrite && <Universe onChange={refreshAll} />}
       <Panel title={`${iid} · ${tf}`} right={
         <div className="flex flex-wrap items-center gap-2">

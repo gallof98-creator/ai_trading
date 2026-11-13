@@ -94,7 +94,9 @@ function Backtesting({ user }: { user: User }) {
           </div>
           {meta && <ParamForm schema={meta.params_schema} value={p} onChange={setParams} />}
           <p className="text-xs text-dim">
-            Stored data: {(coverage.data ?? []).length ? (coverage.data ?? []).map((c: Json) => `${c.instrument_id} ${c.timeframe} (${c.bars} ${c.kind} bars)`).join(" · ") : "none — import or generate data under Markets"}.
+            {(coverage.data ?? []).length === 0 ? "No stored data yet — import or download prices under Markets."
+              : (() => { const mine = (coverage.data ?? []).filter((c: Json) => c.instrument_id === form.instrument_id);
+                  return `${(coverage.data ?? []).length} stored series in total. ${form.instrument_id}: ${mine.length ? mine.map((c: Json) => `${c.timeframe} (${c.bars} ${c.kind} bars, ${c.first.slice(0, 10)} → ${c.last.slice(0, 10)})`).join(", ") : "no stored data"}.`; })()}
           </p>
           <div className="flex items-center gap-3">{canWrite && <Button disabled={act.busy} onClick={run}>{act.busy ? "Running…" : "Run backtest"}</Button>}<Msg msg={act.msg} /></div>
         </div>

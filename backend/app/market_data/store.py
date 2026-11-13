@@ -5,7 +5,7 @@ import pandas as pd
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from ..database.models import BarRow
+from ..database.models import BarRow, BarSeries
 from .quality import DataKind
 from .sources import Dataset
 from .timeframes import OHLCV, epoch_ns
@@ -26,6 +26,8 @@ class BarStore:
              "close": r[3], "volume": r[4], "kind": dataset.kind.value, "source": dataset.source}
             for t, r in zip(ts_ms, values)
         ])
+        session.flush()
+        self._refresh_summary(session, instrument_id, timeframe)
         return len(bars)
 
     def load(self, session: Session, instrument_id: str, timeframe: str, start: pd.Timestamp | None = None,
@@ -45,11 +47,42 @@ class BarStore:
         bars = pd.DataFrame([[r.open, r.high, r.low, r.close, r.volume] for r in rows], index=idx, columns=OHLCV)
         return Dataset(bars, kind, "+".join(sorted(sources)))
 
+    def _refresh_summary(self, session: Session, instrument_id: str, timeframe: str) -> None:
+        """Recompute the summary row for one series (cheap: uses the bars primary key)."""
+        where = (BarRow.instrument_id == instrument_id, BarRow.timeframe == timeframe)
+        n, first, last = session.execute(select(func.count(), func.min(BarRow.ts_ms), func.max(BarRow.ts_ms)).where(*where)).one()
+        row = session.get(BarSeries, (instrument_id, timeframe))
+        if not n:
+            if row is not None:
+                session.delete(row)
+            return
+        kinds = set(session.scalars(select(BarRow.kind).where(*where).distinct()))
+        sources = sorted(set(session.scalars(select(BarRow.source).where(*where).distinct())))
+        kind = "simulated" if "simulated" in kinds else next(iter(kinds)) if len(kinds) == 1 else "historical"
+        values = {"bars": n, "first_ms": first, "last_ms": last, "kind": kind, "source": "+".join(sources)[:64]}
+        if row is None:
+            session.add(BarSeries(instrument_id=instrument_id, timeframe=timeframe, **values))
+        else:
+            for k, v in values.items():
+                setattr(row, k, v)
+
+    def delete_series(self, session: Session, instrument_id: str, timeframe: str | None = None) -> None:
+        """Delete one series, or every timeframe of an instrument. The only supported way to remove bars."""
+        bars = delete(BarRow).where(BarRow.instrument_id == instrument_id)
+        summary = delete(BarSeries).where(BarSeries.instrument_id == instrument_id)
+        if timeframe is not None:
+            bars, summary = bars.where(BarRow.timeframe == timeframe), summary.where(BarSeries.timeframe == timeframe)
+        session.execute(bars)
+        session.execute(summary)
+        session.flush()
+
+    def coverage_for(self, session: Session, instrument_id: str) -> list[dict]:
+        rows = session.scalars(select(BarSeries).where(BarSeries.instrument_id == instrument_id))
+        return [{"instrument_id": r.instrument_id, "timeframe": r.timeframe, "kind": r.kind, "bars": r.bars} for r in rows]
+
     def coverage(self, session: Session) -> list[dict]:
-        q = select(BarRow.instrument_id, BarRow.timeframe, BarRow.kind, func.count(), func.min(BarRow.ts_ms), func.max(BarRow.ts_ms)) \
-            .group_by(BarRow.instrument_id, BarRow.timeframe, BarRow.kind)
         return [
-            {"instrument_id": i, "timeframe": tf, "kind": k, "bars": n,
-             "first": pd.Timestamp(a, unit="ms", tz="UTC").isoformat(), "last": pd.Timestamp(b, unit="ms", tz="UTC").isoformat()}
-            for i, tf, k, n, a, b in session.execute(q)
+            {"instrument_id": r.instrument_id, "timeframe": r.timeframe, "kind": r.kind, "bars": r.bars, "source": r.source,
+             "first": pd.Timestamp(r.first_ms, unit="ms", tz="UTC").isoformat(), "last": pd.Timestamp(r.last_ms, unit="ms", tz="UTC").isoformat()}
+            for r in session.scalars(select(BarSeries).order_by(BarSeries.instrument_id, BarSeries.timeframe))
         ]

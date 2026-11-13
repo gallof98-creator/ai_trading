@@ -102,6 +102,21 @@ class BarRow(Base):
     source: Mapped[str] = mapped_column(String(64))
 
 
+class BarSeries(Base):
+    """One row per stored (instrument, timeframe) series: lets the app list coverage for thousands of
+    instruments without scanning the bars table. Maintained by BarStore on every write."""
+
+    __tablename__ = "bar_series"
+    instrument_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(8), primary_key=True)
+    bars: Mapped[int] = mapped_column(Integer)
+    first_ms: Mapped[int] = mapped_column(BigInteger)
+    last_ms: Mapped[int] = mapped_column(BigInteger)
+    kind: Mapped[str] = mapped_column(String(12))
+    source: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(TS, default=_now, onupdate=_now)
+
+
 class StrategyDeployment(Base):
     __tablename__ = "strategy_deployments"
     id: Mapped[int] = mapped_column(primary_key=True)

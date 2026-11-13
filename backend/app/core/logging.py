@@ -23,6 +23,9 @@ def redact(_, __, event_dict: dict) -> dict:
 
 def configure_logging(level: str = "INFO") -> None:
     logging.basicConfig(format="%(message)s", level=level)
+    # HTTP client libraries log full request URLs at INFO; vendor API keys travel in query strings.
+    for noisy in ("httpx", "httpcore", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

@@ -15,7 +15,7 @@ from ..brokers.base import BrokerAdapter, BrokerError, BrokerManager
 from ..core.config import Settings
 from ..core.logging import get_logger
 from ..database.base import Database
-from ..database.models import (AppSetting, BarRow, BrokerAccount, FillRow, FxRate, InstrumentRow, OrderRow, RiskEvent, SignalRow,
+from ..database.models import (AppSetting, BrokerAccount, FillRow, FxRate, InstrumentRow, OrderRow, RiskEvent, SignalRow,
                                StrategyDeployment)
 from ..database.settings_store import UserSettings, load_settings
 from ..domain.models import Fill, Order, Signal, TradingMode
@@ -123,6 +123,9 @@ class TradingRuntime:
         self.kinds: dict[str, str] = {}  # instrument -> data kind currently in use
         self.feed_status: dict[str, str] = {}
         self.replays: dict[str, dict] = {}
+        self.provider_factory = None  # test hook: callable(api_key) -> PriceProvider
+        self.download = None
+        self.download_options: dict = {}
         self.started = False
 
     def _needs_approval(self, order: Order) -> bool:
@@ -409,13 +412,159 @@ class TradingRuntime:
                 raise RuntimeError_("A strategy is deployed on this instrument; delete the deployment first")
             if any(k[1] == instrument_id for k in self.portfolio.slices):
                 raise RuntimeError_("There is an open position in this instrument")
-            session.execute(delete(BarRow).where(BarRow.instrument_id == instrument_id))
+            self.store.delete_series(session, instrument_id)
             session.delete(row)
             self.registry.unregister(instrument_id)
             self.kinds.pop(instrument_id, None)
             for key in [k for k in self.bars if k[0] == instrument_id]:
                 del self.bars[key]
             audit.record(session, actor, "instruments.removed", instrument_id=instrument_id)
+
+    # ------------------------------------------------------------------ data providers
+    PROVIDERS = ("eodhd",)
+
+    def _provider_key(self, name: str) -> tuple[str, str] | None:
+        """(key, where it comes from) for a provider, or None. A stored key takes precedence over the environment."""
+        from ..security.vault import CredentialVault
+
+        with self.db.session() as session:
+            row = session.get(AppSetting, f"provider:{name}")
+            if row is not None:
+                return CredentialVault(self.settings.credential_key).decrypt(row.value["ciphertext"])["api_key"], "stored"
+        env_key = getattr(self.settings, f"{name}_api_key", "")
+        return (env_key, "environment") if env_key else None
+
+    def provider_status(self) -> list[dict]:
+        from ..security.vault import VaultError
+
+        out = []
+        for name in self.PROVIDERS:
+            try:
+                found = self._provider_key(name)
+                out.append({"name": name, "configured": found is not None, "key_hint": f"…{found[0][-4:]}" if found else None,
+                            "source": found[1] if found else None})
+            except VaultError as exc:
+                out.append({"name": name, "configured": False, "key_hint": None, "source": None, "error": str(exc)})
+        return out
+
+    def set_provider_key(self, name: str, api_key: str | None, actor: str) -> None:
+        """Store (encrypted) or remove a data-provider API key."""
+        from ..security.vault import CredentialVault, VaultError
+
+        if name not in self.PROVIDERS:
+            raise RuntimeError_(f"Unknown data provider {name}")
+        with self.lock, self.db.session() as session:
+            row = session.get(AppSetting, f"provider:{name}")
+            if api_key is None:
+                if row is not None:
+                    session.delete(row)
+                audit.record(session, actor, "provider.key_removed", provider=name)
+                return
+            try:
+                value = {"ciphertext": CredentialVault(self.settings.credential_key).encrypt({"api_key": api_key})}
+            except VaultError as exc:
+                raise RuntimeError_(str(exc)) from None
+            if row is None:
+                session.add(AppSetting(key=f"provider:{name}", value=value))
+            else:
+                row.value = value
+            audit.record(session, actor, "provider.key_stored", provider=name, key_hint=api_key[-4:])
+
+    def _provider(self, name: str):
+        from ..market_data.providers import EodhdProvider
+        from ..security.vault import VaultError
+
+        if name not in self.PROVIDERS:
+            raise RuntimeError_(f"Unknown data provider {name}")
+        try:
+            found = self._provider_key(name)
+        except VaultError as exc:
+            raise RuntimeError_(str(exc)) from None
+        if found is None:
+            raise RuntimeError_(f"No API key is configured for {name}. Add it under Markets → Data provider.")
+        if self.provider_factory is not None:
+            return self.provider_factory(found[0])
+        return EodhdProvider(found[0], base_url=self.settings.eodhd_base_url)
+
+    def test_provider(self, name: str) -> dict:
+        """One real request for a well-known symbol, so the user can confirm key, plan and data format."""
+        from datetime import date, timedelta
+
+        from ..market_data.providers import ProviderError
+
+        provider = self._provider(name)
+        try:
+            ds = provider.daily_bars(self.registry.get("STOCK:AAPL"), date.today() - timedelta(days=30), date.today())
+        except ProviderError as exc:
+            return {"ok": False, "message": str(exc)}
+        clean, report = validate_bars(ds.bars, "1d", get_calendar("XNYS"))
+        last = clean.iloc[-1]
+        return {"ok": True, "message": f"Received {len(clean)} daily bars for AAPL; latest {clean.index[-1].date()} close {last.close:.2f}.",
+                "bars": len(clean), "last_date": clean.index[-1].date().isoformat(), "last_close": float(last.close)}
+
+    def import_symbols(self, name: str, market: str, kinds: list[str], actor: str, limit: int | None = None) -> dict:
+        """Add every listed stock/ETF of a market from the provider's symbol list."""
+        from ..market_data.providers import ProviderError
+
+        provider = self._provider(name)
+        try:
+            listed = provider.list_symbols(market)
+        except ProviderError as exc:
+            raise RuntimeError_(str(exc)) from None
+        out = {"listed": len(listed), "created": 0, "existing": 0, "invalid": 0}
+        for kind in ("stock", "etf"):
+            if kind not in kinds:
+                continue
+            tickers = [r["ticker"] for r in listed if r["type"] == kind]
+            if limit:
+                tickers = tickers[:limit]
+            result = self.add_instruments(tickers, market, kind, actor)
+            for key in ("created", "existing", "invalid"):
+                out[key] += len(result[key])
+        return out
+
+    def _store_download(self, inst: Instrument, dataset: Dataset) -> int:
+        clean, _ = validate_bars(dataset.bars, "1d", get_calendar(inst.calendar))
+        if clean.empty:
+            raise ValueError("no valid bars")
+        if self.kinds.get(inst.id) == DataKind.SIMULATED.value:
+            raise ValueError("a simulated replay is using this instrument")
+        with self.db.session() as session:
+            existing = {c["timeframe"]: c for c in self.store.coverage_for(session, inst.id)}.get("1d")
+            if existing is not None and existing["kind"] == DataKind.SIMULATED.value:
+                raise ValueError("holds simulated data; remove it first")
+            # Adjusted histories are replaced as a whole: mixing an old and a new adjustment basis would create jumps.
+            self.store.delete_series(session, inst.id, "1d")
+            return self.store.save(session, inst.id, "1d", Dataset(clean, DataKind.HISTORICAL, dataset.source))
+
+    def start_download(self, name: str, actor: str, instrument_ids: list[str] | None = None, market: str | None = None,
+                       only_missing: bool = True, years: int = 10) -> dict:
+        from ..instruments.registry import market_of
+        from ..market_data.providers import DownloadJob
+
+        with self.lock:
+            if self.download is not None and self.download.snapshot()["status"] in ("pending", "running"):
+                raise RuntimeError_("A download is already running")
+            provider = self._provider(name)
+            if instrument_ids:
+                try:
+                    selected = [self.registry.get(i) for i in instrument_ids]
+                except KeyError as exc:
+                    raise RuntimeError_(f"Unknown instrument {exc}") from None
+            else:
+                selected = [i for i in self.registry.all() if market_of(i) is not None and (market is None or market_of(i) == market)]
+            selected = [i for i in selected if market_of(i) is not None]
+            if only_missing:
+                with self.db.session() as session:
+                    have = {c["instrument_id"] for c in self.store.coverage(session) if c["timeframe"] == "1d" and c["kind"] != "simulated"}
+                selected = [i for i in selected if i.id not in have]
+            if not selected:
+                raise RuntimeError_("Nothing to download: every selected instrument already has daily data")
+            self.download = DownloadJob(provider, sorted(selected, key=lambda i: i.id), self._store_download, years=years, **self.download_options)
+            with self.db.session() as session:
+                audit.record(session, actor, "market.download_started", provider=name, instruments=len(selected), years=years, market=market)
+            threading.Thread(target=self.download.run, name="price-download", daemon=True).start()
+            return self.download.snapshot()
 
     # ------------------------------------------------------------------ deployments
     def _exec_tf(self, instrument_id: str) -> str | None:
@@ -597,14 +746,12 @@ class TradingRuntime:
                 if self.kinds.get(instrument_id) not in (None, DataKind.SIMULATED.value):
                     raise RuntimeError_(f"{instrument_id} holds market data; simulated and market data are never mixed")
                 # One series per instrument and timeframe: a replay never blends into previously stored bars.
-                from ..database.models import BarRow
-
                 with self.db.session() as session:
                     stored = self.store.load(session, instrument_id, timeframe)
                     if stored is not None and stored.kind is not DataKind.SIMULATED:
                         raise RuntimeError_(f"{instrument_id} {timeframe} holds stored market data; simulated and market data are never mixed")
                     if stored is not None:
-                        session.execute(delete(BarRow).where(BarRow.instrument_id == instrument_id, BarRow.timeframe == timeframe))
+                        self.store.delete_series(session, instrument_id, timeframe)
                         audit.record(session, actor, "market.simulated_replaced", instrument_id=instrument_id, timeframe=timeframe,
                                      removed_bars=len(stored.bars), reason="new simulated replay")
                 delta = tf_delta(timeframe)

@@ -48,11 +48,39 @@ def trades(limit: int = 200, _: User = Depends(viewer), rt: TradingRuntime = Dep
 
 
 @router.get("/instruments")
-def instruments(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> list[dict]:
+def instruments(q: str = "", limit: int = 300, has_data: bool | None = None, _: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime),
+                session: Session = Depends(get_session)) -> list[dict]:
+    """Instruments, those with stored data first. `q` filters by text; the list is capped at `limit`
+    (the universe can hold thousands of stocks) - use /api/instruments/stats for totals."""
+    from ..market_data.store import BarStore
+
+    series: dict[str, list] = {}
+    for c in BarStore().coverage(session):
+        series.setdefault(c["instrument_id"], []).append({"timeframe": c["timeframe"], "bars": c["bars"], "kind": c["kind"]})
+    needle = q.strip().upper()
     with rt.lock:
         builtin = {i.id for i in default_instruments()}
+        rows = [i for i in rt.registry.all() if (not needle or needle in i.id.upper()) and (has_data is None or (i.id in series) == has_data)]
+        rows.sort(key=lambda i: (i.id not in series and i.id not in builtin, i.id))
         return [{**i.model_dump(mode="json"), "last_price": rt.portfolio.prices.get(i.id), "data_kind": rt.kinds.get(i.id),
-                 "feed_status": rt.feed_status.get(i.id), "removable": i.id not in builtin} for i in rt.registry.all()]
+                 "feed_status": rt.feed_status.get(i.id), "removable": i.id not in builtin, "series": series.get(i.id, [])}
+                for i in rows[: max(1, min(limit, 2000))]]
+
+
+@router.get("/instruments/stats")
+def instrument_stats(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime), session: Session = Depends(get_session)) -> dict:
+    from ..instruments.registry import market_of
+    from ..market_data.store import BarStore
+
+    with_data = {c["instrument_id"] for c in BarStore().coverage(session)}
+    by_market: dict[str, dict] = {}
+    with rt.lock:
+        everything = rt.registry.all()
+    for i in everything:
+        m = by_market.setdefault(market_of(i) or i.asset_class.value, {"instruments": 0, "with_data": 0})
+        m["instruments"] += 1
+        m["with_data"] += i.id in with_data
+    return {"total": len(everything), "with_data": sum(1 for i in everything if i.id in with_data), "by_market": by_market}
 
 
 @router.get("/markets")

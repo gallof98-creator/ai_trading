@@ -139,6 +139,68 @@ def import_csv_bulk(body: BulkCsvImport, user: User = Depends(trader), rt: Tradi
     return {"imported": imported, "failed": failed}
 
 
+# ---------------------------------------------------------------- data providers
+class ProviderKeyIn(BaseModel):
+    api_key: str = Field(min_length=4, max_length=200)
+
+
+@router.get("/market/providers")
+def providers(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> list[dict]:
+    return rt.provider_status()
+
+
+@router.put("/market/providers/{name}/key", status_code=status.HTTP_204_NO_CONTENT)
+def put_provider_key(name: str, body: ProviderKeyIn, user: User = Depends(admin), rt: TradingRuntime = Depends(get_runtime)) -> None:
+    guard(rt.set_provider_key, name, body.api_key.strip(), user.email)
+
+
+@router.delete("/market/providers/{name}/key", status_code=status.HTTP_204_NO_CONTENT)
+def delete_provider_key(name: str, user: User = Depends(admin), rt: TradingRuntime = Depends(get_runtime)) -> None:
+    guard(rt.set_provider_key, name, None, user.email)
+
+
+@router.post("/market/providers/{name}/test")
+def test_provider(name: str, _: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    return guard(rt.test_provider, name)
+
+
+class SymbolImportIn(BaseModel):
+    market: str = Field(max_length=4)
+    types: list[str] = Field(default_factory=lambda: ["stock"], max_length=2)
+    limit: int | None = Field(None, ge=1, le=20000)
+
+
+@router.post("/market/providers/{name}/symbols")
+def import_symbols(name: str, body: SymbolImportIn, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    if not set(body.types) <= {"stock", "etf"} or not body.types:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "types must be 'stock' and/or 'etf'")
+    return guard(rt.import_symbols, name, body.market, body.types, user.email, body.limit)
+
+
+class DownloadIn(BaseModel):
+    provider: str = Field("eodhd", max_length=16)
+    instrument_ids: list[str] | None = Field(None, max_length=20000)
+    market: str | None = Field(None, max_length=4)
+    only_missing: bool = True
+    years: int = Field(10, ge=1, le=40)
+
+
+@router.post("/market/download")
+def start_download(body: DownloadIn, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    return guard(rt.start_download, body.provider, user.email, body.instrument_ids, body.market, body.only_missing, body.years)
+
+
+@router.get("/market/download")
+def download_status(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    return rt.download.snapshot() if rt.download is not None else {"status": "idle"}
+
+
+@router.post("/market/download/cancel", status_code=status.HTTP_204_NO_CONTENT)
+def cancel_download(_: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> None:
+    if rt.download is not None:
+        rt.download.cancel()
+
+
 class SimulatedIn(BaseModel):
     instrument_id: str = Field(max_length=64)
     timeframe: str = Field(max_length=8)

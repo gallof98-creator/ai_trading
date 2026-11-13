@@ -88,13 +88,13 @@ def default_instruments() -> list[Instrument]:
 # ticker suffix used to keep identifiers unique across markets (e.g. STOCK:ENI.MI).
 # London is deliberately absent: its shares are quoted in pence, which needs dedicated handling.
 MARKETS: dict[str, dict] = {
-    "US": {"label": "United States", "calendar": "XNYS", "currency": "USD", "suffix": "", "tick_size": 0.01},
-    "IT": {"label": "Italy (Borsa Italiana)", "calendar": "XMIL", "currency": "EUR", "suffix": ".MI", "tick_size": 0.0001},
-    "DE": {"label": "Germany (Xetra)", "calendar": "XETR", "currency": "EUR", "suffix": ".DE", "tick_size": 0.001},
-    "FR": {"label": "France (Euronext Paris)", "calendar": "XPAR", "currency": "EUR", "suffix": ".PA", "tick_size": 0.001},
-    "NL": {"label": "Netherlands (Euronext Amsterdam)", "calendar": "XAMS", "currency": "EUR", "suffix": ".AS", "tick_size": 0.001},
-    "ES": {"label": "Spain (BME)", "calendar": "XMAD", "currency": "EUR", "suffix": ".MC", "tick_size": 0.001},
-    "CH": {"label": "Switzerland (SIX)", "calendar": "XSWX", "currency": "CHF", "suffix": ".SW", "tick_size": 0.01},
+    "US": {"label": "United States", "calendar": "XNYS", "currency": "USD", "suffix": "", "tick_size": 0.01, "eodhd": "US"},
+    "IT": {"label": "Italy (Borsa Italiana)", "calendar": "XMIL", "currency": "EUR", "suffix": ".MI", "tick_size": 0.0001, "eodhd": "MI"},
+    "DE": {"label": "Germany (Xetra)", "calendar": "XETR", "currency": "EUR", "suffix": ".DE", "tick_size": 0.001, "eodhd": "XETRA"},
+    "FR": {"label": "France (Euronext Paris)", "calendar": "XPAR", "currency": "EUR", "suffix": ".PA", "tick_size": 0.001, "eodhd": "PA"},
+    "NL": {"label": "Netherlands (Euronext Amsterdam)", "calendar": "XAMS", "currency": "EUR", "suffix": ".AS", "tick_size": 0.001, "eodhd": "AS"},
+    "ES": {"label": "Spain (BME)", "calendar": "XMAD", "currency": "EUR", "suffix": ".MC", "tick_size": 0.001, "eodhd": "MC"},
+    "CH": {"label": "Switzerland (SIX)", "calendar": "XSWX", "currency": "CHF", "suffix": ".SW", "tick_size": 0.01, "eodhd": "SW"},
 }
 
 
@@ -115,3 +115,13 @@ def make_equity(ticker: str, market: str, asset_class: AssetClass = AssetClass.S
     return Instrument(id=f"{asset_class.value.upper()}:{ticker}{m['suffix']}", asset_class=asset_class, symbol=ticker,
                       quote_currency=m["currency"], exchange=m["calendar"], calendar=m["calendar"], tick_size=m["tick_size"],
                       lot_size=1, min_qty=1, margin_rate=0.5)
+
+
+def market_of(instrument: Instrument) -> str | None:
+    """Market code (US, IT, ...) of a stock/ETF, or None for other asset classes."""
+    if instrument.asset_class not in (AssetClass.STOCK, AssetClass.ETF):
+        return None
+    for code, m in MARKETS.items():
+        if m["calendar"] == instrument.calendar and (m["suffix"] == "" or instrument.id.endswith(m["suffix"])):
+            return code
+    return None

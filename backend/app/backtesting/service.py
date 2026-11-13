@@ -4,10 +4,10 @@ from __future__ import annotations
 import uuid
 
 import pandas as pd
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..database.models import BacktestRun, BarRow
+from ..database.models import BacktestRun
 from ..database.settings_store import RiskLimits
 from ..market_data.quality import DataKind
 from ..market_data.sources import Dataset, synthetic_bars
@@ -39,7 +39,7 @@ def store_simulated(session: Session, instrument_id: str, timeframe: str, bars: 
     existing = _store.load(session, instrument_id, timeframe)
     if existing is not None and not replace:
         raise ValueError(f"{instrument_id} {timeframe} already has {existing.kind.value} data; pass replace=true to delete it first")
-    session.execute(delete(BarRow).where(BarRow.instrument_id == instrument_id, BarRow.timeframe == timeframe))
+    _store.delete_series(session, instrument_id, timeframe)
     ds = synthetic_bars(timeframe, bars, seed)
     _store.save(session, instrument_id, timeframe, ds)
     return {"bars": len(ds.bars), "kind": ds.kind.value, "source": ds.source, "fingerprint": ds.fingerprint()}
@@ -111,7 +111,7 @@ def import_csv_series(session: Session, instrument, timeframe: str, csv_text: st
     if existing is not None:
         if not replace:
             raise ValueError(f"{instrument.id} {timeframe} already has {existing.kind.value} data; choose 'replace' to overwrite it")
-        session.execute(delete(BarRow).where(BarRow.instrument_id == instrument.id, BarRow.timeframe == timeframe))
+        _store.delete_series(session, instrument.id, timeframe)
     n = _store.save(session, instrument.id, timeframe, Dataset(clean, DataKind.HISTORICAL, "csv-import"))
     return {"bars_stored": n, "first": clean.index[0].isoformat(), "last": clean.index[-1].isoformat(), "quality": report.to_dict()}
 

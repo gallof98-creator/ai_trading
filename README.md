@@ -18,7 +18,7 @@ through one engine, with backtesting, paper trading, a central risk engine and a
 | Paper trading | Simulated accounts in the base currency that survive restarts; reset with typed confirmation |
 | Brokers | Adapter framework with capability detection; CCXT (Binance, Bybit, …) and Interactive Brokers adapters; simulated venue |
 | Quant AI | Market-regime detection, 5 model types with purged out-of-sample validation and calibration, drift checks, analyst reports, gated parameter proposals |
-| Stock universe | Add stocks and ETFs for the US and six European markets, import many daily price files at once, scan one strategy across every instrument |
+| Stock universe | Stocks and ETFs for the US and six European markets: import a whole exchange listing and download adjusted daily prices from EODHD with your own API key, or import price files in bulk; scan one strategy across every instrument |
 | Dashboard | Overview, Markets, Strategies, Quant AI, Backtesting, Portfolio, Execution, Risk Center, Settings |
 | Security | Argon2 passwords, httpOnly sessions, roles, encrypted broker credentials, audit trail, rate limiting |
 
@@ -59,7 +59,7 @@ First steps in the dashboard:
 
 1. **Settings** → set the initial paper capital (there is no default) and review the risk limits.
 2. **Execution** → create a paper account.
-3. **Markets** → add tickers and import price files (one CSV per ticker, many at once), or generate clearly labelled simulated data to try things out.
+3. **Markets** → get prices. Either enter an EODHD API key under "Data provider", press *Test connection*, import a market's symbol list and download its history; or import price files (one CSV per ticker, many at once); or generate clearly labelled simulated data just to try things out.
 4. **Strategies** → pick a strategy, create a deployment, then activate it.
 5. **Execution** → with no market-data connection, use *Simulated market replay* to watch the pipeline run.
 6. **Backtesting**, **Quant AI**, **Portfolio**, **Risk Center** work on the same data.
@@ -77,7 +77,7 @@ QAT_ADMIN_EMAIL=you@example.com QAT_ADMIN_PASSWORD='a-long-password' uvicorn app
 ```
 
 ```bash
-cd backend && pytest          # 208 tests, 4-5 minutes; never contacts a real broker
+cd backend && pytest          # 216 tests, 4-5 minutes; never contacts a real broker
 ```
 
 ```bash
@@ -107,6 +107,8 @@ More detail: [docs/architecture.md](docs/architecture.md) · [docs/api.md](docs/
 | Health shows `"status": "degraded"` | Database unreachable or migrations missing (`runtime_started: false`). Run `alembic upgrade head` / check Postgres. |
 | Dashboard: "Cannot reach the API" | API not healthy, or the dashboard is served from an origin missing in `QAT_CORS_ORIGINS`. |
 | "Portfolio cannot be valued" / "No usable FX rate" | Add a rate under Settings → Exchange rates, or load the ECB reference rates. |
+| "Test connection" says the key was rejected | Wrong EODHD key, or the plan does not include end-of-day data for that exchange. |
+| Download stops with "request limit is used up" | The EODHD plan's daily quota is exhausted; press "Download missing" again tomorrow, it resumes where it stopped. |
 | "No stored bars for …" | Import a CSV or generate simulated data under Markets. |
 | "simulated and market data are never mixed" | An instrument holds one kind of data; reset the paper account / replace the stored series deliberately. |
 | Orders stay "pending approval" | Trading mode is semi-automatic, or the account is a real-money one (approval is on by default). Approve under Execution. |
