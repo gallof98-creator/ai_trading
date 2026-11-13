@@ -2,6 +2,7 @@
 import dynamic from "next/dynamic";
 import { useState } from "react";
 import { Shell } from "@/components/Shell";
+import { useActiveSymbol } from "@/components/symbol";
 import { Badge, Button, Field, Meter, Msg, Notice, num, Panel, pct, post, Table, TIMEFRAMES, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
 
@@ -198,7 +199,7 @@ function Markets({ user }: { user: User }) {
   const instruments = useApi(`/api/instruments?limit=200&q=${encodeURIComponent(search)}`, 15_000);
   const stats = useApi("/api/instruments/stats", 15_000);
   const strategies = useApi("/api/strategies");
-  const [iid, setIid] = useState("CRYPTO:BTC/USDT");
+  const [iid, setIid] = useActiveSymbol("CRYPTO:BTC/USDT", true);
   const [tf, setTf] = useState("1h");
   const [strategy, setStrategy] = useState("");
   const q = `instrument_id=${encodeURIComponent(iid)}&timeframe=${tf}`;

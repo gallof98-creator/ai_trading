@@ -18,7 +18,7 @@ from ..database.base import Database
 from ..database.models import (AppSetting, BrokerAccount, FillRow, FxRate, InstrumentRow, OrderRow, RiskEvent, SignalRow,
                                StrategyDeployment)
 from ..database.settings_store import UserSettings, load_settings
-from ..domain.models import Fill, Order, Signal, TradingMode
+from ..domain.models import Fill, Order, Side, Signal, TradingMode
 from ..domain.models import AssetClass, Instrument
 from ..instruments.registry import InstrumentRegistry, default_instruments, make_equity
 from ..market_data.calendars import get_calendar
@@ -33,12 +33,13 @@ from ..notifications.service import Channel, Notifier
 from ..paper_trading.broker import SimulatedBroker
 from ..portfolio.engine import PortfolioEngine
 from ..risk.engine import RiskEngine
-from ..risk.models import RiskEventRecord
+from ..risk.models import OrderIntent, RiskEventRecord
 from ..signals.engine import SignalEngine
 from ..strategies.registry import create_strategy
 from .engine import Deployment, Journal, TradingEngine
 
 log = get_logger(__name__)
+MANUAL_STRATEGY = "manual:chart"
 CACHE_BARS = 5000
 REPLAY_WARMUP = 400
 REPLAY_MAX = 3000
@@ -807,6 +808,58 @@ class TradingRuntime:
             self.persist()
             return len(new)
 
+    def chart_order(self, broker_id: str, instrument_id: str, action: str, qty: float | None, stop_pct: float | None, actor: str) -> dict:
+        """An order placed by a person from the chart. Paper accounts only. It takes the same route as every
+        other order: the risk engine decides, then the broker adapter; a purchase must carry a protective stop."""
+        with self.lock:
+            try:
+                adapter = self.brokers.get(broker_id)
+            except BrokerError:
+                raise RuntimeError_(f"Unknown account {broker_id}") from None
+            if not isinstance(adapter, SimulatedBroker):
+                raise RuntimeError_("Orders from the chart go to paper accounts only. Live trading is disabled here.")
+            try:
+                inst = self.registry.get(instrument_id)
+            except KeyError:
+                raise RuntimeError_(f"{instrument_id} is not in the trading universe") from None
+            ts = self.clock()
+            key = (broker_id, instrument_id, MANUAL_STRATEGY)
+            held = self.portfolio.qty(key)
+            with self.db.session() as session:
+                ds = self.store.load(session, instrument_id, self._exec_tf(instrument_id) or "1d", start=pd.Timestamp(ts) - pd.Timedelta(days=30))
+            if ds is None or ds.bars.empty:
+                raise RuntimeError_("No recent stored price for this instrument: download prices first")
+            price = float(ds.bars["close"].iloc[-1])
+            try:
+                fx = self.engine._fx(inst.quote_currency, ts)
+            except FxRateUnavailable as exc:
+                raise RuntimeError_(f"No usable FX rate for {inst.quote_currency}: {exc}") from None
+            oid = self.engine._new_id()
+            if action == "close":
+                if held <= 0:
+                    raise RuntimeError_("There is no position opened from the chart to close")
+                order = Order(id=oid, client_order_id=f"chart:{oid}", broker_id=broker_id, instrument_id=instrument_id, side=Side.SELL, qty=abs(held),
+                              reduce_only=True, strategy=MANUAL_STRATEGY, reason="manual", created_at=ts, updated_at=ts)
+                intent, protection = OrderIntent(order, inst, price, fx, None), None
+            elif action == "buy":
+                if not stop_pct or not 0.005 <= stop_pct <= 0.9:
+                    raise RuntimeError_("A purchase needs a protective stop between 0.5% and 90% below the price")
+                size = inst.round_qty(qty or 0)
+                if size <= 0 or size < inst.min_qty:
+                    raise RuntimeError_("Quantity is below the minimum tradable size")
+                order = Order(id=oid, client_order_id=f"chart:{oid}", broker_id=broker_id, instrument_id=instrument_id, side=Side.BUY, qty=size,
+                              strategy=MANUAL_STRATEGY, reason="manual", created_at=ts, updated_at=ts)
+                intent, protection = OrderIntent(order, inst, price, fx, price * stop_pct), (price * stop_pct, None, None)
+            else:
+                raise RuntimeError_("action must be buy or close")
+            sent = self.engine._route(order, intent, protection, TradingMode.AUTO, ts)
+            with self.db.session() as session:
+                audit.record(session, actor, "chart.order", broker=broker_id, instrument_id=instrument_id, order_action=action, qty=order.qty, status=sent.status.value)
+            self.persist()
+            return {"order_id": sent.id, "status": sent.status.value, "reason": sent.reason, "side": order.side.value, "qty": order.qty, "reference_price": price,
+                    "stop_price": inst.round_price(price * (1 - stop_pct)) if action == "buy" else None,
+                    "note": "Fills at the open of the next bar received or downloaded for this instrument." if sent.status.value == "submitted" else ""}
+
     def drive_stored(self) -> dict:
         """Global (portfolio) strategies hold instruments that no live feed drives. Their paper orders and
         positions advance on the stored daily bars instead: each bar not seen yet is fed to the engine in
@@ -815,7 +868,7 @@ class TradingRuntime:
         from ..global_markets.cross_section import STRATEGY_PREFIX
 
         with self.lock:
-            mine = lambda name: (name or "").startswith(STRATEGY_PREFIX)  # noqa: E731
+            mine = lambda name: (name or "").startswith((STRATEGY_PREFIX, MANUAL_STRATEGY))  # noqa: E731
             open_orders = [o for o in self.engine.orders.values() if o.is_open and mine(o.strategy)]
             ids = {o.instrument_id for o in open_orders} | {k[1] for k, s in self.portfolio.slices.items() if mine(k[2]) and s.qty}
             ids = {i for i in ids if self._exec_tf(i) is None}  # instruments with a deployed strategy are driven by their feed

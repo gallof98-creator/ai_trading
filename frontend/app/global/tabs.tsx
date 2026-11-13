@@ -1,11 +1,14 @@
 "use client";
+import Link from "next/link";
 import { useState } from "react";
+import { chartHref } from "@/components/symbol";
 import { EquityChart } from "@/components/charts/Charts";
 import { Badge, Button, Field, type Json, Msg, Notice, num, Panel, pct, post, Stat, Table, tone, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
 
 const nice = (t: string | null | undefined) => (t ?? "—").replace(/_/g, " ");
 const spct = (v: number | null | undefined, d = 2) => (v === null || v === undefined ? "—" : `${v > 0 ? "+" : ""}${(v * 100).toFixed(d)}%`);
+const Sym = ({ id, symbol, name }: { id: string; symbol: string; name?: string }) => <Link href={chartHref(id)} title={`${name ? name + " — " : ""}open chart`} className="text-accent hover:underline">{symbol}</Link>;
 const Pct = ({ v }: { v: number | null | undefined }) => <span className={tone(v)}>{spct(v)}</span>;
 
 function MetricsBar({ canWrite, onDone }: { canWrite: boolean; onDone?: () => void }) {
@@ -102,7 +105,7 @@ export function Scanner({ user }: { user: User }) {
             head={["", "Symbol", "Market", "Price", ...cols.map((c) => all.find((x) => x.name === c)?.label ?? c), "As of"]}
             rows={result.rows.map((r: Json) => [
               <input key="c" type="checkbox" aria-label={`Select ${r.symbol}`} checked={picked.includes(r.instrument_id)} onChange={() => setPicked(picked.includes(r.instrument_id) ? picked.filter((x) => x !== r.instrument_id) : [...picked, r.instrument_id])} />,
-              <span key="s" title={r.name}>{r.symbol}{r.data_kind === "simulated" && <> <Badge kind="accent">SIM</Badge></>}</span>, r.market, `${num(r.close)} ${r.currency}`, ...cols.map((c) => show(r, c)), String(r.as_of).slice(0, 10)])} />
+              <span key="s"><Sym id={r.instrument_id} symbol={r.symbol} name={r.name} />{r.data_kind === "simulated" && <> <Badge kind="accent">SIM</Badge></>}</span>, r.market, `${num(r.close)} ${r.currency}`, ...cols.map((c) => show(r, c)), String(r.as_of).slice(0, 10)])} />
         </Panel>)}
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Saved scans">
@@ -131,7 +134,7 @@ function Movers({ title, rows, col, fmt }: { title: string; rows: Json[]; col: s
   return (
     <Panel title={title}>
       <Table max="max-h-64" empty="None today." head={["Symbol", "Market", title.includes("olume") || title.includes("olatility") || title.includes("reakout") ? "Reading" : "Change", "Today"]}
-        rows={rows.map((r) => [<span key="s" title={r.name}>{r.symbol}</span>, r.market, fmt(r[col]), col === "change_1d" ? "" : <Pct key="p" v={r.change_1d} />])} />
+        rows={rows.map((r) => [<Sym key="s" id={r.instrument_id} symbol={r.symbol} name={r.name} />, r.market, fmt(r[col]), col === "change_1d" ? "" : <Pct key="p" v={r.change_1d} />])} />
     </Panel>
   );
 }
@@ -202,7 +205,7 @@ export function Analysis({ user }: { user: User }) {
             : <span className="text-warn">{rk.data.validation.note}</span>}</p>
           <Table max="max-h-[28rem]" empty="Nothing to rank: too few instruments have enough history and liquidity."
             head={["Rank", "Symbol", "Market", "Score", ...(m?.factors ?? []).map((f: Json) => f.label), "Contributions", "Price"]}
-            rows={rk.data.rows.map((r: Json) => [r.rank, <span key="s" title={r.name}>{r.symbol}</span>, r.market, <span key="sc" className={tone(r.score)}>{r.score > 0 ? "+" : ""}{num(r.score)}</span>,
+            rows={rk.data.rows.map((r: Json) => [r.rank, <Sym key="s" id={r.instrument_id} symbol={r.symbol} name={r.name} />, r.market, <span key="sc" className={tone(r.score)}>{r.score > 0 ? "+" : ""}{num(r.score)}</span>,
               ...(m?.factors ?? []).map((f: Json) => (f.metric === "adx_14" ? num(r.values[f.metric], 1) : spct(r.values[f.metric], 1))),
               Object.values(r.contributions as Record<string, number>).map((c) => `${c > 0 ? "+" : ""}${c.toFixed(2)}`).join("  "), num(r.close)])} />
           <p className="mt-2 text-xs text-dim">{rk.data.disclaimer}</p></>}
@@ -292,7 +295,7 @@ export function Strategies({ user }: { user: User }) {
         <Panel title={`Today's portfolio — as of ${target.as_of}, ${target.eligible} eligible of ${target.universe}`}>
           {!target.enough_history && <Notice>Only {target.history_bars} daily bars are stored; about thirteen months are needed for dependable factor values.</Notice>}
           {target.note && <p className="mb-2 text-xs text-dim">{target.note}</p>}
-          <Table empty="No instrument qualifies." head={["Symbol", "Market", "Country", "Currency", "Weight", "Score", "Price"]} rows={target.rows.map((r: Json) => [<span key="s" title={r.name}>{r.symbol}</span>, r.market, r.country ?? "—", r.currency, pct(r.weight, 1), num(r.score), num(r.price)])} />
+          <Table empty="No instrument qualifies." head={["Symbol", "Market", "Country", "Currency", "Weight", "Score", "Price"]} rows={target.rows.map((r: Json) => [<Sym key="s" id={r.instrument_id} symbol={r.symbol} name={r.name} />, r.market, r.country ?? "—", r.currency, pct(r.weight, 1), num(r.score), num(r.price)])} />
           <p className="mt-2 text-xs text-dim">Invested {pct(target.invested, 1)}, cash {pct(target.cash, 1)} (before the risk engine&apos;s limits).</p>
           {canWrite && (
             <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-line pt-3">
@@ -317,7 +320,7 @@ export function Strategies({ user }: { user: User }) {
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel title="Positions of portfolio strategies (paper)" right={canWrite ? <Button kind="ghost" disabled={act.busy} onClick={() => act.run(async () => { const r = await post("/api/global/portfolio/settle"); act.setMsg({ ok: true, text: `${r.bars} new daily bars applied.` }); refresh(); })}>Apply stored prices</Button> : undefined}>
           <Table max="max-h-64" empty="No positions." head={["Account", "Symbol", "Strategy", "Quantity", "Entry", "Last", "Result", "Stop", "Last bar"]}
-            rows={(holdings.data?.positions ?? []).map((h: Json) => [h.broker_id, h.symbol, h.strategy.replace("global:", ""), num(h.qty, 0), num(h.avg_price), num(h.price), <Pct key="p" v={h.unrealized_pct} />, h.stop_price ? num(h.stop_price) : "—", String(h.last_bar ?? "—").slice(0, 10)])} />
+            rows={(holdings.data?.positions ?? []).map((h: Json) => [h.broker_id, <Sym key="s" id={h.instrument_id} symbol={h.symbol} />, h.strategy.replace("global:", ""), num(h.qty, 0), num(h.avg_price), num(h.price), <Pct key="p" v={h.unrealized_pct} />, h.stop_price ? num(h.stop_price) : "—", String(h.last_bar ?? "—").slice(0, 10)])} />
           {(holdings.data?.open_orders ?? []).length > 0 && <><h3 className="mb-1 mt-3 text-xs text-dim">Waiting for the next daily bar</h3>
             <Table max="max-h-40" head={["Account", "Instrument", "Side", "Quantity", "Type", "Why"]} rows={holdings.data.open_orders.map((o: Json) => [o.broker_id, o.instrument_id.split(":")[1], o.side, num(o.qty, 0), o.type, nice(o.reason)])} /></>}
           <p className="mt-2 text-xs text-dim">Orders fill at the open of the next daily bar after they were sent. Bars are applied automatically after each price download.</p>

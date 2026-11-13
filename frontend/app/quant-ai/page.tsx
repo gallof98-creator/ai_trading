@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { CalibrationChart, PlainBars } from "@/components/charts/Charts";
 import { Shell } from "@/components/Shell";
+import { useActiveSymbol } from "@/components/symbol";
 import { Badge, Button, Field, type Json, Msg, Notice, num, Panel, pct, post, Stat, Table, TIMEFRAMES, tone, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
 
@@ -12,7 +13,7 @@ function QuantAI({ user }: { user: User }) {
   const instruments = useApi("/api/instruments");
   const library = useApi("/api/strategies");
   const brokers = useApi("/api/brokers/status");
-  const [iid, setIid] = useState("CRYPTO:BTC/USDT");
+  const [iid, setIid] = useActiveSymbol("CRYPTO:BTC/USDT", true);
   const [tf, setTf] = useState("1h");
   const q = `instrument_id=${encodeURIComponent(iid)}&timeframe=${tf}`;
   const regime = useApi(`/api/ai/regime?${q}`);
