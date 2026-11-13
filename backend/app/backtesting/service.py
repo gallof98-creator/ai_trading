@@ -46,7 +46,7 @@ def store_simulated(session: Session, instrument_id: str, timeframe: str, bars: 
 
 
 def build_spec(session: Session, capital: float, deployments: list[dict], base_currency: str, limits: RiskLimits, execution: dict | None,
-               static_fx: dict[str, float], start: str | None, end: str | None) -> BacktestSpec:
+               static_fx: dict[str, float], start: str | None, end: str | None, instruments: list | None = None) -> BacktestSpec:
     deps = [DeploymentSpec(d["strategy"], d["instrument_id"], d["timeframe"], d.get("params") or {}) for d in deployments]
     data = {}
     for d in deps:
@@ -54,7 +54,7 @@ def build_spec(session: Session, capital: float, deployments: list[dict], base_c
         if (d.instrument_id, finest) not in data:
             data[(d.instrument_id, finest)] = load_dataset(session, d.instrument_id, finest, start, end)
     return BacktestSpec(initial_capital=capital, deployments=deps, data=data, base_currency=base_currency, limits=limits,
-                        execution=ExecutionModel(**execution) if execution else ExecutionModel(), static_fx=static_fx)
+                        execution=ExecutionModel(**execution) if execution else ExecutionModel(), static_fx=static_fx, instruments=instruments)
 
 
 def run_and_store(session: Session, spec: BacktestSpec, label: str, actor: str) -> tuple[str, BacktestResult]:
@@ -78,18 +78,82 @@ def list_runs(session: Session, limit: int = 50) -> list[dict]:
              "data_kinds": sorted({v["kind"] for v in r.config.get("data", {}).values()})} for r in rows]
 
 
-def run_walk_forward(session: Session, body: dict, capital: float, base_currency: str, limits: RiskLimits) -> dict:
+def run_walk_forward(session: Session, body: dict, capital: float, base_currency: str, limits: RiskLimits, instruments: list | None = None) -> dict:
     data = load_dataset(session, body["instrument_id"], body["timeframe"], body.get("start"), body.get("end"))
     return walk_forward(WalkForwardSpec(
         strategy=body["strategy"], instrument_id=body["instrument_id"], timeframe=body["timeframe"], data=data, param_grid=body["param_grid"],
         initial_capital=capital, n_folds=body.get("n_folds", 4), metric=body.get("metric", "sharpe_ratio"), fixed_params=body.get("fixed_params") or {},
-        base_currency=base_currency, limits=limits, static_fx=body.get("static_fx") or {}))
+        base_currency=base_currency, limits=limits, static_fx=body.get("static_fx") or {}, instruments=instruments))
 
 
 def run_comparison(session: Session, items: list[dict], capital: float, base_currency: str, limits: RiskLimits, static_fx: dict[str, float],
-                   start: str | None, end: str | None) -> list[dict]:
+                   start: str | None, end: str | None, instruments: list | None = None) -> list[dict]:
     specs = {}
     for item in items:
         label = item.get("label") or f"{item['strategy']} {item['instrument_id']} {item['timeframe']}"
-        specs[label] = build_spec(session, capital, [item], base_currency, limits, None, static_fx, start, end)
+        specs[label] = build_spec(session, capital, [item], base_currency, limits, None, static_fx, start, end, instruments)
     return compare_strategies(specs)
+
+
+def import_csv_series(session: Session, instrument, timeframe: str, csv_text: str, tz: str | None, replace: bool) -> dict:
+    """Validate and store one CSV series as market data. Never merges into an existing series silently."""
+    import io
+
+    from ..market_data.calendars import get_calendar
+    from ..market_data.quality import validate_bars
+    from ..market_data.sources import load_csv
+
+    raw = load_csv(io.StringIO(csv_text), tz=tz)
+    clean, report = validate_bars(raw.bars, timeframe, get_calendar(instrument.calendar))
+    if clean.empty:
+        raise ValueError("The file contains no valid bars")
+    existing = _store.load(session, instrument.id, timeframe)
+    if existing is not None:
+        if not replace:
+            raise ValueError(f"{instrument.id} {timeframe} already has {existing.kind.value} data; choose 'replace' to overwrite it")
+        session.execute(delete(BarRow).where(BarRow.instrument_id == instrument.id, BarRow.timeframe == timeframe))
+    n = _store.save(session, instrument.id, timeframe, Dataset(clean, DataKind.HISTORICAL, "csv-import"))
+    return {"bars_stored": n, "first": clean.index[0].isoformat(), "last": clean.index[-1].isoformat(), "quality": report.to_dict()}
+
+
+def scan_universe(session: Session, strategy: str, params: dict, timeframe: str, instrument_ids: list[str], capital: float, base_currency: str,
+                  limits: RiskLimits, execution: dict | None, static_fx: dict[str, float], start: str | None, end: str | None,
+                  instruments: list | None = None) -> dict:
+    """Run the same strategy independently on every instrument and summarise the distribution of results.
+    Looking at many instruments and quoting the best ones is a selection bias; the summary reports the
+    whole distribution for that reason."""
+    import numpy as np
+
+    rows, skipped = [], []
+    for iid in instrument_ids:
+        try:
+            spec = build_spec(session, capital, [{"strategy": strategy, "instrument_id": iid, "timeframe": timeframe, "params": params}],
+                              base_currency, limits, execution, static_fx, start, end, instruments)
+            result = run_backtest(spec)
+        except (DataUnavailable, ValueError, LookupError) as exc:
+            skipped.append({"instrument_id": iid, "reason": str(exc)})
+            continue
+        m = result.metrics
+        ds = next(iter(spec.data.values()))
+        rows.append({"instrument_id": iid, "bars": len(ds.bars), "first": ds.bars.index[0].isoformat(), "last": ds.bars.index[-1].isoformat(),
+                     "data_kind": ds.kind.value, "total_return": m["total_return"], "max_drawdown": m["max_drawdown"], "sharpe_ratio": m["sharpe_ratio"],
+                     "profit_factor": m["profit_factor"], "win_rate": m["win_rate"], "number_of_trades": m["number_of_trades"]})
+    summary: dict = {"instruments_tested": len(rows), "instruments_skipped": len(skipped)}
+    if rows:
+        returns = np.array([r["total_return"] for r in rows])
+        sharpes = [r["sharpe_ratio"] for r in rows if r["sharpe_ratio"] is not None]
+        summary.update({
+            "share_profitable": float((returns > 0).mean()), "median_return": float(np.median(returns)), "mean_return": float(returns.mean()),
+            "best_return": float(returns.max()), "worst_return": float(returns.min()),
+            "median_sharpe": float(np.median(sharpes)) if sharpes else None, "total_trades": int(sum(r["number_of_trades"] for r in rows)),
+        })
+    notes = ["Each instrument is tested on its own with the full capital; this is not a portfolio simulation."]
+    if len(rows) > 1:
+        notes.append(f"With {len(rows)} instruments some will look good by chance alone. Judge the median and the share of profitable "
+                     "instruments, not the best rows.")
+    if any(r["data_kind"] == "simulated" for r in rows):
+        notes.append("Some series are SIMULATED and say nothing about real markets.")
+    from .metrics import DISCLAIMER
+
+    return {"strategy": strategy, "params": params, "timeframe": timeframe, "rows": sorted(rows, key=lambda r: r["instrument_id"]),
+            "skipped": skipped, "summary": summary, "notes": notes, "disclaimer": DISCLAIMER}

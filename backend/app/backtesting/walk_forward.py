@@ -38,6 +38,7 @@ class WalkForwardSpec:
     execution: ExecutionModel = field(default_factory=ExecutionModel)
     limits: RiskLimits = field(default_factory=RiskLimits)
     static_fx: dict[str, float] = field(default_factory=dict)
+    instruments: list | None = None  # defaults to the built-in starter universe
 
 
 def _grid(spec: WalkForwardSpec) -> list[dict]:
@@ -60,7 +61,7 @@ def _grid(spec: WalkForwardSpec) -> list[dict]:
 def _run(spec: WalkForwardSpec, bars: pd.DataFrame, params: dict, trade_start: pd.Timestamp | None = None) -> BacktestResult:
     return run_backtest(BacktestSpec(
         initial_capital=spec.initial_capital, base_currency=spec.base_currency, execution=spec.execution, limits=spec.limits,
-        static_fx=spec.static_fx, trade_start=trade_start,
+        static_fx=spec.static_fx, trade_start=trade_start, instruments=spec.instruments,
         deployments=[DeploymentSpec(spec.strategy, spec.instrument_id, spec.timeframe, params)],
         data={(spec.instrument_id, spec.timeframe): Dataset(bars, spec.data.kind, spec.data.source)}))
 

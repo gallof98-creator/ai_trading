@@ -26,21 +26,49 @@ class Dataset:
         return h.hexdigest()
 
 
-def load_csv(path: str | Path, tz: str | None = None) -> Dataset:
-    """CSV with columns timestamp,open,high,low,close,volume. If timestamps carry no UTC offset,
-    `tz` (the source timezone) is required."""
+_ALIASES = {"date": "timestamp", "datetime": "timestamp", "time": "clock", "vol": "volume", "per": "period"}
+
+
+def load_csv(path, tz: str | None = None) -> Dataset:
+    """Read OHLCV bars from CSV. Accepted layouts:
+
+    * timestamp,open,high,low,close,volume            (this platform's own format)
+    * Date,Open,High,Low,Close[,Adj Close],Volume      (common vendor export; extra columns ignored)
+    * <TICKER>,<PER>,<DATE>,<TIME>,<OPEN>,...,<VOL>    (bulk-download text files; dates as YYYYMMDD)
+
+    Date-only values are daily bars and are stamped at 00:00 UTC of that trading date. Values that
+    carry a time but no UTC offset need `tz`, the timezone they are expressed in.
+    """
     df = pd.read_csv(path)
-    df.columns = [c.strip().lower() for c in df.columns]
+    df.columns = [c.strip().strip("<>").strip().lower() for c in df.columns]
+    df = df.rename(columns=_ALIASES)
     if "timestamp" not in df.columns:
-        raise ValueError("CSV needs a 'timestamp' column")
-    ts = pd.to_datetime(df.pop("timestamp"))
-    if ts.dt.tz is None:
-        if tz is None:
-            raise ValueError("CSV timestamps have no UTC offset; pass the source timezone")
-        ts = ts.dt.tz_localize(tz)
+        raise ValueError("CSV needs a 'timestamp' or 'date' column")
+    missing = [c for c in ("open", "high", "low", "close") if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV is missing columns: {', '.join(missing)}")
+    if "volume" not in df.columns:
+        df["volume"] = 0.0
+    raw = df["timestamp"].astype(str).str.strip()
+    compact = raw.str.fullmatch(r"\d{8}").all()
+    date_only = compact or raw.str.fullmatch(r"\d{4}-\d{2}-\d{2}").all()
+    clock = df["clock"].astype(str).str.strip().str.zfill(6) if "clock" in df.columns else None
+    if date_only and (clock is None or (clock == "000000").all()):
+        ts = pd.to_datetime(raw, format="%Y%m%d" if compact else "%Y-%m-%d").dt.tz_localize("UTC")
+    else:
+        if compact:
+            raw = raw + " " + (clock if clock is not None else "000000")
+            ts = pd.to_datetime(raw, format="%Y%m%d %H%M%S")
+        else:
+            ts = pd.to_datetime(raw)
+        if ts.dt.tz is None:
+            if tz is None:
+                raise ValueError("CSV timestamps have no UTC offset; pass the source timezone")
+            ts = ts.dt.tz_localize(tz)
     df.index = pd.DatetimeIndex(ts).tz_convert("UTC")
     df.index.name = "ts"
-    return Dataset(df[OHLCV].astype(float), DataKind.HISTORICAL, f"csv:{Path(path).name}")
+    name = Path(path).name if isinstance(path, (str, Path)) else "upload"
+    return Dataset(df[OHLCV].astype(float).sort_index(), DataKind.HISTORICAL, f"csv:{name}")
 
 
 def synthetic_bars(timeframe: str, periods: int, seed: int, start: str = "2022-01-03", start_price: float = 100.0,

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..database.models import AuditEntry, FillRow, Notification, OrderRow, RiskEvent, SignalRow, StrategyDeployment, User
 from ..execution.runtime import RuntimeError_, TradingRuntime
+from ..instruments.registry import default_instruments
 from ..market_data.fx import ECB_DAILY_URL, parse_ecb_reference_rates
 from ..security.roles import Role
 from ..strategies.registry import list_strategies
@@ -49,8 +50,36 @@ def trades(limit: int = 200, _: User = Depends(viewer), rt: TradingRuntime = Dep
 @router.get("/instruments")
 def instruments(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> list[dict]:
     with rt.lock:
+        builtin = {i.id for i in default_instruments()}
         return [{**i.model_dump(mode="json"), "last_price": rt.portfolio.prices.get(i.id), "data_kind": rt.kinds.get(i.id),
-                 "feed_status": rt.feed_status.get(i.id)} for i in rt.registry.all()]
+                 "feed_status": rt.feed_status.get(i.id), "removable": i.id not in builtin} for i in rt.registry.all()]
+
+
+@router.get("/markets")
+def markets(_: User = Depends(viewer)) -> list[dict]:
+    from ..instruments.registry import MARKETS
+
+    return [{"code": code, "label": m["label"], "currency": m["currency"], "suffix": m["suffix"]} for code, m in MARKETS.items()]
+
+
+class InstrumentsIn(BaseModel):
+    tickers: list[str] = Field(min_length=1, max_length=2000)
+    market: str = Field(max_length=4)
+    asset_class: Literal["stock", "etf"] = "stock"
+
+
+@router.post("/instruments")
+def add_instruments(body: InstrumentsIn, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    from ..instruments.registry import MARKETS
+
+    if body.market not in MARKETS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown market; supported: {', '.join(MARKETS)}")
+    return rt.add_instruments(body.tickers, body.market, body.asset_class, user.email)
+
+
+@router.delete("/instruments/{instrument_id:path}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_instrument(instrument_id: str, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> None:
+    guard(rt.remove_instrument, instrument_id, user.email)
 
 
 # ---------------------------------------------------------------- strategies / deployments

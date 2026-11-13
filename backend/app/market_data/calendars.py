@@ -56,6 +56,11 @@ CALENDARS: dict[str, SessionCalendar] = {
     "XNYS": SessionCalendar("XNYS", tz="America/New_York", open_time=time(9, 30), close_time=time(16), weekdays=_WEEK),
     "XETR": SessionCalendar("XETR", tz="Europe/Berlin", open_time=time(9), close_time=time(17, 30), weekdays=_WEEK),
     "XLON": SessionCalendar("XLON", tz="Europe/London", open_time=time(8), close_time=time(16, 30), weekdays=_WEEK),
+    "XMIL": SessionCalendar("XMIL", tz="Europe/Rome", open_time=time(9), close_time=time(17, 30), weekdays=_WEEK),
+    "XPAR": SessionCalendar("XPAR", tz="Europe/Paris", open_time=time(9), close_time=time(17, 30), weekdays=_WEEK),
+    "XAMS": SessionCalendar("XAMS", tz="Europe/Amsterdam", open_time=time(9), close_time=time(17, 30), weekdays=_WEEK),
+    "XMAD": SessionCalendar("XMAD", tz="Europe/Madrid", open_time=time(9), close_time=time(17, 30), weekdays=_WEEK),
+    "XSWX": SessionCalendar("XSWX", tz="Europe/Zurich", open_time=time(9), close_time=time(17, 30), weekdays=_WEEK),
 }
 
 

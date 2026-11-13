@@ -86,21 +86,57 @@ def import_csv(body: CsvImport, user: User = Depends(trader), session: Session =
         inst = rt.registry.get(body.instrument_id)
         if body.timeframe not in TIMEFRAMES:
             raise ValueError(f"Unsupported timeframe {body.timeframe}")
-        raw = load_csv(io.StringIO(body.csv), tz=body.timezone)
-        clean, report = validate_bars(raw.bars, body.timeframe, get_calendar(inst.calendar))
-        existing = _store.load(session, body.instrument_id, body.timeframe)
-        if existing is not None and existing.kind.value == "simulated" and not body.replace:
-            raise ValueError("This series currently holds SIMULATED data; pass replace=true to delete it before importing market data")
-        if existing is not None and body.replace:
-            from sqlalchemy import delete
-
-            from ..database.models import BarRow
-            session.execute(delete(BarRow).where(BarRow.instrument_id == body.instrument_id, BarRow.timeframe == body.timeframe))
-        n = _store.save(session, body.instrument_id, body.timeframe, Dataset(clean, raw.kind, "csv-import"))
-        audit.record(session, user.email, "market.csv_imported", instrument_id=body.instrument_id, timeframe=body.timeframe, bars=n)
-        return {"bars_stored": n, "quality": report.to_dict()}
+        if rt.kinds.get(inst.id) == "simulated":
+            raise ValueError("A simulated replay is driving the paper engine for this instrument; reset the paper account first")
+        out = bt.import_csv_series(session, inst, body.timeframe, body.csv, body.timezone, body.replace)
+        audit.record(session, user.email, "market.csv_imported", instrument_id=inst.id, timeframe=body.timeframe, bars=out["bars_stored"])
+        return out
 
     return guard(run)
+
+
+class BulkFile(BaseModel):
+    name: str = Field(max_length=200)
+    csv: str = Field(max_length=20_000_000)
+
+
+class BulkCsvImport(BaseModel):
+    market: str = Field(max_length=4)
+    asset_class: str = Field("stock", pattern="^(stock|etf)$")
+    timeframe: str = Field("1d", max_length=8)
+    timezone: str | None = Field(None, max_length=64)
+    replace: bool = False
+    files: list[BulkFile] = Field(min_length=1, max_length=50)
+
+
+@router.post("/market/import-csv-bulk")
+def import_csv_bulk(body: BulkCsvImport, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime),
+                    container: Container = Depends(get_container)) -> dict:
+    """Import several CSV files at once. Each file is one instrument, named after its ticker
+    (AAPL.csv, eni.mi.csv, aapl.us.txt ...). Unknown tickers are added to the chosen market.
+    Every file succeeds or fails on its own; the response lists both."""
+    import re
+
+    if body.timeframe not in TIMEFRAMES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unsupported timeframe {body.timeframe}")
+    imported, failed = [], []
+    for f in body.files:
+        stem = re.sub(r"\.(csv|txt)$", "", f.name.strip(), flags=re.I)
+        ticker = re.sub(r"\.(us|mi|de|pa|as|mc|sw|f)$", "", stem, flags=re.I)  # vendor market suffixes
+        added = rt.add_instruments([ticker], body.market, body.asset_class, user.email)
+        ids = added["created"] + added["existing"]
+        if not ids:
+            failed.append({"file": f.name, "reason": added["invalid"][0]["reason"] if added["invalid"] else "invalid ticker"})
+            continue
+        try:
+            with container.db.session() as session:  # one transaction per file
+                out = bt.import_csv_series(session, rt.registry.get(ids[0]), body.timeframe, f.csv, body.timezone, body.replace)
+                audit.record(session, user.email, "market.csv_imported", instrument_id=ids[0], timeframe=body.timeframe, bars=out["bars_stored"])
+            imported.append({"file": f.name, "instrument_id": ids[0], "bars": out["bars_stored"], "first": out["first"], "last": out["last"],
+                             "quality_ok": out["quality"]["ok"], "missing_bars": out["quality"]["missing_bars"]})
+        except Exception as exc:  # report per file; a bad file must not abort the batch
+            failed.append({"file": f.name, "instrument_id": ids[0], "reason": str(exc)[:300]})
+    return {"imported": imported, "failed": failed}
 
 
 class SimulatedIn(BaseModel):
@@ -167,7 +203,7 @@ def run_backtest(body: BacktestIn, user: User = Depends(trader), session: Sessio
 
     def run() -> dict:
         spec = bt.build_spec(session, capital, [d.model_dump() for d in body.deployments], rt.user_settings.base_currency, rt.user_settings.risk,
-                             body.execution.model_dump(), body.static_fx, body.start, body.end)
+                             body.execution.model_dump(), body.static_fx, body.start, body.end, rt.registry.all())
         run_id, result = bt.run_and_store(session, spec, body.label, user.email)
         return {"id": run_id, **result.to_dict()}
 
@@ -188,6 +224,31 @@ def get_backtest(run_id: str, _: User = Depends(viewer), session: Session = Depe
             "data": row.config["data"], **row.config["result"]}
 
 
+class ScanIn(BaseModel):
+    strategy: str = Field(max_length=64)
+    params: dict = Field(default_factory=dict)
+    timeframe: str = Field("1d", max_length=8)
+    instrument_ids: list[str] | None = Field(None, max_length=300)  # default: every instrument with stored bars on this timeframe
+    initial_capital: float | None = Field(None, gt=0)
+    execution: ExecutionIn = ExecutionIn()
+    static_fx: dict[str, float] = Field(default_factory=dict)
+    start: str | None = None
+    end: str | None = None
+
+
+@router.post("/backtests/scan")
+def scan(body: ScanIn, _: User = Depends(trader), session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    capital = _capital(body.initial_capital, rt)
+    ids = body.instrument_ids
+    if ids is None:
+        known = {i.id for i in rt.registry.all()}
+        ids = sorted({c["instrument_id"] for c in _store.coverage(session) if c["timeframe"] == body.timeframe and c["instrument_id"] in known})[:300]
+    if not ids:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No instrument has stored {body.timeframe} bars yet")
+    return guard(bt.scan_universe, session, body.strategy, body.params, body.timeframe, ids, capital, rt.user_settings.base_currency,
+                 rt.user_settings.risk, body.execution.model_dump(), body.static_fx, body.start, body.end, rt.registry.all())
+
+
 class WalkForwardIn(BaseModel):
     strategy: str = Field(max_length=64)
     instrument_id: str = Field(max_length=64)
@@ -205,7 +266,7 @@ class WalkForwardIn(BaseModel):
 @router.post("/backtests/walk-forward")
 def walk_forward(body: WalkForwardIn, _: User = Depends(trader), session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> dict:
     capital = _capital(body.initial_capital, rt)
-    return guard(bt.run_walk_forward, session, body.model_dump(), capital, rt.user_settings.base_currency, rt.user_settings.risk)
+    return guard(bt.run_walk_forward, session, body.model_dump(), capital, rt.user_settings.base_currency, rt.user_settings.risk, rt.registry.all())
 
 
 class CompareIn(BaseModel):
@@ -222,7 +283,7 @@ def compare(body: CompareIn, _: User = Depends(trader), session: Session = Depen
 
     capital = _capital(body.initial_capital, rt)
     rows = guard(bt.run_comparison, session, [i.model_dump() for i in body.items], capital, rt.user_settings.base_currency, rt.user_settings.risk,
-                 body.static_fx, body.start, body.end)
+                 body.static_fx, body.start, body.end, rt.registry.all())
     return analyst.compare(rows)
 
 
@@ -274,8 +335,8 @@ class ReportIn(BaseModel):
 
 
 @router.post("/ai/reports")
-def report(body: ReportIn, _: User = Depends(trader), session: Session = Depends(get_session)) -> dict:
-    return guard(ai.create_report, session, body.backtest_id)
+def report(body: ReportIn, _: User = Depends(trader), session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    return guard(ai.create_report, session, body.backtest_id, rt.registry.all())
 
 
 @router.get("/ai/reports")
@@ -298,7 +359,7 @@ def suggest(body: SuggestIn, _: User = Depends(trader), session: Session = Depen
     capital = _capital(body.initial_capital, rt)
     ds = _dataset(session, rt, body.instrument_id, body.timeframe)
     return guard(ai.create_proposals, session, ds, body.strategy, body.instrument_id, body.timeframe, capital, body.static_fx,
-                 rt.user_settings.risk, body.n_trials, body.seed)
+                 rt.user_settings.risk, body.n_trials, body.seed, rt.registry.all())
 
 
 @router.get("/ai/proposals")

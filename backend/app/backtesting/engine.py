@@ -150,8 +150,10 @@ def run_backtest(spec: BacktestSpec) -> BacktestResult:
                 continue
             clean, report = validate_bars(ds.bars, tf, get_calendar(registry.get(iid).calendar))
             if not report.ok:
+                cal = get_calendar(registry.get(iid).calendar)
+                holiday_note = " (missing bars include exchange holidays, which are not bundled)" if cal.open_time is not None and not cal.holidays else ""
                 warnings.append(f"{iid} {tf}: {report.duplicates_removed} duplicate, {report.invalid_rows_removed} invalid and "
-                                f"{report.missing_bars} missing bars in the input data")
+                                f"{report.missing_bars} missing bars in the input data{holiday_note}")
             if clean.empty:
                 raise ValueError(f"No valid bars for {iid} {tf}")
             bars[(iid, tf)] = clean

@@ -209,7 +209,7 @@ def validate_proposal(strategy: str, params: dict) -> list[str]:
 
 def suggest_configurations(strategy: str, instrument_id: str, timeframe: str, data: Dataset, initial_capital: float,
                            static_fx: dict[str, float] | None = None, limits: RiskLimits | None = None, execution: ExecutionModel | None = None,
-                           n_trials: int = 25, seed: int = 0, top: int = 3) -> list[dict]:
+                           n_trials: int = 25, seed: int = 0, top: int = 3, instruments: list | None = None) -> list[dict]:
     """Search strategy parameters on the first 60% of the data (Optuna, seeded), then judge the best
     candidates ONLY on the remaining 40%. Every candidate is returned with both results and a verdict;
     none is applied."""
@@ -224,7 +224,8 @@ def suggest_configurations(strategy: str, instrument_id: str, timeframe: str, da
 
     def run(frame: pd.DataFrame, params: dict, trade_start=None) -> BacktestResult:
         return run_backtest(BacktestSpec(initial_capital=initial_capital, static_fx=static_fx or {}, limits=limits, execution=execution,
-                                         trade_start=trade_start, deployments=[DeploymentSpec(strategy, instrument_id, timeframe, params)],
+                                         trade_start=trade_start, instruments=instruments,
+                                         deployments=[DeploymentSpec(strategy, instrument_id, timeframe, params)],
                                          data={(instrument_id, timeframe): Dataset(frame, data.kind, data.source)}))
 
     seen: dict[str, tuple[dict, dict]] = {}

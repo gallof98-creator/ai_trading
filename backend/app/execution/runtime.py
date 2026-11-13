@@ -15,10 +15,12 @@ from ..brokers.base import BrokerAdapter, BrokerError, BrokerManager
 from ..core.config import Settings
 from ..core.logging import get_logger
 from ..database.base import Database
-from ..database.models import (AppSetting, BrokerAccount, FillRow, FxRate, OrderRow, RiskEvent, SignalRow, StrategyDeployment)
+from ..database.models import (AppSetting, BarRow, BrokerAccount, FillRow, FxRate, InstrumentRow, OrderRow, RiskEvent, SignalRow,
+                               StrategyDeployment)
 from ..database.settings_store import UserSettings, load_settings
 from ..domain.models import Fill, Order, Signal, TradingMode
-from ..instruments.registry import InstrumentRegistry, default_instruments
+from ..domain.models import AssetClass, Instrument
+from ..instruments.registry import InstrumentRegistry, default_instruments, make_equity
 from ..market_data.calendars import get_calendar
 from ..market_data.fx import STATIC_SOURCE, FxRateProvider, FxRateUnavailable
 from ..market_data.quality import DataKind, validate_bars
@@ -150,6 +152,8 @@ class TradingRuntime:
             for row in session.scalars(select(FxRate)):
                 ts = row.ts if row.ts.tzinfo else row.ts.replace(tzinfo=timezone.utc)
                 self.fx.add_rate(row.base, row.quote, ts, float(row.rate), row.source)
+            for row in session.scalars(select(InstrumentRow).where(InstrumentRow.is_active.is_(True))):
+                self.registry.register(Instrument.model_validate(row.spec))
             for account in session.scalars(select(BrokerAccount).where(BrokerAccount.adapter == "paper")):
                 state = session.get(AppSetting, f"paper:{account.id}")
                 if state is not None:
@@ -367,6 +371,51 @@ class TradingRuntime:
                 out.append({"id": self.data_adapter.broker_id, "connected": self.data_adapter.is_connected(), "is_simulated": False,
                             "capabilities": self.data_adapter.capabilities.to_dict() if self.data_adapter.is_connected() else None, "data_only": True})
             return out
+
+    # ------------------------------------------------------------------ instruments
+    def add_instruments(self, tickers: list[str], market: str, asset_class: str, actor: str) -> dict:
+        """Add stocks or ETFs to the universe. Returns which ids were created, already known or invalid."""
+        out: dict[str, list] = {"created": [], "existing": [], "invalid": []}
+        with self.lock, self.db.session() as session:
+            for ticker in dict.fromkeys(t for t in tickers if t.strip()):
+                try:
+                    inst = make_equity(ticker, market, AssetClass(asset_class))
+                except ValueError as exc:
+                    out["invalid"].append({"ticker": ticker, "reason": str(exc)})
+                    continue
+                try:
+                    self.registry.get(inst.id)
+                    out["existing"].append(inst.id)
+                    continue
+                except KeyError:
+                    pass
+                self.registry.register(inst)
+                session.add(InstrumentRow(id=inst.id, asset_class=inst.asset_class.value, spec=inst.model_dump(mode="json"), is_active=True))
+                out["created"].append(inst.id)
+            for adapter in self.brokers.all():
+                if isinstance(adapter, SimulatedBroker):
+                    adapter.map_all_instruments()
+            if out["created"]:
+                audit.record(session, actor, "instruments.added", market=market, count=len(out["created"]), ids=out["created"][:200])
+        return out
+
+    def remove_instrument(self, instrument_id: str, actor: str) -> None:
+        """Remove a user-added instrument together with its stored bars. Built-in instruments stay."""
+        with self.lock, self.db.session() as session:
+            row = session.get(InstrumentRow, instrument_id)
+            if row is None:
+                raise RuntimeError_("Only instruments you added can be removed")
+            if session.scalar(select(StrategyDeployment).where(StrategyDeployment.instrument_id == instrument_id)) is not None:
+                raise RuntimeError_("A strategy is deployed on this instrument; delete the deployment first")
+            if any(k[1] == instrument_id for k in self.portfolio.slices):
+                raise RuntimeError_("There is an open position in this instrument")
+            session.execute(delete(BarRow).where(BarRow.instrument_id == instrument_id))
+            session.delete(row)
+            self.registry.unregister(instrument_id)
+            self.kinds.pop(instrument_id, None)
+            for key in [k for k in self.bars if k[0] == instrument_id]:
+                del self.bars[key]
+            audit.record(session, actor, "instruments.removed", instrument_id=instrument_id)
 
     # ------------------------------------------------------------------ deployments
     def _exec_tf(self, instrument_id: str) -> str | None:

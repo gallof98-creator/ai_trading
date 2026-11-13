@@ -87,7 +87,7 @@ def model_drift(session: Session, model_id: str, ds: Dataset) -> dict:
     return {**detect_drift(row.payload["feature_reference"], recent), "basis": basis, "model_id": model_id}
 
 
-def create_report(session: Session, backtest_id: str) -> dict:
+def create_report(session: Session, backtest_id: str, instruments: list | None = None) -> dict:
     """Re-runs the stored configuration on the stored data (verifying the data fingerprint) and writes a report."""
     from ..backtesting.service import load_dataset
     from ..database.settings_store import RiskLimits
@@ -105,7 +105,7 @@ def create_report(session: Session, backtest_id: str) -> dict:
             raise ValueError(f"Stored data for {iid} {tf} has changed since this backtest ran; run the backtest again")
         data[(iid, tf)], bars[iid] = ds, ds.bars
     result = run_backtest(BacktestSpec(
-        initial_capital=cfg["capital"], base_currency=cfg["base_currency"], static_fx=cfg["static_fx"], data=data,
+        initial_capital=cfg["capital"], base_currency=cfg["base_currency"], static_fx=cfg["static_fx"], data=data, instruments=instruments,
         execution=ExecutionModel.from_dict(cfg["execution"]), limits=RiskLimits(**cfg["limits"]),
         deployments=[DeploymentSpec(s, i, tf, p) for s, i, tf, p in cfg["deployments"]]))
     report = analyst.research_report(cfg.get("label") or "Backtest report", result, bars)
@@ -118,9 +118,10 @@ def create_report(session: Session, backtest_id: str) -> dict:
 
 
 def create_proposals(session: Session, ds: Dataset, strategy: str, instrument_id: str, timeframe: str, capital: float,
-                     static_fx: dict[str, float], limits, n_trials: int, seed: int) -> list[dict]:
+                     static_fx: dict[str, float], limits, n_trials: int, seed: int, instruments: list | None = None) -> list[dict]:
     out = []
-    for p in analyst.suggest_configurations(strategy, instrument_id, timeframe, ds, capital, static_fx=static_fx, limits=limits, n_trials=n_trials, seed=seed):
+    for p in analyst.suggest_configurations(strategy, instrument_id, timeframe, ds, capital, static_fx=static_fx, limits=limits, n_trials=n_trials, seed=seed,
+                                            instruments=instruments):
         row = ResearchItem(id=uuid.uuid4().hex, kind="proposal", status="validated" if p["validation"] == "passed" else "failed_validation",
                            title=f"{strategy} · {instrument_id} {timeframe}", payload=p)
         session.add(row)
