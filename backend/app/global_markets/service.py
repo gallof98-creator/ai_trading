@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from ..core.logging import get_logger
 from ..database.models import Security
-from ..instruments.registry import make_equity
+from ..instruments.registry import make_equity, market_for_exchange
 from ..market_data.providers import ProviderAuthError, ProviderError, ProviderRateLimited
 from ..monitoring import audit
 from . import catalog
@@ -198,7 +198,7 @@ class GlobalMarkets:
 
     # ---- link to tradable instruments
     def _instrument_id(self, security: Security) -> str | None:
-        market = EXCHANGES[security.exchange].market if security.exchange in EXCHANGES else None
+        market = market_for_exchange(security.exchange) if security.exchange in EXCHANGES else None
         kind = TRADABLE.get(security.security_type)
         if market is None or kind is None:
             return None
@@ -231,12 +231,12 @@ class GlobalMarkets:
                 if s.instrument_id:
                     out["already_active"].append(s.id)
                     continue
-                market = EXCHANGES[s.exchange].market if s.exchange in EXCHANGES else None
+                market = market_for_exchange(s.exchange) if s.exchange in EXCHANGES else None
                 kind = TRADABLE.get(s.security_type)
                 if s.listing_status != "active":
                     out["unsupported"].append({"id": s.id, "reason": "delisted"})
                 elif market is None:
-                    out["unsupported"].append({"id": s.id, "reason": f"prices and trading are not supported yet for {EXCHANGES[s.exchange].name}"})
+                    out["unsupported"].append({"id": s.id, "reason": "its exchange is not in the registry"})
                 elif kind is None:
                     out["unsupported"].append({"id": s.id, "reason": f"{s.security_type.replace('_', ' ')} cannot be traded by the engines"})
                 else:

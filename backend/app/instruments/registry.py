@@ -98,6 +98,33 @@ MARKETS: dict[str, dict] = {
 }
 
 
+# Exchanges whose prices are quoted in a subunit of the trading currency.
+QUOTE_UNIT = {"L": "GBX", "JO": "ZAC", "TA": "ILA"}
+# Platform market code of the exchanges that already had one before the global registry existed.
+LEGACY_MARKET = {"US": "US", "MI": "IT", "DE": "DE", "PA": "FR", "AS": "NL", "MC": "ES", "SW": "CH"}
+
+
+def _extend_markets() -> None:
+    """Add a market for every registered exchange that does not have one yet. These use a generic
+    Monday-Friday calendar and a lot size of one share, which is enough for daily-bar research;
+    real board lots, tick sizes, session hours and holidays of those exchanges are not modelled."""
+    from ..global_markets.exchanges import EXCHANGES
+
+    for code, ex in EXCHANGES.items():
+        if code in LEGACY_MARKET:
+            continue
+        MARKETS[code] = {"label": ex.name, "calendar": f"WD:{ex.timezone}", "currency": QUOTE_UNIT.get(code, ex.currency), "suffix": f".{code}",
+                         "tick_size": 0.0001, "eodhd": ex.providers.get("eodhd")}
+
+
+_extend_markets()
+
+
+def market_for_exchange(exchange_code: str) -> str:
+    """Platform market code used for instruments of a registered exchange."""
+    return LEGACY_MARKET.get(exchange_code, exchange_code)
+
+
 def make_equity(ticker: str, market: str, asset_class: AssetClass = AssetClass.STOCK) -> Instrument:
     """Build a normalized stock/ETF instrument for one of the supported markets."""
     import re
@@ -110,7 +137,7 @@ def make_equity(ticker: str, market: str, asset_class: AssetClass = AssetClass.S
     m = MARKETS[market]
     if m["suffix"] and ticker.endswith(m["suffix"]):
         ticker = ticker[: -len(m["suffix"])]
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,11}", ticker):
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9.&\-]{0,15}", ticker):
         raise ValueError(f"{ticker!r} is not a valid ticker")
     return Instrument(id=f"{asset_class.value.upper()}:{ticker}{m['suffix']}", asset_class=asset_class, symbol=ticker,
                       quote_currency=m["currency"], exchange=m["calendar"], calendar=m["calendar"], tick_size=m["tick_size"],

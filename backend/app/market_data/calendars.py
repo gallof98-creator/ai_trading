@@ -65,6 +65,12 @@ CALENDARS: dict[str, SessionCalendar] = {
 
 
 def get_calendar(name: str) -> SessionCalendar:
+    if name.startswith("WD:"):
+        # Generic calendar for exchanges without a dedicated one: Monday to Friday in the exchange's timezone,
+        # no session hours and no holidays. Adequate for daily bars; intraday trading needs a real calendar.
+        if name not in CALENDARS:
+            CALENDARS[name] = SessionCalendar(name, tz=name[3:], weekdays=_WEEK)
+        return CALENDARS[name]
     try:
         return CALENDARS[name]
     except KeyError:

@@ -23,7 +23,7 @@ Status words mean exactly this: **Done** = implemented and covered by automated 
 
 ## Verification performed
 
-- Backend test suite: 219 tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
+- Backend test suite:  tests, all passing (strategy maths, look-ahead, sizing, every risk limit, backtest hand calculations and reproducibility, FX, adapters against mocks, idempotency, duplicate prevention, partial fills, connection loss, database outage, paper/live isolation, model validation, leakage, HTTP flows, auth and RBAC).
 - Docker Compose stack (Postgres, Redis, API, worker, frontend): started healthy, migrations applied on Postgres, full browser flow passed (login, settings, paper account, data, deployment, replay, overview, portfolio, kill switch, backtest, comparison, model training, report), state identical after an API container restart, no errors or secrets in the logs.
 
 ## Not verified or not built — read before relying on anything
@@ -50,6 +50,8 @@ Status words mean exactly this: **Done** = implemented and covered by automated 
 - Exchange holidays are not bundled; equity calendars know regular sessions and weekends only.
 - No economic calendar module.
 - Survivorship-bias-free testing needs point-in-time universe data from a vendor; the platform has no universe management.
+
+- The global catalog and bulk price work is tracked separately in [global-markets.md](global-markets.md).
 
 **Backtesting**
 - Futures: the continuous-series builder and roll-cost charge exist and are tested, but roll schedules cannot yet be supplied through the API or dashboard.

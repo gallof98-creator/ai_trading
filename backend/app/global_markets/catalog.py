@@ -227,8 +227,16 @@ def coverage_report(session: Session) -> dict:
     rows = session.execute(select(Security.exchange, Security.listing_status, Security.security_type, func.count(), func.count(Security.isin),
                                   func.count(Security.figi), func.count(Security.instrument_id))
                            .group_by(Security.exchange, Security.listing_status, Security.security_type)).all()
+    from ..instruments.registry import market_for_exchange
+    from ..market_data.providers import PROVIDER_CLASSES
+
     priced = dict(session.execute(select(Security.exchange, func.count()).where(Security.instrument_id.in_(
-        select(BarSeries.instrument_id).where(BarSeries.kind != "simulated"))).group_by(Security.exchange)).all())
+        select(BarSeries.instrument_id).where(BarSeries.kind != "simulated", BarSeries.timeframe == "1d"))).group_by(Security.exchange)).all())
+    # A price series is stale when its newest bar is more than a week old.
+    cutoff_ms = int((_now().timestamp() - 7 * 86400) * 1000)
+    stale = dict(session.execute(select(Security.exchange, func.count()).where(Security.instrument_id.in_(
+        select(BarSeries.instrument_id).where(BarSeries.kind != "simulated", BarSeries.timeframe == "1d", BarSeries.last_ms < cutoff_ms)))
+        .group_by(Security.exchange)).all())
     per: dict[str, dict] = {}
     for code, status, kind, n, n_isin, n_figi, n_linked in rows:
         e = per.setdefault(code, {"discovered": 0, "active": 0, "delisted": 0, "with_isin": 0, "with_figi": 0, "by_type": {t: 0 for t in SECURITY_TYPES},
@@ -256,12 +264,15 @@ def coverage_report(session: Session) -> dict:
                                    {"status": run.status, "last_sync": run.finished_at.isoformat() if run.finished_at else None,
                                     "received": run.counts.get("received"), "message": run.message or run.counts.get("delist_check", "")})
         with_prices = priced.get(code, 0)
+        market = market_for_exchange(code)
+        price_providers = sorted(n for n, cls in PROVIDER_CLASSES.items() if market in cls.markets)
         exchanges.append({"code": code, "name": ex.name, "country": ex.country, "currency": ex.currency, "region": ex.region, "mic": ex.mic,
-                          "prices_supported": ex.market is not None, "note": ex.note, **stats, "with_historical_prices": with_prices,
+                          "price_providers": price_providers, "note": ex.note, **stats, "with_historical_prices": with_prices,
+                          "stale_price_series": stale.get(code, 0),
                           # No provider connected here supplies live or delayed quotes for the catalog: stated, not left blank.
                           "with_realtime_data": 0, "with_delayed_data": 0, "missing_prices": max(stats["active"] - with_prices, 0), "providers": providers})
     totals = {k: sum(e[k] for e in exchanges) for k in ("discovered", "active", "delisted", "with_isin", "with_figi", "equities_active",
-                                                         "with_historical_prices", "with_realtime_data", "with_delayed_data", "missing_prices")}
+                                                         "with_historical_prices", "stale_price_series", "with_realtime_data", "with_delayed_data", "missing_prices")}
     synced = [e for e in exchanges if e["discovered"]]
     return {
         "generated_at": _now().isoformat(), "exchanges_in_registry": len(exchanges), "exchanges_with_data": len(synced), "totals": totals, "exchanges": exchanges,

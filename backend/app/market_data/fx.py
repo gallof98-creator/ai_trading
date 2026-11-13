@@ -17,6 +17,10 @@ from datetime import datetime, timedelta, timezone
 STATIC_SOURCE = "static-assumption"
 
 
+# Some exchanges quote prices in a subunit of the currency (London in pence). 1 subunit = factor units of the currency.
+SUBUNITS: dict[str, tuple[str, float]] = {"GBX": ("GBP", 0.01), "ZAC": ("ZAR", 0.01), "ILA": ("ILS", 0.01)}
+
+
 class FxRateUnavailable(LookupError):
     pass
 
@@ -68,6 +72,11 @@ class FxRateProvider:
     def quote(self, from_ccy: str, to_ccy: str, ts: datetime) -> FxQuote:
         if ts.tzinfo is None:
             raise ValueError("Conversion timestamp must be timezone-aware")
+        from_main, from_factor = SUBUNITS.get(from_ccy, (from_ccy, 1.0))
+        to_main, to_factor = SUBUNITS.get(to_ccy, (to_ccy, 1.0))
+        if (from_factor, to_factor) != (1.0, 1.0):
+            inner = self.quote(from_main, to_main, ts)
+            return FxQuote(inner.rate * from_factor / to_factor, inner.ts, "unit" if inner.source == "identity" else inner.source)
         a, b = self.pegs.get(from_ccy, from_ccy), self.pegs.get(to_ccy, to_ccy)
         if a == b:
             return FxQuote(1.0, ts, "identity" if from_ccy == to_ccy else "peg")

@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     tiingo_base_url: str = "https://api.tiingo.com"
     alphavantage_api_key: str = ""
     alphavantage_base_url: str = "https://www.alphavantage.co"
+    alpaca_api_key: str = ""
+    alpaca_api_secret: str = ""
+    alpaca_base_url: str = "https://data.alpaca.markets"
     finnhub_api_key: str = ""
     finnhub_base_url: str = "https://finnhub.io/api/v1"
     openfigi_api_key: str = ""  # optional: OpenFIGI works without one, more slowly

@@ -83,6 +83,7 @@ function Universe({ onChange }: { onChange: () => void }) {
 }
 
 type Provider = { name: string; label: string; markets: string[]; listing_markets: string[]; pricing: string; signup_url: string; seconds_per_request: number;
+  needs_secret: boolean; symbols_per_request: number; usage: { requests_today: number; requests_this_month: number; symbols_this_month: number };
   configured: boolean; key_hint: string | null; source: string | null; error?: string };
 
 function DataProvider({ user, onChange }: { user: User; onChange: () => void }) {
@@ -90,8 +91,9 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
   const markets = useApi("/api/markets");
   const stats = useApi("/api/instruments/stats", 15_000);
   const job = useApi("/api/market/download", 2_000);
-  const [name, setName] = useState("tiingo");
+  const [name, setName] = useState("alpaca");
   const [key, setKey] = useState("");
+  const [secret, setSecret] = useState("");
   const [market, setMarket] = useState("US");
   const [etfs, setEtfs] = useState(false);
   const [years, setYears] = useState(10);
@@ -102,11 +104,11 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
   const running = job.data && ["pending", "running"].includes(job.data.status);
   const isAdmin = user.role === "admin";
   const refresh = () => { providers.reload(); stats.reload(); job.reload(); onChange(); };
-  const pick = (n: string) => { setName(n); setKey(""); setTest(null); act.setMsg(null); const np = (providers.data ?? []).find((x) => x.name === n); if (np && !np.markets.includes(market)) setMarket(np.markets[0]); };
+  const pick = (n: string) => { setName(n); setKey(""); setSecret(""); setTest(null); act.setMsg(null); const np = (providers.data ?? []).find((x) => x.name === n); if (np && !np.markets.includes(market)) setMarket(np.markets[0]); };
   const m = stats.data?.by_market?.[market];
   const missing = m ? m.instruments - m.with_data : 0;
-  const eta = p ? Math.round((missing * p.seconds_per_request) / 60) : 0;
-  const start = (onlyMissing: boolean) => act.run(() => post("/api/market/download", { provider: name, market, years, only_missing: onlyMissing }), "Download started.").then(() => job.reload());
+  const eta = p ? Math.round((Math.ceil(missing / p.symbols_per_request) * Math.max(p.seconds_per_request, 1)) / 60) : 0;
+  const start = (onlyMissing: boolean, mode = "full") => act.run(() => post("/api/market/download", { provider: name, market, years, only_missing: onlyMissing, mode }), mode === "update" ? "Update started." : "Download started.").then(() => job.reload());
 
   return (
     <Panel title="Data providers (official APIs, your own key)" right={
@@ -124,8 +126,9 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
           </div>
           {isAdmin && (
             <div className="flex flex-wrap items-end gap-3">
-              <Field label={`${p.label} API key`}><input type="password" autoComplete="new-password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={p.configured ? "replace stored key" : ""} /></Field>
-              <Button kind="ghost" disabled={act.busy || key.trim().length < 4} onClick={() => act.run(() => post(`/api/market/providers/${name}/key`, { api_key: key }, "PUT"), "Key stored.").then((ok) => { if (ok) { setKey(""); setTest(null); refresh(); } })}>Save key</Button>
+              <Field label={p.needs_secret ? `${p.label} API key ID` : `${p.label} API key`}><input type="password" autoComplete="new-password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={p.configured ? "replace stored key" : ""} /></Field>
+              {p.needs_secret && <Field label={`${p.label} secret key`}><input type="password" autoComplete="new-password" value={secret} onChange={(e) => setSecret(e.target.value)} /></Field>}
+              <Button kind="ghost" disabled={act.busy || key.trim().length < 4 || (p.needs_secret && secret.trim().length < 4)} onClick={() => act.run(() => post(`/api/market/providers/${name}/key`, { api_key: key, api_secret: secret }, "PUT"), "Key stored.").then((ok) => { if (ok) { setKey(""); setSecret(""); setTest(null); refresh(); } })}>Save key</Button>
               {p.configured && p.source === "stored" && <Button kind="ghost" disabled={act.busy} onClick={() => window.confirm(`Remove the stored ${p.label} key?`) && act.run(() => post(`/api/market/providers/${name}/key`, undefined, "DELETE"), "Key removed.").then(refresh)}>Remove key</Button>}
             </div>
           )}
@@ -166,10 +169,11 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
                       {(markets.data ?? []).filter((x: { code: string }) => p.markets.includes(x.code)).map((x: { code: string; label: string }) => <option key={x.code} value={x.code}>{x.label}</option>)}</select></Field>
                     <Field label="Years of history"><input type="number" min="1" max="40" value={years} onChange={(e) => setYears(Number(e.target.value))} /></Field>
                     <Button disabled={act.busy || running || !p.markets.includes(market)} onClick={() => start(true)}>Download missing</Button>
+                    <Button kind="ghost" disabled={act.busy || running || !p.markets.includes(market)} title="Fetch only the latest days for instruments that already have prices" onClick={() => start(true, "update")}>Update prices</Button>
                     <Button kind="ghost" disabled={act.busy || running || !p.markets.includes(market)} onClick={() => window.confirm(`Download again and replace the stored history of every ${market} instrument?`) && start(false)}>Refresh all</Button>
                     {running && <Button kind="ghost" onClick={() => post("/api/market/download/cancel").then(job.reload)}>Cancel</Button>}
                   </div>
-                  <p className="text-xs text-dim">One request per instrument every {p.seconds_per_request >= 1 ? `${p.seconds_per_request} seconds` : "fraction of a second"} to stay within the plan, in the background.
+                  <p className="text-xs text-dim">{p.symbols_per_request > 1 ? `Up to ${p.symbols_per_request} instruments per request` : "One request per instrument"}, one request every {p.seconds_per_request >= 1 ? `${p.seconds_per_request} seconds` : "fraction of a second"} to stay within the plan, in the background. Used so far: {p.usage.requests_today} requests today, {p.usage.symbols_this_month} symbols this month.
                     {missing > 0 && p.markets.includes(market) ? ` ${missing} instruments without prices: about ${eta >= 120 ? `${Math.round(eta / 60)} hours` : `${Math.max(eta, 1)} minutes`} if the plan's allowance lasts.` : ""} When the allowance runs out the download stops and "Download missing" resumes it later.</p>
                 </div>
               </div>
@@ -177,8 +181,8 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
           )}
           {job.data && job.data.status !== "idle" && (
             <div className="space-y-2 rounded border border-line p-3">
-              <Meter label={`Download via ${job.data.provider}: ${job.data.status}${job.data.current ? ` · ${job.data.current}` : ""}`} value={job.data.done} limit={job.data.total} format={(v) => String(v)} />
-              <p className="font-mono text-xs"><span className="text-up">{job.data.stored} stored</span> · {num(job.data.bars, 0)} bars · <span className={job.data.failed_count ? "text-down" : "text-dim"}>{job.data.failed_count} failed</span>{job.data.message ? ` · ${job.data.message}` : ""}</p>
+              <Meter label={`${job.data.mode === "update" ? "Update" : "Download"} via ${job.data.provider}: ${job.data.status}${job.data.current ? ` · ${job.data.current}` : ""}`} value={job.data.done} limit={job.data.total} format={(v) => String(v)} />
+              <p className="font-mono text-xs"><span className="text-up">{job.data.stored} stored</span> · {num(job.data.bars, 0)} bars{job.data.readjusted ? ` · ${job.data.readjusted} re-downloaded after a split or dividend` : ""} · <span className={job.data.failed_count ? "text-down" : "text-dim"}>{job.data.failed_count} failed</span>{job.data.message ? ` · ${job.data.message}` : ""}</p>
               {job.data.failed.length > 0 && <Table max="max-h-40" head={["Instrument", "Reason"]} rows={job.data.failed.map((f: { instrument_id: string; reason: string }) => [f.instrument_id, <span key="r" className="whitespace-normal text-dim">{f.reason}</span>])} />}
             </div>
           )}

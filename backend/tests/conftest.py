@@ -19,8 +19,10 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def db() -> Database:
-    database = Database("sqlite://")
+def db(tmp_path) -> Database:
+    # A file database gives every session its own connection, as Postgres does. An in-memory SQLite database
+    # has a single shared connection, on which background jobs and HTTP requests would disturb each other.
+    database = Database(f"sqlite:///{tmp_path}/test.db")
     database.create_all()
     with database.session() as s:
         create_user(s, *ADMIN, Role.ADMIN)

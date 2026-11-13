@@ -142,6 +142,7 @@ def import_csv_bulk(body: BulkCsvImport, user: User = Depends(trader), rt: Tradi
 # ---------------------------------------------------------------- data providers
 class ProviderKeyIn(BaseModel):
     api_key: str = Field(min_length=4, max_length=200)
+    api_secret: str = Field("", max_length=200)  # only for providers that issue a key id plus a secret
 
 
 @router.get("/market/providers")
@@ -151,7 +152,7 @@ def providers(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtim
 
 @router.put("/market/providers/{name}/key", status_code=status.HTTP_204_NO_CONTENT)
 def put_provider_key(name: str, body: ProviderKeyIn, user: User = Depends(admin), rt: TradingRuntime = Depends(get_runtime)) -> None:
-    guard(rt.set_provider_key, name, body.api_key.strip(), user.email)
+    guard(rt.set_provider_key, name, body.api_key.strip(), user.email, body.api_secret.strip())
 
 
 @router.delete("/market/providers/{name}/key", status_code=status.HTTP_204_NO_CONTENT)
@@ -183,11 +184,12 @@ class DownloadIn(BaseModel):
     market: str | None = Field(None, max_length=4)
     only_missing: bool = True
     years: int = Field(10, ge=1, le=40)
+    mode: str = Field("full", pattern="^(full|update)$")
 
 
 @router.post("/market/download")
 def start_download(body: DownloadIn, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
-    return guard(rt.start_download, body.provider, user.email, body.instrument_ids, body.market, body.only_missing, body.years)
+    return guard(rt.start_download, body.provider, user.email, body.instrument_ids, body.market, body.only_missing, body.years, body.mode)
 
 
 @router.get("/market/download")

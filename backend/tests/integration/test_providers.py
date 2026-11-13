@@ -134,7 +134,7 @@ def test_download_job_isolates_failures_retries_rate_limits_and_stops_on_bad_key
     http.fail["eod/CCC.US"] = [429, 200]  # rate limited once, then fine
     stored, sleeps = {}, []
 
-    def store(inst, ds):
+    def store(inst, ds, mode="full"):
         if inst.symbol == "DDD":
             raise RuntimeError("disk full")
         stored[inst.id] = len(ds.bars)
@@ -175,11 +175,13 @@ def api(client):
 
 
 def wait(client, admin):
-    for _ in range(200):
-        st = client.get("/api/market/download", headers=admin).json()
-        if st["status"] not in ("pending", "running"):
-            return st
-        time.sleep(0.05)
+    """Wait for the background job by looking at the job object itself: polling the HTTP API here would
+    share the single in-memory SQLite connection with the job's thread."""
+    rt = client.app.state.container.runtime
+    for _ in range(600):
+        if rt.download is not None and rt.download.completed.is_set():  # job and its bookkeeping are both finished
+            return client.get("/api/market/download", headers=admin).json()
+        time.sleep(0.02)
     raise AssertionError("download did not finish")
 
 
@@ -188,7 +190,7 @@ def test_provider_key_is_encrypted_never_returned_and_role_protected(api, db):
     def eodhd():
         return next(p for p in client.get("/api/market/providers", headers=admin).json() if p["name"] == "eodhd")
 
-    assert [p["name"] for p in client.get("/api/market/providers", headers=admin).json()] == ["tiingo", "alphavantage", "eodhd"]
+    assert [p["name"] for p in client.get("/api/market/providers", headers=admin).json()] == ["alpaca", "tiingo", "alphavantage", "eodhd"]
     assert (eodhd()["configured"], eodhd()["key_hint"], eodhd()["source"]) == (False, None, None) and "IT" in eodhd()["markets"]
     assert "No API key" in client.post("/api/market/providers/eodhd/test", headers=admin).json()["detail"]
     viewer = login(client, VIEWER)

@@ -424,19 +424,57 @@ class TradingRuntime:
             audit.record(session, actor, "instruments.removed", instrument_id=instrument_id)
 
     # ------------------------------------------------------------------ data providers
-    PROVIDERS = ("tiingo", "alphavantage", "eodhd")
+    PROVIDERS = ("alpaca", "tiingo", "alphavantage", "eodhd")
     EXTRA_KEYS = ("finnhub", "openfigi")  # keys used by the global catalog only
 
-    def _provider_key(self, name: str) -> tuple[str, str] | None:
-        """(key, where it comes from) for a provider, or None. A stored key takes precedence over the environment."""
+    def _provider_credentials(self, name: str) -> tuple[dict, str] | None:
+        """({api_key, api_secret?}, where it comes from) for a provider, or None. A stored key takes precedence over the environment."""
         from ..security.vault import CredentialVault
 
         with self.db.session() as session:
             row = session.get(AppSetting, f"provider:{name}")
             if row is not None:
-                return CredentialVault(self.settings.credential_key).decrypt(row.value["ciphertext"])["api_key"], "stored"
+                return CredentialVault(self.settings.credential_key).decrypt(row.value["ciphertext"]), "stored"
         env_key = getattr(self.settings, f"{name}_api_key", "")
-        return (env_key, "environment") if env_key else None
+        if not env_key:
+            return None
+        return {"api_key": env_key, "api_secret": getattr(self.settings, f"{name}_api_secret", "")}, "environment"
+
+    def _provider_key(self, name: str) -> tuple[str, str] | None:
+        found = self._provider_credentials(name)
+        return (found[0]["api_key"], found[1]) if found else None
+
+    def provider_usage(self, name: str) -> dict:
+        """Requests and distinct symbols sent to a provider today and this month (kept so free-plan quotas are visible)."""
+        now = self.clock()
+        with self.db.session() as session:
+            row = session.get(AppSetting, f"provider_usage:{name}")
+            usage = dict(row.value) if row else {}
+        day, month = now.date().isoformat(), now.strftime("%Y-%m")
+        return {"requests_today": usage.get("requests", 0) if usage.get("day") == day else 0,
+                "requests_this_month": usage.get("month_requests", 0) if usage.get("month") == month else 0,
+                "symbols_this_month": len(usage.get("symbols", [])) if usage.get("month") == month else 0}
+
+    def _record_usage(self, name: str, requests: int, instrument_ids: list[str]) -> None:
+        now = self.clock()
+        day, month = now.date().isoformat(), now.strftime("%Y-%m")
+
+        def write(session: Session) -> None:
+            row = session.get(AppSetting, f"provider_usage:{name}")
+            usage = dict(row.value) if row else {}
+            if usage.get("month") != month:
+                usage.update(month=month, month_requests=0, symbols=[])
+            if usage.get("day") != day:
+                usage.update(day=day, requests=0)
+            usage["requests"] += requests
+            usage["month_requests"] += requests
+            usage["symbols"] = sorted(set(usage["symbols"]) | set(instrument_ids))
+            if row is None:
+                session.add(AppSetting(key=f"provider_usage:{name}", value=usage))
+            else:
+                row.value = usage
+
+        self.journal._write(write)
 
     def provider_status(self) -> list[dict]:
         from ..market_data.providers import PROVIDER_CLASSES
@@ -447,6 +485,7 @@ class TradingRuntime:
             cls = PROVIDER_CLASSES[name]
             info = {"name": name, "label": cls.label, "markets": sorted(cls.markets), "listing_markets": sorted(cls.listing_markets),
                     "pricing": cls.pricing, "signup_url": cls.signup_url, "seconds_per_request": cls.min_interval,
+                    "needs_secret": cls.needs_secret, "symbols_per_request": cls.bulk_size, "usage": self.provider_usage(name),
                     "configured": False, "key_hint": None, "source": None}
             try:
                 found = self._provider_key(name)
@@ -457,7 +496,7 @@ class TradingRuntime:
             out.append(info)
         return out
 
-    def set_provider_key(self, name: str, api_key: str | None, actor: str) -> None:
+    def set_provider_key(self, name: str, api_key: str | None, actor: str, api_secret: str = "") -> None:
         """Store (encrypted) or remove a data-provider API key."""
         from ..security.vault import CredentialVault, VaultError
 
@@ -471,7 +510,7 @@ class TradingRuntime:
                 audit.record(session, actor, "provider.key_removed", provider=name)
                 return
             try:
-                value = {"ciphertext": CredentialVault(self.settings.credential_key).encrypt({"api_key": api_key})}
+                value = {"ciphertext": CredentialVault(self.settings.credential_key).encrypt({"api_key": api_key, "api_secret": api_secret})}
             except VaultError as exc:
                 raise RuntimeError_(str(exc)) from None
             if row is None:
@@ -487,14 +526,21 @@ class TradingRuntime:
         if name not in self.PROVIDERS:
             raise RuntimeError_(f"Unknown data provider {name}")
         try:
-            found = self._provider_key(name)
+            found = self._provider_credentials(name)
         except VaultError as exc:
             raise RuntimeError_(str(exc)) from None
         if found is None:
             raise RuntimeError_(f"No API key is configured for {PROVIDER_CLASSES[name].label}. Add it under Markets → Data providers.")
+        creds = found[0]
         if self.provider_factory is not None:
-            return self.provider_factory(name, found[0])
-        return PROVIDER_CLASSES[name](found[0], base_url=getattr(self.settings, f"{name}_base_url"))
+            return self.provider_factory(name, creds["api_key"])
+        cls = PROVIDER_CLASSES[name]
+        try:
+            if cls.needs_secret:
+                return cls(creds["api_key"], creds.get("api_secret", ""), base_url=getattr(self.settings, f"{name}_base_url"))
+            return cls(creds["api_key"], base_url=getattr(self.settings, f"{name}_base_url"))
+        except Exception as exc:
+            raise RuntimeError_(str(exc)) from None
 
     def test_provider(self, name: str) -> dict:
         """One real request for a well-known symbol, so the user can confirm key, plan and data format."""
@@ -535,7 +581,9 @@ class TradingRuntime:
                 out[key] += len(result[key])
         return out
 
-    def _store_download(self, inst: Instrument, dataset: Dataset) -> int:
+    def _store_download(self, inst: Instrument, dataset: Dataset, mode: str = "full") -> int:
+        from ..market_data.providers import NeedsFullHistory
+
         clean, _ = validate_bars(dataset.bars, "1d", get_calendar(inst.calendar))
         if clean.empty:
             raise ValueError("no valid bars")
@@ -545,15 +593,33 @@ class TradingRuntime:
             existing = {c["timeframe"]: c for c in self.store.coverage_for(session, inst.id)}.get("1d")
             if existing is not None and existing["kind"] == DataKind.SIMULATED.value:
                 raise ValueError("holds simulated data; remove it first")
+            if mode == "update" and existing is not None:
+                stored = self.store.load(session, inst.id, "1d", start=clean.index[0])
+                overlap = clean.index.intersection(stored.bars.index) if stored is not None else []
+                if len(overlap) == 0:
+                    raise NeedsFullHistory()  # a gap between stored and new bars
+                drift = (clean.loc[overlap, "close"] / stored.bars.loc[overlap, "close"] - 1).abs().max()
+                if drift > 1e-4:
+                    raise NeedsFullHistory()  # the vendor re-adjusted past prices (split or dividend)
+                fresh = clean[clean.index > stored.bars.index[-1]]
+                if fresh.empty:
+                    return 0
+                return self.store.save(session, inst.id, "1d", Dataset(fresh, DataKind.HISTORICAL, dataset.source))
             # Adjusted histories are replaced as a whole: mixing an old and a new adjustment basis would create jumps.
             self.store.delete_series(session, inst.id, "1d")
             return self.store.save(session, inst.id, "1d", Dataset(clean, DataKind.HISTORICAL, dataset.source))
 
     def start_download(self, name: str, actor: str, instrument_ids: list[str] | None = None, market: str | None = None,
-                       only_missing: bool = True, years: int = 10) -> dict:
+                       only_missing: bool = True, years: int = 10, mode: str = "full") -> dict:
+        """mode "full": download whole histories (only for instruments without data when only_missing).
+        mode "update": bring instruments that already have data up to date, appending recent bars."""
+        from datetime import date
+
         from ..instruments.registry import market_of
         from ..market_data.providers import DownloadJob
 
+        if mode not in ("full", "update"):
+            raise RuntimeError_("mode must be 'full' or 'update'")
         with self.lock:
             if self.download is not None and self.download.snapshot()["status"] in ("pending", "running"):
                 raise RuntimeError_("A download is already running")
@@ -568,17 +634,37 @@ class TradingRuntime:
             selected = [i for i in selected if market_of(i) in provider.markets]
             if not selected:
                 raise RuntimeError_(f"{provider.label} does not cover the selected instruments (it covers: {', '.join(sorted(provider.markets))})")
-            if only_missing:
-                with self.db.session() as session:
-                    have = {c["instrument_id"] for c in self.store.coverage(session) if c["timeframe"] == "1d" and c["kind"] != "simulated"}
-                selected = [i for i in selected if i.id not in have]
-            if not selected:
-                raise RuntimeError_("Nothing to download: every selected instrument already has daily data")
-            self.download = DownloadJob(provider, sorted(selected, key=lambda i: i.id), self._store_download, years=years, **self.download_options)
             with self.db.session() as session:
-                audit.record(session, actor, "market.download_started", provider=name, instruments=len(selected), years=years, market=market)
-            threading.Thread(target=self.download.run, name="price-download", daemon=True).start()
-            return self.download.snapshot()
+                have = {c["instrument_id"]: c for c in self.store.coverage(session) if c["timeframe"] == "1d" and c["kind"] != "simulated"}
+            last_dates: dict[str, date] = {}
+            if mode == "update":
+                selected = [i for i in selected if i.id in have]
+                last_dates = {i.id: pd.Timestamp(have[i.id]["last"]).date() for i in selected}
+                if not selected:
+                    raise RuntimeError_("Nothing to update: none of the selected instruments has stored daily data yet")
+            elif only_missing:
+                selected = [i for i in selected if i.id not in have]
+                if not selected:
+                    raise RuntimeError_("Nothing to download: every selected instrument already has daily data")
+            job = DownloadJob(provider, sorted(selected, key=lambda i: i.id), self._store_download, years=years, mode=mode, last_dates=last_dates,
+                              **self.download_options)
+            self.download = job
+            with self.db.session() as session:
+                audit.record(session, actor, "market.download_started", provider=name, instruments=len(selected), years=years, market=market, mode=mode)
+
+            job.completed = threading.Event()  # set once the job AND its bookkeeping are done
+
+            def run() -> None:
+                try:
+                    job.run()
+                finally:
+                    try:
+                        self._record_usage(name, job.requests, [i.id for i in job.instruments[: job.snapshot()["done"]]])
+                    finally:
+                        job.completed.set()
+
+            threading.Thread(target=run, name="price-download", daemon=True).start()
+            return job.snapshot()
 
     # ------------------------------------------------------------------ deployments
     def _exec_tf(self, instrument_id: str) -> str | None:

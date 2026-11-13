@@ -44,6 +44,19 @@ class PriceProvider(ABC):
     pricing: str = ""  # shown to the user: what it costs and its limits
     signup_url: str = ""
     min_interval: float = 0.1  # seconds between requests that keeps within the plan's rate limit
+    needs_secret: bool = False  # the vendor issues a key id plus a secret
+    bulk_size: int = 1  # instruments that one request can cover
+
+    def daily_bars_bulk(self, instruments: list[Instrument], start: date | None = None, end: date | None = None) -> dict[str, Dataset]:
+        """History for several instruments at once, keyed by instrument id. Instruments the vendor has
+        no data for are simply absent from the result. Default: one request per instrument."""
+        out = {}
+        for inst in instruments:
+            try:
+                out[inst.id] = self.daily_bars(inst, start, end)
+            except SymbolNotFound:
+                continue
+        return out
 
     @abstractmethod
     def daily_bars(self, instrument: Instrument, start: date | None = None, end: date | None = None) -> Dataset: ...
@@ -357,30 +370,138 @@ class AlphaVantageProvider(PriceProvider):
         return out
 
 
+class AlpacaProvider(PriceProvider):
+    """Alpaca market data (free account): daily bars for US stocks and ETFs, many symbols per request,
+    adjusted for splits and dividends. The free plan serves full-market data older than 15 minutes,
+    so requests stop at yesterday.
+
+    VERIFICATION STATUS: written from the vendor's documentation; not yet exercised with real keys.
+    """
+
+    name = "alpaca"
+    label = "Alpaca"
+    markets = frozenset({"US"})
+    pricing = "Free account (paper trading is enough): about 200 requests a minute, history from 2016. US stocks and ETFs only."
+    signup_url = "https://alpaca.markets"
+    min_interval = 0.35
+    needs_secret = True
+    bulk_size = 50
+    BASE = "https://data.alpaca.markets"
+
+    def __init__(self, api_key: str, api_secret: str = "", http_get: Callable | None = None, timeout: float = 60.0, base_url: str | None = None) -> None:
+        if not api_key or not api_secret:
+            raise ProviderAuthError("Alpaca needs both the API key id and the secret key")
+        self._key, self._secret = api_key, api_secret
+        self.BASE = (base_url or self.BASE).rstrip("/")
+        if http_get is None:
+            import httpx
+
+            http_get = httpx.get
+        self._get, self._timeout = http_get, timeout
+
+    def list_symbols(self, market: str) -> list[dict]:
+        raise ProviderError("Alpaca is used here for prices only; build the US list from the Global Markets catalog")
+
+    def daily_bars(self, instrument: Instrument, start: date | None = None, end: date | None = None) -> Dataset:
+        out = self.daily_bars_bulk([instrument], start, end)
+        if instrument.id not in out:
+            raise SymbolNotFound("Alpaca has no data for this symbol")
+        return out[instrument.id]
+
+    def daily_bars_bulk(self, instruments: list[Instrument], start: date | None = None, end: date | None = None) -> dict[str, Dataset]:
+        if len(instruments) > self.bulk_size:
+            raise ValueError(f"At most {self.bulk_size} instruments per request")
+        by_symbol = {i.symbol: i for i in instruments if market_of(i) == "US"}
+        if not by_symbol:
+            return {}
+        yesterday = datetime.now(timezone.utc).date() - pd.Timedelta(days=1).to_pytimedelta()
+        params = {"symbols": ",".join(by_symbol), "timeframe": "1Day", "adjustment": "all", "feed": "sip", "sort": "asc", "limit": 10000,
+                  "start": (start or date(2016, 1, 1)).isoformat(), "end": min(end or yesterday, yesterday).isoformat()}
+        collected: dict[str, list] = {}
+        for _ in range(500):  # pages; bounded so a faulty token cannot loop forever
+            try:
+                response = self._get(f"{self.BASE}/v2/stocks/bars", params=params, timeout=self._timeout,
+                                     headers={"APCA-API-KEY-ID": self._key, "APCA-API-SECRET-KEY": self._secret})
+            except Exception as exc:
+                raise ProviderError(f"Alpaca could not be reached ({type(exc).__name__})") from None
+            code = response.status_code
+            if code in (401, 403):
+                raise ProviderAuthError("Alpaca rejected the keys, or the plan does not include this data")
+            if code == 429:
+                raise ProviderRateLimited("Alpaca: too many requests")
+            if code != 200:
+                raise ProviderError(f"Alpaca answered with HTTP {code}")
+            try:
+                body = response.json()
+            except Exception:
+                raise ProviderError("Alpaca returned a response that is not JSON") from None
+            if not isinstance(body, dict) or not isinstance(body.get("bars"), dict):
+                raise ProviderError("Alpaca returned an unexpected response")
+            for symbol, bars in body["bars"].items():
+                collected.setdefault(symbol, []).extend(bars or [])
+            token = body.get("next_page_token")
+            if not token:
+                break
+            params = {**params, "page_token": token}
+            time.sleep(0)  # pacing between pages is left to the caller's rate budget
+        out: dict[str, Dataset] = {}
+        for symbol, bars in collected.items():
+            inst = by_symbol.get(symbol)
+            if inst is None:
+                continue
+            records = []
+            for b in bars:
+                try:
+                    o, h, l, c = float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])
+                    if min(o, h, l, c) <= 0:
+                        continue
+                    # Daily bars are stamped at midnight New York time; the trading date is the New York date.
+                    day = pd.Timestamp(b["t"]).tz_convert("America/New_York").date()
+                    records.append((pd.Timestamp(day, tz="UTC"), o, h, l, c, float(b.get("v") or 0)))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if records:
+                frame = pd.DataFrame(records, columns=["ts", *OHLCV]).set_index("ts").sort_index()
+                out[inst.id] = Dataset(frame[~frame.index.duplicated(keep="last")], DataKind.HISTORICAL, "alpaca")
+        return out
+
+
 class _PremiumOnly(ProviderError):
     pass
 
 
-PROVIDER_CLASSES: dict[str, type[PriceProvider]] = {"tiingo": TiingoProvider, "alphavantage": AlphaVantageProvider, "eodhd": EodhdProvider}
+PROVIDER_CLASSES: dict[str, type[PriceProvider]] = {"alpaca": AlpacaProvider, "tiingo": TiingoProvider, "alphavantage": AlphaVantageProvider,
+                                                    "eodhd": EodhdProvider}
+
+
+class NeedsFullHistory(Exception):
+    """Raised by the storage step when an incremental update cannot be appended safely."""
 
 
 class DownloadJob:
-    """Background download of daily history for many instruments, one request at a time.
+    """Background download of daily history for many instruments.
 
+    Instruments are requested in batches when the provider supports it, otherwise one at a time.
     Each instrument is stored in its own transaction; a failure is recorded and the job moves on.
-    An authentication failure stops the job (every further request would fail the same way).
+    An authentication failure stops the job, and so does an exhausted allowance (resumable later).
+
+    mode "full" replaces each history. mode "update" fetches only recent bars and appends them; when
+    the overlap with the stored history shows that the vendor re-adjusted past prices (after a split
+    or dividend), that instrument's whole history is downloaded again instead.
     """
 
-    def __init__(self, provider: PriceProvider, instruments: list[Instrument], store_one: Callable[[Instrument, Dataset], int],
+    def __init__(self, provider: PriceProvider, instruments: list[Instrument], store_one: Callable[..., int],
                  years: int = 10, min_interval: float | None = None, sleep: Callable[[float], None] = time.sleep,
-                 today: Callable[[], date] = lambda: datetime.now(timezone.utc).date()) -> None:
+                 today: Callable[[], date] = lambda: datetime.now(timezone.utc).date(), mode: str = "full",
+                 last_dates: dict[str, date] | None = None) -> None:
         self.provider, self.instruments, self._store_one = provider, instruments, store_one
-        self.years, self._sleep, self._today = years, sleep, today
+        self.years, self._sleep, self._today, self.mode, self.last_dates = years, sleep, today, mode, last_dates or {}
         self.min_interval = provider.min_interval if min_interval is None else min_interval
         self._cancel = threading.Event()
         self._lock = threading.Lock()
-        self.state = {"status": "pending", "provider": provider.name, "total": len(instruments), "done": 0, "stored": 0, "bars": 0,
-                      "failed": [], "failed_count": 0, "current": None, "started_at": None, "finished_at": None, "message": ""}
+        self.requests = 0
+        self.state = {"status": "pending", "provider": provider.name, "mode": mode, "total": len(instruments), "done": 0, "stored": 0, "bars": 0,
+                      "readjusted": 0, "failed": [], "failed_count": 0, "current": None, "started_at": None, "finished_at": None, "message": ""}
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -393,24 +514,52 @@ class DownloadJob:
         with self._lock:
             self.state.update(kw)
 
+    def _fail(self, inst: Instrument, reason: str) -> None:
+        with self._lock:
+            self.state["failed_count"] += 1
+            if len(self.state["failed"]) < 300:
+                self.state["failed"].append({"instrument_id": inst.id, "reason": reason})
+
+    def _fetch(self, chunk: list[Instrument], start: date | None, end: date) -> dict[str, Dataset]:
+        self.requests += 1
+        if self.provider.bulk_size > 1:
+            return self.provider.daily_bars_bulk(chunk, start, end)
+        return {chunk[0].id: self.provider.daily_bars(chunk[0], start, end)}
+
+    def _store(self, inst: Instrument, dataset: Dataset, full_start: date | None, end: date) -> None:
+        try:
+            bars = self._store_one(inst, dataset, self.mode)
+        except NeedsFullHistory:
+            # The vendor changed past prices: replace the whole series rather than append to a different adjustment basis.
+            self.requests += 1
+            bars = self._store_one(inst, self.provider.daily_bars(inst, full_start, end), "full")
+            with self._lock:
+                self.state["readjusted"] += 1
+        with self._lock:
+            self.state["stored"] += 1
+            self.state["bars"] += bars
+
     def run(self) -> None:
         self._update(status="running", started_at=datetime.now(timezone.utc).isoformat())
         end = self._today()
-        start = end.replace(year=end.year - self.years) if self.years else None
+        full_start = end.replace(year=end.year - self.years) if self.years else None
+        size = max(1, self.provider.bulk_size)
+        chunks = [self.instruments[i:i + size] for i in range(0, len(self.instruments), size)]
         outcome, message = "finished", ""
-        for index, inst in enumerate(self.instruments):
+        for index, chunk in enumerate(chunks):
             if self._cancel.is_set():
                 outcome, message = "cancelled", "Cancelled by the user"
                 break
-            self._update(current=inst.id)
-            error = None
-            limited = False
+            self._update(current=chunk[0].id if len(chunk) == 1 else f"{chunk[0].id} … {chunk[-1].id}")
+            start = full_start
+            if self.mode == "update":
+                known = [self.last_dates[i.id] for i in chunk if i.id in self.last_dates]
+                if known:
+                    start = min(known) - pd.Timedelta(days=7).to_pytimedelta()
+            datasets, error, limited = None, None, False
             for attempt in range(3):
                 try:
-                    bars = self._store_one(inst, self.provider.daily_bars(inst, start, end))
-                    with self._lock:
-                        self.state["stored"] += 1
-                        self.state["bars"] += bars
+                    datasets = self._fetch(chunk, start, end)
                     error, limited = None, False
                     break
                 except ProviderRateLimited as exc:
@@ -423,20 +572,25 @@ class DownloadJob:
                 except (ProviderError, ValueError) as exc:
                     error = str(exc)
                     break
-                except Exception as exc:  # database or unexpected error: record it, keep the job alive
-                    error = f"{type(exc).__name__}: {str(exc)[:200]}"
-                    break
-            with self._lock:
-                self.state["done"] += 0 if limited else 1
-                if error and not limited:
-                    self.state["failed_count"] += 1
-                    if len(self.state["failed"]) < 300:
-                        self.state["failed"].append({"instrument_id": inst.id, "reason": error})
-            if outcome == "failed":
-                break
             if limited:  # the allowance is exhausted: stop here; "download missing" resumes from this point later
                 outcome, message = "stopped", f"{error}. Start 'Download missing' again later: it resumes where this stopped."
                 break
-            if index < len(self.instruments) - 1:
+            for inst in chunk:
+                if datasets is None:
+                    self._fail(inst, error or "request failed")
+                elif inst.id not in datasets:
+                    self._fail(inst, f"{self.provider.label} has no data for this symbol")
+                else:
+                    try:
+                        self._store(inst, datasets[inst.id], full_start, end)
+                    except (ProviderError, ValueError) as exc:
+                        self._fail(inst, str(exc))
+                    except Exception as exc:  # database or unexpected error: record it, keep the job alive
+                        self._fail(inst, f"{type(exc).__name__}: {str(exc)[:200]}")
+                with self._lock:
+                    self.state["done"] += 1
+            if outcome == "failed":
+                break
+            if index < len(chunks) - 1:
                 self._sleep(self.min_interval)
         self._update(status=outcome, message=message, current=None, finished_at=datetime.now(timezone.utc).isoformat())

@@ -278,11 +278,12 @@ class FakeDiscovery:
 
 
 def wait(client, admin):
-    for _ in range(200):
-        st = client.get("/api/global/sync", headers=admin).json()
-        if st["status"] not in ("pending", "running"):
-            return st
-        time.sleep(0.05)
+    """See the note in test_providers.wait: the job object is polled directly, not through the API."""
+    gm = client.app.state.container.runtime.global_markets
+    for _ in range(600):
+        if gm.job is not None and gm.job.snapshot()["status"] not in ("pending", "running"):
+            return client.get("/api/global/sync", headers=admin).json()
+        time.sleep(0.02)
     raise AssertionError("sync did not finish")
 
 
@@ -330,11 +331,11 @@ def test_catalog_sync_search_profile_and_activation_over_http(api):
 
     ids = {i["ticker"]: i["id"] for i in client.get("/api/global/securities", headers=admin, params={"limit": 50}).json()["items"]}
     out = client.post("/api/global/securities/activate", headers=admin, json={"ids": [ids["ENI"], ids["NVDA"], ids["7203"], ids["WAR"], ids["AAPL"], 99999]}).json()
-    assert sorted(out["activated"]) == sorted([ids["ENI"], ids["NVDA"]]) and out["already_active"] == [ids["AAPL"]]
+    assert sorted(out["activated"]) == sorted([ids["ENI"], ids["NVDA"], ids["7203"]]) and out["already_active"] == [ids["AAPL"]]
     reasons = {u["id"]: u["reason"] for u in out["unsupported"]}
-    assert "not supported yet for Tokyo" in reasons[ids["7203"]] and "cannot be traded" in reasons[ids["WAR"]] and reasons[99999] == "unknown security"
+    assert "cannot be traded" in reasons[ids["WAR"]] and reasons[99999] == "unknown security"
     listed = {i["id"] for i in client.get("/api/instruments", headers=admin, params={"q": "STOCK:"}).json()}
-    assert {"STOCK:ENI.MI", "STOCK:NVDA"} <= listed
+    assert {"STOCK:ENI.MI", "STOCK:NVDA", "STOCK:7203.T"} <= listed  # every registered exchange can feed the trading universe
     assert client.get("/api/global/securities", headers=admin, params={"q": "ENI"}).json()["items"][0]["instrument_id"] == "STOCK:ENI.MI"
     provs = {p["name"]: p for p in client.get("/api/global/providers", headers=admin).json()}
     assert provs["finnhub"]["configured"] and provs["finnhub"]["key_hint"] == "…1234" and not provs["eodhd"]["configured"] and provs["openfigi"]["configured"]

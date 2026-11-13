@@ -19,7 +19,7 @@ through one engine, with backtesting, paper trading, a central risk engine and a
 | Brokers | Adapter framework with capability detection; CCXT (Binance, Bybit, …) and Interactive Brokers adapters; simulated venue |
 | Quant AI | Market-regime detection, 5 model types with purged out-of-sample validation and calibration, drift checks, analyst reports, gated parameter proposals |
 | Stock universe | Stocks and ETFs for the US and six European markets. Prices come from official data APIs with your own key (Tiingo and Alpha Vantage are free and US-only; EODHD is paid and covers US and Europe) or from price files imported in bulk. One strategy can be scanned across every instrument |
-| Global Markets | Catalog of listed securities discovered from providers, exchange by exchange (43 exchanges registered): stable internal id, ISIN and FIGI, instrument types kept apart, history of ticker changes and delistings, de-duplication across providers, coverage report. Phase 1 of the global module; scanner, rankings and global strategies are not built yet |
+| Global Markets | Catalog of listed securities discovered from providers, exchange by exchange (43 exchanges registered): stable internal id, ISIN and FIGI, instrument types kept apart, history of ticker changes and delistings, de-duplication across providers, coverage report, bulk price downloads and incremental updates. Phases 1 and 2 of the global module; scanner, rankings and global strategies are not built yet |
 | Dashboard | Overview, Markets, Strategies, Quant AI, Backtesting, Portfolio, Execution, Risk Center, Settings |
 | Security | Argon2 passwords, httpOnly sessions, roles, encrypted broker credentials, audit trail, rate limiting |
 
@@ -69,9 +69,10 @@ First steps in the dashboard:
 
 | Provider | Cost | Covers | Practical use |
 |---|---|---|---|
+| Alpaca | Free account, about 200 requests a minute | US prices from 2016, adjusted, 50 symbols per request | The fast way to download and update all US stocks and ETFs. |
 | Alpha Vantage | Free key, about 25 requests a day | US symbol list; US prices (unadjusted) | Import the list of all US stocks and ETFs with one request. Too limited for downloading many price series. |
-| Tiingo | Free key, about 50 requests an hour, 1,000 a day, 500 symbols a month | US prices, adjusted for splits and dividends | Download US history: roughly 500 stocks a month, at one request every 75 seconds. |
-| EODHD | Paid plan for real coverage | US and European symbol lists and adjusted prices | The only one here that covers Italy, Germany, France, Netherlands, Spain and Switzerland. |
+| Tiingo | Free key, about 50 requests an hour, 1,000 a day, 500 symbols a month | US prices, adjusted for splits and dividends | Slower alternative to Alpaca for US history. |
+| EODHD | Paid plan for real coverage | Symbol lists and adjusted prices for the US and the other registered exchanges | The only one here with prices outside the United States. |
 
 No free official API offers European stocks at scale; without a paid plan, European prices have to be
 imported from files. Websites such as TradingView, Yahoo Finance and Stooq are not connected: they have no
@@ -91,7 +92,7 @@ QAT_ADMIN_EMAIL=you@example.com QAT_ADMIN_PASSWORD='a-long-password' uvicorn app
 ```
 
 ```bash
-cd backend && pytest          # 236 tests, 4-5 minutes; never contacts a real broker
+cd backend && pytest          #  tests, 4-5 minutes; never contacts a real broker
 ```
 
 ```bash

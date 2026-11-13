@@ -38,7 +38,7 @@ function Coverage({ user, onExchange }: { user: User; onExchange: (code: string)
         <Stat label="Delisted" value={num(t.delisted, 0)} hint="seen since first sync" />
         <Stat label="Common stocks" value={num(t.equities_active, 0)} hint="active, equities only" />
         <Stat label="With ISIN / FIGI" value={`${num(t.with_isin, 0)} / ${num(t.with_figi, 0)}`} />
-        <Stat label="With price history" value={num(t.with_historical_prices, 0)} hint={`${num(t.missing_prices, 0)} without`} />
+        <Stat label="With price history" value={num(t.with_historical_prices, 0)} hint={`${num(t.missing_prices, 0)} without · ${num(t.stale_price_series, 0)} stale`} />
         <Stat label="Real-time / delayed" value={`${t.with_realtime_data} / ${t.with_delayed_data}`} hint="no live feed connected" />
       </div>
       {canWrite && (
@@ -75,16 +75,16 @@ function Coverage({ user, onExchange }: { user: User; onExchange: (code: string)
       )}
       <Panel title="Exchange directory and coverage" right={
         <select aria-label="Region" value={region} onChange={(e) => setRegion(e.target.value)} className="!w-auto">{regions.map((r) => <option key={r}>{r}</option>)}</select>}>
-        <Table max="max-h-[34rem]" head={["", "Exchange", "Country", "Ccy", "Discovered", "Active", "Stocks", "ETFs", "Delisted", "ISIN", "FIGI", "Prices", "Providers (last result)"]}
+        <Table max="max-h-[34rem]" head={["", "Exchange", "Country", "Ccy", "Discovered", "Active", "Stocks", "ETFs", "Delisted", "ISIN", "FIGI", "Price series · price providers", "Listing providers (last result)"]}
           rows={rows.map((e: Json) => [
             canWrite && p?.exchanges.includes(e.code) ? <input key="c" aria-label={`Select ${e.name}`} type="checkbox" className="!w-auto" checked={picked.includes(e.code)} onChange={() => toggle(e.code)} /> : "",
             <button key="n" className="text-left hover:underline" title={e.note} onClick={() => onExchange(e.code)}>{e.name}</button>, e.country, e.currency,
             num(e.discovered, 0), num(e.active, 0), num(e.by_type.common_stock ?? 0, 0), num(e.by_type.etf ?? 0, 0), num(e.delisted, 0), num(e.with_isin, 0), num(e.with_figi, 0),
-            e.prices_supported ? `${num(e.with_historical_prices, 0)}` : <span key="p" className="text-dim" title="Price download and backtesting are not available for this exchange yet">n/a</span>,
+            <span key="p" title={e.price_providers.length ? `Price history available from: ${e.price_providers.join(", ")}` : "No connected provider has prices for this exchange"}>{num(e.with_historical_prices, 0)}{e.stale_price_series ? <span className="text-warn"> ({e.stale_price_series} stale)</span> : ""} <span className="text-dim">· {e.price_providers.join(", ") || "no provider"}</span></span>,
             <span key="pr" className="flex flex-wrap gap-1">{Object.entries(e.providers as Record<string, Json>).map(([name, st]) => (
               <span key={name} title={st.message || (st.last_sync ? `last sync ${when(st.last_sync)}, ${st.received} received` : "")}>
                 <Badge kind={st.status === "ok" ? "up" : st.status === "failed" ? "down" : "dim"}>{name}: {st.status === "never synchronised" ? "not synced" : st.status}</Badge></span>))}</span>])} />
-        <p className="mt-2 text-xs text-dim">A provider badge shows what its last synchronisation of that exchange actually returned; grey means it was never tried. "Prices n/a" marks exchanges whose price download and backtests are not built yet.</p>
+        <p className="mt-2 text-xs text-dim">A listing-provider badge shows what its last synchronisation of that exchange actually returned; grey means it was never tried. The price column counts catalog securities with a stored daily history and names the providers that can supply prices for that exchange; outside the United States only the paid provider can.</p>
       </Panel>
     </div>
   );
