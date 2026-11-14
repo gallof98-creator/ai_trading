@@ -489,6 +489,16 @@ class TradingRuntime:
             row = session.get(AppSetting, f"provider:{name}")
             if row is not None:
                 return CredentialVault(self.settings.credential_key).decrypt(row.value["ciphertext"]), "stored"
+            if name == "alpaca":  # one key for everything: the credentials of a linked Alpaca account also serve market data
+                from ..security.credentials import load_credentials
+
+                for account in session.scalars(select(BrokerAccount).where(BrokerAccount.adapter == "alpaca").order_by(BrokerAccount.is_live)):
+                    try:
+                        creds = load_credentials(session, CredentialVault(self.settings.credential_key), account.id)
+                    except LookupError:
+                        continue
+                    if creds.get("api_key") and creds.get("api_secret"):
+                        return {"api_key": creds["api_key"], "api_secret": creds["api_secret"]}, f"broker account {account.id}"
         env_key = getattr(self.settings, f"{name}_api_key", "")
         if not env_key:
             return None
@@ -536,6 +546,8 @@ class TradingRuntime:
 
         out = []
         for name in self.PROVIDERS:
+            if not self.settings.provider_enabled(name):
+                continue
             cls = PROVIDER_CLASSES[name]
             info = {"name": name, "label": cls.label, "markets": sorted(cls.markets), "listing_markets": sorted(cls.listing_markets),
                     "pricing": cls.pricing, "signup_url": cls.signup_url, "seconds_per_request": cls.min_interval,
@@ -579,6 +591,8 @@ class TradingRuntime:
 
         if name not in self.PROVIDERS:
             raise RuntimeError_(f"Unknown data provider {name}")
+        if not self.settings.provider_enabled(name):
+            raise RuntimeError_(f"The {name} data source is switched off on this installation. Alpaca is the active source (QAT_ENABLED_PROVIDERS).")
         try:
             found = self._provider_credentials(name)
         except VaultError as exc:
@@ -932,7 +946,7 @@ class TradingRuntime:
             pairs = [(AlpacaLive(self.live_hub, "crypto", key, secret), crypto)]
             if key:
                 pairs.append((AlpacaLive(self.live_hub, "stocks", key, secret), us_equity))
-            finnhub = self._provider_key("finnhub")
+            finnhub = self._provider_key("finnhub") if self.settings.provider_enabled("finnhub") else None
             if finnhub and not key:
                 pairs.append((FinnhubLive(self.live_hub, finnhub[0]), us_equity))
         wanted = list(self.live.subscribed)

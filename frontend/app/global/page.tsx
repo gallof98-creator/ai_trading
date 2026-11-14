@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Shell } from "@/components/Shell";
 import { Badge, Button, Field, type Json, Meter, Msg, Notice, num, Panel, post, Stat, Table, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
@@ -12,7 +12,7 @@ function Coverage({ user, onExchange }: { user: User; onExchange: (code: string)
   const cov = useApi("/api/global/coverage", 15_000);
   const providers = useApi("/api/global/providers");
   const job = useApi("/api/global/sync", 2_000);
-  const [provider, setProvider] = useState("alphavantage");
+  const [provider, setProvider] = useState("alpaca");
   const [picked, setPicked] = useState<string[]>([]);
   const [region, setRegion] = useState("All");
   const [key, setKey] = useState("");
@@ -20,6 +20,11 @@ function Coverage({ user, onExchange }: { user: User; onExchange: (code: string)
   const act = useAction();
   const canWrite = user.role !== "viewer";
   const p = (providers.data ?? []).find((x: Json) => x.name === provider);
+  // Only the sources switched on for this installation are offered (Alpaca alone by default).
+  useEffect(() => {
+    const names = (providers.data ?? []).filter((x: Json) => x.name !== "openfigi").map((x: Json) => x.name);
+    if (names.length && !names.includes(provider)) setProvider(names[0]);
+  }, [providers.data, provider]);
   const figi = (providers.data ?? []).find((x: Json) => x.name === "openfigi");
   const running = job.data && ["pending", "running"].includes(job.data.status);
   if (!cov.data) return <p className="text-sm text-dim">{cov.error ?? "Loading…"}</p>;
@@ -52,8 +57,10 @@ function Coverage({ user, onExchange }: { user: User; onExchange: (code: string)
               <Button kind="ghost" disabled={act.busy || running || !p?.configured} onClick={() => window.confirm(`Synchronise all ${p?.exchanges.length} exchanges ${p?.label} can list?`) && start(null)}>Synchronise all {p?.exchanges.length ?? 0}</Button>
               {running && <Button kind="ghost" onClick={() => post("/api/global/sync/cancel").then(job.reload)}>Cancel</Button>}
             </div>
-            <p className="text-xs text-dim">{p ? `${p.label}: ${p.verified} ` : ""}{p?.configured ? "Tick exchanges in the table below, or synchronise all. Identifiers (FIGI) are then added through OpenFIGI, a few thousand per run." : ""}</p>
-            {user.role === "admin" && (
+            <p className="text-xs text-dim">{p ? `${p.label}: ${p.verified} ` : ""}{p?.configured ? "Tick exchanges in the table below, or synchronise all. " : ""}{p?.configured && figi ? " Identifiers (FIGI) are then added through OpenFIGI, a few thousand per run." : ""}</p>
+            {provider === "alpaca" && !p?.configured && <p className="text-xs text-warn">Alpaca needs its API key and secret: add them under Markets → Data providers, or connect an Alpaca account under Settings (the same key is then used for listings, prices and trading).</p>}
+            {provider === "alpaca" && <p className="text-xs text-dim">Alpaca lists the US stocks and ETFs it can trade. It publishes no instrument type, ISIN or FIGI, so the type is inferred from the name.</p>}
+            {user.role === "admin" && provider !== "alpaca" && (
               <div className="flex flex-wrap items-end gap-3">
                 <Field label={`${p?.label ?? ""} API key${p?.configured ? ` (stored ${p.key_hint})` : ""}`}><input type="password" autoComplete="new-password" value={key} onChange={(e) => setKey(e.target.value)} /></Field>
                 <Button kind="ghost" disabled={act.busy || key.trim().length < 4} onClick={() => act.run(() => post(`/api/market/providers/${provider}/key`, { api_key: key }, "PUT"), "Key stored (encrypted).").then((ok) => { if (ok) { setKey(""); providers.reload(); } })}>Save key</Button>

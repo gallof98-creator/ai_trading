@@ -27,6 +27,21 @@ Automatic mode cannot be selected until the box "I have reviewed the daily-loss,
 Pause and Emergency Stop both engage the kill switch: no new risk can be taken. Positions keep their stops; whether working orders
 are cancelled or positions closed follows the emergency policy in Settings (default: nothing is liquidated).
 
+## One data source: Alpaca
+
+A default installation uses Alpaca for everything: the instrument list (`/v2/assets`), daily history, live prices and trading.
+One key and secret, entered once: the credentials of a linked Alpaca account are also used for market data.
+Charts are drawn with TradingView's open-source Lightweight Charts; TradingView is a charting component, not a data source.
+
+Consequences:
+
+- The universe is what Alpaca can trade: US stocks and ETFs on NYSE, Nasdaq, NYSE Arca, NYSE American and Cboe, plus crypto pairs.
+  No European or other markets (CSV import remains available for those).
+- Alpaca publishes no instrument type, ISIN or FIGI. The type (ETF, preferred, ADR, warrant...) is inferred from the asset's name and
+  marked as inferred; an asset whose name says nothing is treated as common stock.
+- The connectors for Tiingo, Alpha Vantage, EODHD, Finnhub and OpenFIGI stay in the code, switched off and hidden. Set
+  `QAT_ENABLED_PROVIDERS` to a list of names, or `all`, to switch them back on.
+
 ## Live market data
 
 | Source | Covers | Transport | Label |

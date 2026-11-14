@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -7,6 +9,9 @@ from app.main import create_app
 from app.security.roles import Role
 from app.security.users import create_user
 from app.security.vault import CredentialVault
+
+# The test-suite covers every data connector, including the ones a default installation keeps switched off.
+os.environ.setdefault("QAT_ENABLED_PROVIDERS", "all")
 
 ADMIN = ("admin@example.com", "correct-horse-battery")
 VIEWER = ("viewer@example.com", "viewer-password-123")

@@ -33,7 +33,7 @@ NA, EU, AS, OC, OT = "North America", "Europe", "Asia", "Oceania", "Other"
 EXCHANGES: dict[str, Exchange] = {e.code: e for e in [
     # --- North America
     _x("US", "United States (NYSE, Nasdaq, NYSE American, NYSE Arca, Cboe)", "US", "USD", NA, "XNYS", "America/New_York",
-       finnhub="US", eodhd="US", openfigi="US", alphavantage="US", market="US", note="One consolidated listing; each security carries its own venue (MIC)."),
+       finnhub="US", eodhd="US", openfigi="US", alphavantage="US", alpaca="US", market="US", note="One consolidated listing; each security carries its own venue (MIC)."),
     _x("TO", "Toronto Stock Exchange", "CA", "CAD", NA, "XTSE", "America/Toronto", finnhub="TO", eodhd="TO", openfigi="CT"),
     _x("V", "TSX Venture Exchange", "CA", "CAD", NA, "XTSX", "America/Toronto", finnhub="V", eodhd="V", openfigi="CV"),
     # --- Europe

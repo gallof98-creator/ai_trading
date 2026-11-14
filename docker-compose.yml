@@ -36,7 +36,9 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request,json,sys; sys.exit(json.load(urllib.request.urlopen('http://localhost:8000/health'))['status']!='ok')"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 30
+      # Migrations and loading a large instrument universe can take a while on the first start after an update.
+      start_period: 180s
 
   worker:
     build: ./backend

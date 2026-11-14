@@ -77,6 +77,8 @@ First steps in the dashboard:
 | EODHD | Paid plan for real coverage | Symbol lists and adjusted prices for the US and the other registered exchanges | The only one here with prices outside the United States. |
 
 No free official API offers European stocks at scale; without a paid plan, European prices have to be
+Data source: Alpaca alone by default (instrument list, history, live prices, trading; US stocks, ETFs and crypto). Other connectors are
+in the code but switched off: see `QAT_ENABLED_PROVIDERS` in `.env.example`. Prices can also be
 imported from files. Websites such as TradingView, Yahoo Finance and Stooq are not connected: they have no
 official data API and forbid or block automated access. When a plan's allowance runs out a download stops;
 "Download missing" resumes it later. Check each vendor's current limits and terms before relying on them.
@@ -94,7 +96,7 @@ QAT_ADMIN_EMAIL=you@example.com QAT_ADMIN_PASSWORD='a-long-password' uvicorn app
 ```
 
 ```bash
-cd backend && pytest          # 292 tests, about 12 minutes; never contacts a real broker
+cd backend && pytest          # 296 tests, about 12 minutes; never contacts a real broker
 ```
 
 ```bash

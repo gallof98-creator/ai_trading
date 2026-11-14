@@ -227,7 +227,66 @@ class EodhdDiscovery(DiscoveryProvider):
         return out
 
 
-DISCOVERY_CLASSES: dict[str, type[DiscoveryProvider]] = {"finnhub": FinnhubDiscovery, "alphavantage": AlphaVantageDiscovery, "eodhd": EodhdDiscovery}
+class AlpacaDiscovery(DiscoveryProvider):
+    """Alpaca's asset list: every US stock and ETF the broker can trade. One request, the same key as trading.
+
+    Alpaca does not say what kind of instrument an asset is, and gives no ISIN or FIGI. The type is therefore read
+    from the asset's name where the name states it (ETF, preferred, warrant, unit, right, depositary share) and is
+    "common_stock" otherwise; the raw type records that it was inferred.
+
+    VERIFICATION STATUS: written from Alpaca's documentation and tested against an emulated answer; not exercised with real keys.
+    """
+
+    name, label = "alpaca", "Alpaca"
+    verification = ("Not yet verified against the real service. Lists what Alpaca can trade (US stocks and ETFs). "
+                    "Alpaca publishes no instrument type, ISIN or FIGI: the type is inferred from the name.")
+    BASE = "https://paper-api.alpaca.markets"
+    _MIC = {"NYSE": "XNYS", "NASDAQ": "XNAS", "ARCA": "ARCX", "AMEX": "XASE", "BATS": "BATS"}
+    _NAME_RULES = [(r"\b(etf|etn|exchange[- ]traded)\b", "etf"), (r"\bpreferred\b|\bpfd\b", "preferred_stock"),
+                   (r"\bwarrants?\b|\bunits?\b|\brights?\b|\bnotes? due\b", "other"),
+                   (r"american depositary|\badr\b|\bads\b", "adr"), (r"depositary", "depositary_receipt")]
+
+    def __init__(self, api_key: str, api_secret: str = "", http_get: Callable | None = None, timeout: float = 90.0, base_url: str | None = None) -> None:
+        if not api_key or not api_secret:
+            raise ProviderAuthError("Alpaca needs an API key and its secret")
+        self._headers = {"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": api_secret}
+        self.BASE, self._http = (base_url or self.BASE).rstrip("/"), _Http(http_get, timeout)
+
+    @classmethod
+    def kind_from_name(cls, name: str) -> str:
+        text = (name or "").lower()
+        return next((kind for pattern, kind in cls._NAME_RULES if re.search(pattern, text)), "common_stock")
+
+    def list_securities(self, exchange: Exchange) -> list[ListingRecord]:
+        if not self.supports(exchange):
+            raise ProviderError(f"Alpaca lists US instruments only, not {exchange.name}")
+        r = self._http.get("Alpaca", f"{self.BASE}/v2/assets", params={"status": "active", "asset_class": "us_equity"}, headers=self._headers)
+        if r.status_code in (401, 403):
+            raise ProviderAuthError("Alpaca rejected the API key. Paper keys work on the paper endpoint only.")
+        if r.status_code == 429:
+            raise ProviderRateLimited("Alpaca: too many requests")
+        if r.status_code != 200:
+            raise ProviderError(f"Alpaca answered with HTTP {r.status_code}")
+        try:
+            rows = r.json()
+        except Exception:
+            raise ProviderError("Alpaca returned a response that is not JSON") from None
+        if not isinstance(rows, list):
+            raise ProviderError("Alpaca returned an unexpected response")
+        out = []
+        for row in rows:
+            symbol, venue = _clean(row.get("symbol")), _clean(row.get("exchange")) or ""
+            # Only what can actually be traded on a listed venue: no over-the-counter and no inactive assets.
+            if not symbol or not row.get("tradable") or venue not in self._MIC:
+                continue
+            name = _clean(row.get("name")) or ""
+            out.append(ListingRecord(ticker=symbol.upper(), name=name, security_type=self.kind_from_name(name), raw_type="inferred from name (Alpaca)",
+                                     currency="USD", provider_symbol=symbol, mic=self._MIC[venue]))
+        return out
+
+
+DISCOVERY_CLASSES: dict[str, type[DiscoveryProvider]] = {"alpaca": AlpacaDiscovery, "finnhub": FinnhubDiscovery, "alphavantage": AlphaVantageDiscovery,
+                                                         "eodhd": EodhdDiscovery}
 
 
 class OpenFigi:

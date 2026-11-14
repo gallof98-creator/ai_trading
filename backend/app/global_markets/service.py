@@ -191,13 +191,18 @@ class GlobalMarkets:
     # ---- providers
     def providers(self) -> list[dict]:
         out = []
+        enabled = self.runtime.settings.provider_enabled
         for name, cls in DISCOVERY_CLASSES.items():
+            if not enabled(name):
+                continue
             try:
                 found = self.runtime._provider_key(name)
             except Exception:
                 found = None
             out.append({"name": name, "label": cls.label, "configured": found is not None, "key_hint": f"…{found[0][-4:]}" if found else None,
                         "exchanges": [e.code for e in exchanges_for(name)], "verified": cls.verification})
+        if not enabled("openfigi"):
+            return out
         try:
             figi_key = self.runtime._provider_key("openfigi")
         except Exception:
@@ -209,11 +214,16 @@ class GlobalMarkets:
     def _discovery(self, name: str):
         if name not in DISCOVERY_CLASSES:
             raise ValueError(f"Unknown discovery provider {name}")
+        if not self.runtime.settings.provider_enabled(name):
+            raise ValueError(f"{DISCOVERY_CLASSES[name].label} is switched off on this installation (QAT_ENABLED_PROVIDERS)")
         found = self.runtime._provider_key(name)
         if found is None:
             raise ValueError(f"No API key is configured for {DISCOVERY_CLASSES[name].label}")
         if self.discovery_factory is not None:
             return self.discovery_factory(name, found[0])
+        if name == "alpaca":
+            creds = self.runtime._provider_credentials("alpaca")[0]
+            return DISCOVERY_CLASSES[name](creds["api_key"], creds.get("api_secret", ""), base_url=self.runtime.settings.alpaca_trading_url)
         return DISCOVERY_CLASSES[name](found[0], base_url=getattr(self.runtime.settings, f"{name}_base_url"))
 
     def _figi(self) -> OpenFigi:
@@ -236,7 +246,7 @@ class GlobalMarkets:
             if unsupported:
                 raise ValueError(f"{DISCOVERY_CLASSES[provider].label} cannot list: {', '.join(unsupported)}")
             options = {"pause": 1.1, "sleep": time.sleep, **self.job_options}
-            self.job = CatalogJob(self, provider, client, selected, self._figi() if enrich_identifiers else None, figi_limit, **options)
+            self.job = CatalogJob(self, provider, client, selected, self._figi() if enrich_identifiers and self.runtime.settings.provider_enabled("openfigi") else None, figi_limit, **options)
             with self.runtime.db.session() as session:
                 audit.record(session, actor, "catalog.sync_started", provider=provider, exchanges=selected)
             threading.Thread(target=self.job.run, name="catalog-sync", daemon=True).start()
