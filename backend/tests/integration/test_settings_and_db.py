@@ -77,3 +77,21 @@ def test_migrations_upgrade_matches_models_and_downgrade_is_clean(tmp_path):
         s.add(User(email="a@b.c", password_hash="x", role="viewer"))
     command.downgrade(cfg, "base")
     assert set(inspect(database.engine).get_table_names()) == {"alembic_version"}
+
+
+def test_settings_saved_before_the_confirmation_existed_do_not_stop_the_platform(db, settings):
+    from app.database.models import AppSetting
+    from app.database.settings_store import load_settings
+    from app.execution.runtime import TradingRuntime
+
+    old = UserSettings(initial_paper_capital=5000).model_dump()
+    old.pop("safety_limits_confirmed")
+    old["trading_mode"] = "auto"  # valid when it was saved
+    with db.session() as s:
+        s.add(AppSetting(key="user_settings", value=old))
+    with db.session() as s:
+        loaded = load_settings(s)
+    assert loaded.trading_mode == "semi_auto" and loaded.initial_paper_capital == 5000
+    rt = TradingRuntime(db, settings)
+    rt.start()
+    assert rt.started and rt.user_settings.trading_mode == "semi_auto"

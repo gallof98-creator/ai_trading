@@ -80,7 +80,14 @@ def initial_settings() -> UserSettings:
 
 def load_settings(session: Session) -> UserSettings:
     row = session.get(AppSetting, _KEY)
-    return UserSettings.model_validate(row.value) if row else initial_settings()
+    if not row:
+        return initial_settings()
+    value = dict(row.value)
+    # Settings saved before the confirmation existed may say "auto" without it. The platform must still start:
+    # it falls back to semi-automatic (the safer mode) until the limits are confirmed on the Settings page.
+    if value.get("trading_mode") == "auto" and not value.get("safety_limits_confirmed"):
+        value["trading_mode"] = "semi_auto"
+    return UserSettings.model_validate(value)
 
 
 def save_settings(session: Session, settings: UserSettings) -> UserSettings:
