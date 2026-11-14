@@ -960,20 +960,24 @@ class TradingRuntime:
             raise RuntimeError_(f"{', '.join(blocked[:5])} use simulated data; live and simulated prices are never mixed")
         if not self.live.sources:
             self.configure_live()
-        out = self.live.subscribe([self.registry.get(i) for i in instrument_ids])
-        self._save_live(actor)
-        out["backfilled"] = {}
-        for iid, name in out["subscribed"].items():
-            source = self.live.sources[name]
-            if not hasattr(source, "recent_bars"):
+        # Recent minutes from the same provider first (so the chart has context and indicators are warm), then the live feed.
+        backfilled = {}
+        for iid in instrument_ids:
+            inst = self.registry.get(iid)
+            name = next((n for n, route in self.live.routes.items() if route(inst)), None)
+            source = self.live.sources.get(name) if name else None
+            if source is None or not hasattr(source, "recent_bars") or iid in self.live.subscribed:
                 continue
-            try:  # recent minutes from the same provider, so the chart has context; the forming minute is left to the live feed
-                frame = source.recent_bars(self.live.routes[name](self.registry.get(iid)))
-                frame = frame[frame.index < pd.Timestamp(self.clock()).floor("min")]
+            try:
+                frame = source.recent_bars(self.live.routes[name](inst))
+                frame = frame[frame.index < pd.Timestamp(self.clock()).floor("min")]  # the forming minute is left to the live feed
                 if len(frame):
-                    out["backfilled"][iid] = self.ingest(iid, "1m", Dataset(frame, DataKind.REALTIME, f"live:{name}"), trade=False)
+                    backfilled[iid] = self.ingest(iid, "1m", Dataset(frame, DataKind.REALTIME, f"live:{name}"), trade=False)
             except Exception as exc:
                 self.live_hub.record_error(name, f"backfill of {iid}: {type(exc).__name__}: {str(exc)[:150]}")
+        out = self.live.subscribe([self.registry.get(i) for i in instrument_ids])
+        self._save_live(actor)
+        out["backfilled"] = backfilled
         return out
 
     def live_unsubscribe(self, instrument_ids: list[str], actor: str) -> None:

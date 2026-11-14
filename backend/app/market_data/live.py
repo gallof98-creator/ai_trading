@@ -236,7 +236,7 @@ class AlpacaLive(LiveSource):
         self.venue = "Alpaca crypto" if asset == "crypto" else feed.upper()
         self.data_url, self.stream_url = (data_url or self.DATA).rstrip("/"), (stream_url or self.STREAM).rstrip("/")
         # Without a key Alpaca allows only a few requests a minute; with one, 200.
-        self.poll_seconds = poll_seconds if poll_seconds is not None else (1.5 if key else 5.0)
+        self.poll_seconds = poll_seconds if poll_seconds is not None else (1.5 if key else 8.0)
         self.allow_stream = allow_stream and bool(key)
         self.client = client or httpx.Client(timeout=10)
         self._seen: dict[tuple[str, str], str] = {}
@@ -258,7 +258,11 @@ class AlpacaLive(LiveSource):
         start = (self.hub.clock() - timedelta(minutes=limit * (1 if self.asset == "crypto" else 4))).strftime("%Y-%m-%dT%H:%M:%SZ")
         params = {"symbols": symbol, "timeframe": "1Min", "limit": limit, "start": start, "sort": "desc"} | ({} if self.asset == "crypto" else {"feed": self.feed})
         url = f"{self.data_url}/v1beta3/crypto/us/bars" if self.asset == "crypto" else f"{self.data_url}/v2/stocks/bars"
-        r = self.client.get(url, params=params, headers=headers)
+        for attempt in range(4):  # without a key only a few requests a minute are allowed: wait and try again
+            r = self.client.get(url, params=params, headers=headers)
+            if r.status_code != 429:
+                break
+            time.sleep(3.0 * (attempt + 1))
         r.raise_for_status()
         rows = (r.json().get("bars") or {}).get(symbol) or []
         frame = pd.DataFrame([[b["o"], b["h"], b["l"], b["c"], b["v"]] for b in rows], columns=["open", "high", "low", "close", "volume"],
@@ -346,7 +350,10 @@ class AlpacaLive(LiveSource):
                         continue  # nothing new since the last poll
                     self._seen[(what, symbol)] = item["t"]
                     if what == "trades":
-                        self._trade(symbol, item["p"], item.get("s", 0), item["t"])
+                        # Polling returns the last trade however old it is. In a thin market that can be many minutes:
+                        # it is history, not a live event, and must not be published as one.
+                        if (self.hub.clock() - _ts(item["t"])) <= self.hub.stale_after:
+                            self._trade(symbol, item["p"], item.get("s", 0), item["t"])
                     else:
                         self._quote(symbol, item.get("bp"), item.get("ap"), item["t"])
             except (httpx.HTTPError, ValueError, KeyError) as exc:

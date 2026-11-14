@@ -151,7 +151,7 @@ def alpaca_rest(state):
 def test_alpaca_falls_back_to_polling_when_streaming_is_impossible_and_says_so():
     state = {"calls": [], "trades": {"BTC/USD": {"p": 100.0, "s": 0.5, "t": "2026-11-13T15:00:01Z"}},
              "quotes": {"BTC/USD": {"bp": 99.0, "ap": 101.0, "t": "2026-11-13T15:00:02Z"}}}
-    hub = LiveHub()
+    hub = LiveHub(clock=lambda: T0 + timedelta(seconds=20))
     # The stream URL points at a closed port: the connection fails exactly as it does on a network that blocks WebSockets.
     source = AlpacaLive(hub, "crypto", "KEY", "SECRET", stream_url="ws://127.0.0.1:9", poll_seconds=0.05, client=alpaca_rest(state))
     source.set_symbols({"BTC/USD": "CRYPTO:BTC/USD"})
@@ -166,13 +166,16 @@ def test_alpaca_falls_back_to_polling_when_streaming_is_impossible_and_says_so()
         assert wait_for(lambda: hub.last_trade["CRYPTO:BTC/USD"].price == 105.0)
         path, params, key = state["calls"][0]
         assert path.startswith("/v1beta3/crypto/us/latest/") and params == {"symbols": "BTC/USD"} and key == "KEY"
+        state["trades"] = {"BTC/USD": {"p": 1.0, "s": 0.1, "t": "2026-11-13T14:40:00Z"}}  # the "latest" trade of a thin market, 20 minutes old
+        time.sleep(0.3)
+        assert hub.last_trade["CRYPTO:BTC/USD"].price == 105.0  # history is not republished as a live event
         state["status"] = 401
         assert wait_for(lambda: hub.status()["providers"]["alpaca-crypto"]["state"] == "error")
     finally:
         stop.set()
 
     stocks_state = {"calls": [], "trades": {"AAPL": {"p": 200.0, "s": 10, "t": "2026-11-13T15:00:01Z"}}, "quotes": {}}
-    hub2 = LiveHub()
+    hub2 = LiveHub(clock=lambda: T0 + timedelta(seconds=20))
     stocks = AlpacaLive(hub2, "stocks", "KEY", "SECRET", allow_stream=False, poll_seconds=0.05, client=alpaca_rest(stocks_state))
     stocks.set_symbols({"AAPL": "STOCK:AAPL"})
     stop = run(stocks)

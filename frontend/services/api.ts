@@ -31,9 +31,11 @@ export type RiskLimits = {
   max_exposure_per_strategy: number; max_exposure_per_broker: number; max_gross_leverage: number;
   max_concurrent_positions: number; max_margin_utilization: number; target_volatility: number | null; max_correlated_exposure: number; correlation_threshold: number;
   emergency_policy: "block_new_risk" | "cancel_open_orders" | "flatten_positions";
+  est_spread_bps: number; est_slippage_bps: number; est_commission_bps: number; max_spread_bps: number; max_data_age_seconds: number;
 };
 export type UserSettings = {
   base_currency: string; initial_paper_capital: number | null; trading_mode: "manual" | "semi_auto" | "auto";
   fx_conversion_cost_bps: number; live_orders_require_approval: boolean; risk: RiskLimits;
+  proposal_ttl_minutes: number; max_entry_drift: number; safety_limits_confirmed: boolean;
   notifications: { external_min_severity: "info" | "warning" | "critical"; muted_categories: string[] };
 };

@@ -11,6 +11,9 @@ const RISK_FIELDS: { key: keyof RiskLimits; label: string; percent?: boolean }[]
   { key: "max_margin_utilization", label: "Max margin utilisation", percent: true }, { key: "max_correlated_exposure", label: "Max correlated exposure", percent: true },
   { key: "correlation_threshold", label: "Correlation threshold" }, { key: "max_gross_leverage", label: "Max gross leverage (×)" },
   { key: "max_concurrent_positions", label: "Max concurrent positions" },
+  { key: "est_spread_bps", label: "Assumed spread (bps)" }, { key: "est_slippage_bps", label: "Assumed slippage per side (bps)" },
+  { key: "est_commission_bps", label: "Assumed commission per side (bps)" }, { key: "max_spread_bps", label: "Refuse new risk above spread (bps)" },
+  { key: "max_data_age_seconds", label: "Refuse new risk on a live price older than (s)" },
 ];
 const CATEGORIES = ["signal", "execution", "order_rejected", "approval", "broker", "risk", "reconciliation", "model", "strategy", "system"];
 
@@ -37,6 +40,12 @@ function TradingSettings({ readOnly }: { readOnly: boolean }) {
             <Field label="Trading mode"><select value={s.trading_mode} onChange={(e) => setS({ ...s, trading_mode: e.target.value as UserSettings["trading_mode"] })}>
               <option value="manual">Manual (signals only)</option><option value="semi_auto">Semi-automatic (approval required)</option><option value="auto">Automatic</option></select></Field>
             <Field label="FX conversion cost (bps)"><input type="number" min="0" step="any" value={s.fx_conversion_cost_bps} onChange={(e) => setS({ ...s, fx_conversion_cost_bps: Number(e.target.value) })} /></Field>
+            <Field label="A proposed order lapses after (minutes)"><input type="number" min="1" max="1440" value={s.proposal_ttl_minutes} onChange={(e) => setS({ ...s, proposal_ttl_minutes: Number(e.target.value) })} /></Field>
+            <Field label="Void a proposal if price moved more than (% of its stop distance)"><input type="number" min="1" step="any" value={+(s.max_entry_drift * 100).toFixed(4)} onChange={(e) => setS({ ...s, max_entry_drift: Number(e.target.value) / 100 })} /></Field>
+            <label className="flex items-center gap-2 text-xs text-dim sm:col-span-2">
+              <input type="checkbox" className="!w-auto" checked={s.safety_limits_confirmed} onChange={(e) => setS({ ...s, safety_limits_confirmed: e.target.checked })} />
+              I have reviewed the daily-loss, drawdown and exposure limits on this page (required before automatic mode can be selected)
+            </label>
             <label className="flex items-center gap-2 text-xs text-dim sm:col-span-2">
               <input type="checkbox" className="!w-auto" checked={s.live_orders_require_approval} onChange={(e) => setS({ ...s, live_orders_require_approval: e.target.checked })} />
               Real-money orders always wait for a human approval (recommended)

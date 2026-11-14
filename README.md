@@ -19,6 +19,7 @@ through one engine, with backtesting, paper trading, a central risk engine and a
 | Brokers | Adapter framework with capability detection; CCXT (Binance, Bybit, …) and Interactive Brokers adapters; simulated venue |
 | Quant AI | Market-regime detection, 5 model types with purged out-of-sample validation and calibration, drift checks, analyst reports, gated parameter proposals |
 | Stock universe | Stocks and ETFs for the US and six European markets. Prices come from official data APIs with your own key (Tiingo and Alpha Vantage are free and US-only; EODHD is paid and covers US and Europe) or from price files imported in bulk. One strategy can be scanned across every instrument |
+| Autonomous Quant | Semi-automatic trading loop: live prices (Alpaca, Finnhub) streamed to the dashboard, strategies proposed only after walk-forward validation, each order sized at the configured risk including costs, judged by the risk engine, shown as a proposal and sent only after an explicit approval that re-checks price and risk. Pause / Resume / Emergency Stop. Alpaca paper broker with a virtual EUR capital. See `docs/autonomous-quant.md` |
 | Chart | Professional chart for any instrument in the catalog (TradingView Lightweight Charts, open source): search by ticker, name, ISIN or FIGI with exchange / type / sector filters, resolutions from 1 minute to monthly where stored bars allow, volume, moving averages, Bollinger, RSI, MACD, support and resistance, recorded signals, watchlists, paper orders through the risk engine. The selected symbol is shared with Markets and Quant AI. See `docs/charts.md` |
 | Global Markets | Catalog of listed securities discovered from providers, exchange by exchange (43 exchanges registered): stable internal id, ISIN and FIGI, instrument types kept apart, history of ticker changes and delistings, de-duplication across providers, coverage report, bulk price downloads and incremental updates; market scanner with saved scans and watchlists; breadth, heatmaps and movers; transparent factor rankings; portfolio strategies with a rebalancing backtest and risk-engine-gated paper rebalancing. Limits (survivorship bias, no currency conversion in backtests, no sector data from free sources): `docs/global-markets.md` |
 | Dashboard | Overview, Markets, Strategies, Quant AI, Backtesting, Portfolio, Execution, Risk Center, Settings |
@@ -93,7 +94,7 @@ QAT_ADMIN_EMAIL=you@example.com QAT_ADMIN_PASSWORD='a-long-password' uvicorn app
 ```
 
 ```bash
-cd backend && pytest          # 268 tests, about 8 minutes; never contacts a real broker
+cd backend && pytest          # 292 tests, about 12 minutes; never contacts a real broker
 ```
 
 ```bash
