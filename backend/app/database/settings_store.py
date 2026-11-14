@@ -62,6 +62,10 @@ class AutopilotSettings(BaseModel):
     seed_most_active: bool = True     # add the most traded US stocks to the universe when it is too small
     daily_price_update: bool = True
     live_subscribe: bool = True       # request live prices for instruments with a validated strategy
+    # Crypto pairs (quoted in USD, as Alpaca trades them) followed alongside the stocks. Their history and prices come
+    # from Alpaca's crypto data, which needs no key. An empty list switches crypto off.
+    crypto_pairs: list[str] = Field(default_factory=lambda: ["BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "LINK/USD", "AVAX/USD", "DOGE/USD",
+                                                             "UNI/USD", "AAVE/USD", "BCH/USD"], max_length=50)
     min_price: float = Field(5.0, ge=0)
     min_traded_value: float = Field(20_000_000.0, ge=0)  # 20-day average traded value, quote currency
     validations_per_cycle: int = Field(60, ge=1, le=500)

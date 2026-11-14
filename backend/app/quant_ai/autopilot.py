@@ -32,11 +32,40 @@ def alpaca_most_active(key: str, secret: str, top: int, base_url: str = "https:/
     return [row["symbol"] for row in r.json().get("most_actives", []) if str(row.get("symbol", "")).isalpha()]
 
 
+def alpaca_crypto_daily(symbol: str, key: str = "", secret: str = "", years: int = 6, base_url: str = "https://data.alpaca.markets",
+                        client: httpx.Client | None = None, now: datetime | None = None) -> pd.DataFrame:
+    """Completed daily bars of one crypto pair from Alpaca's official crypto data (works without a key, slowly)."""
+    import time
+
+    now = now or datetime.now().astimezone()
+    client = client or httpx.Client(timeout=30)
+    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret} if key else {}
+    params: dict = {"symbols": symbol, "timeframe": "1Day", "limit": 10_000, "start": (now - timedelta(days=366 * years)).strftime("%Y-%m-%dT00:00:00Z")}
+    rows: list[dict] = []
+    for _ in range(20):
+        for attempt in range(4):  # without a key only a few requests a minute are allowed
+            r = client.get(f"{base_url.rstrip('/')}/v1beta3/crypto/us/bars", params=params, headers=headers)
+            if r.status_code != 429:
+                break
+            time.sleep(3.0 * (attempt + 1))
+        r.raise_for_status()
+        body = r.json()
+        rows += (body.get("bars") or {}).get(symbol) or []
+        if not body.get("next_page_token"):
+            break
+        params["page_token"] = body["next_page_token"]
+    frame = pd.DataFrame([[b["o"], b["h"], b["l"], b["c"], b["v"]] for b in rows], columns=["open", "high", "low", "close", "volume"],
+                         index=pd.DatetimeIndex([pd.Timestamp(b["t"]) for b in rows], name="ts")).sort_index()
+    # The bar of the current day is still forming: a strategy must only ever see completed bars.
+    return frame[frame.index < pd.Timestamp(now).tz_convert("UTC").normalize()]
+
+
 class Autopilot:
     def __init__(self, runtime) -> None:
         self.rt = runtime
         self.most_active: Callable[[str, str, int], list[str]] | None = None  # test hook
         self.fetch_fx: Callable[[], list] | None = None  # test hook: [(base, quote, timestamp, rate)]
+        self.fetch_crypto: Callable[[str], pd.DataFrame] | None = None  # test hook: pair -> completed daily bars
         self.wait_seconds = 900.0  # how long a cycle waits for a download or a metrics job
         self._lock = threading.Lock()
         self.activity: deque = deque(maxlen=80)
@@ -115,7 +144,7 @@ class Autopilot:
         self.state["running"] = True
         result: dict = {"started": self.rt.clock().isoformat()}
         try:
-            for name, step in (("exchange_rates", self._fx), ("universe", self._seed), ("prices", self._update_prices), ("candidates", self._candidates),
+            for name, step in (("exchange_rates", self._fx), ("universe", self._seed), ("prices", self._update_prices), ("crypto", self._crypto), ("candidates", self._candidates),
                                ("validation", self._validate), ("live", self._live), ("scan", self._scan)):
                 try:
                     result[name] = step(result)
@@ -174,6 +203,43 @@ class Autopilot:
         self.state["last_fx"] = now.isoformat()
         return {"rates": len(rows)}
 
+    def _crypto(self, _: dict) -> dict:
+        """Add the configured crypto pairs and keep their daily history current (Alpaca crypto data, no key needed)."""
+        from ..market_data.quality import DataKind
+        from ..market_data.sources import Dataset
+
+        cfg, now = self.cfg, self.rt.clock()
+        pairs = [p.strip().upper() for p in cfg.crypto_pairs if p.strip()]
+        if not pairs:
+            return {"skipped": "no crypto pairs configured"}
+        last = self.state.get("last_crypto")
+        if last and now - datetime.fromisoformat(last) < timedelta(hours=20):
+            return {"skipped": "already updated in the last 20 hours"}
+        added = self.rt.add_instruments(pairs, "", "crypto", ACTOR)
+        creds = self._alpaca() or {}
+        fetch = self.fetch_crypto or (lambda pair: alpaca_crypto_daily(pair, creds.get("api_key", ""), creds.get("api_secret", ""),
+                                                                      base_url=self.rt.settings.alpaca_base_url, now=now))
+        stored, failed = 0, []
+        for iid in added["created"] + added["existing"]:
+            inst = self.rt.registry.get(iid)
+            try:
+                frame = fetch(inst.symbol)
+                if len(frame):
+                    stored += self.rt._store_download(inst, Dataset(frame, DataKind.HISTORICAL, "alpaca-crypto")) > 0
+                else:
+                    failed.append(inst.symbol)
+            except Exception as exc:  # a pair Alpaca does not list, a simulated series in the way, a network problem
+                failed.append(f"{inst.symbol} ({type(exc).__name__}: {str(exc)[:80]})")
+        self.state["last_crypto"] = now.isoformat()
+        if stored:
+            try:  # the scanner metrics follow the new prices
+                self.rt.global_markets.start_metrics(ACTOR)
+                self.rt.global_markets.metrics_job.completed.wait(self.wait_seconds)
+            except ValueError:
+                pass
+        self._note("crypto", f"{stored} crypto histories refreshed" + (f"; not available: {', '.join(failed)}" if failed else ""), "warning" if failed else "info")
+        return {"pairs": len(pairs), "refreshed": stored, "not_available": failed}
+
     def _update_prices(self, _: dict) -> dict:
         cfg, now = self.cfg, self.rt.clock()
         if not cfg.daily_price_update:
@@ -215,9 +281,13 @@ class Autopilot:
             ok = frame[(frame["data_kind"] != "simulated") & (price >= cfg.min_price) & (traded >= cfg.min_traded_value)]
             ok = ok.assign(_t=traded).sort_values("_t", ascending=False)
             chosen = [i for i in ok["instrument_id"] if self.rt.registry.is_mapped(broker, i)][: cfg.max_instruments]
-        live = [i for i in self.rt.live.subscribed if i not in chosen and self.rt.registry.is_mapped(broker, i)]
-        result["_candidates"] = chosen + live
-        return {"count": len(chosen) + len(live), "by_liquidity": len(chosen), "live_only": len(live), "broker_id": broker}
+        # Crypto is not ranked by traded value: the volume in Alpaca's crypto bars is Alpaca's own venue, a small part of the market.
+        priced = self._priced()
+        wanted = {f"CRYPTO:{p.strip().upper()}" for p in cfg.crypto_pairs}
+        crypto = [i for i in sorted(wanted) if i in priced and i not in chosen and self.rt.registry.is_mapped(broker, i)]
+        live = [i for i in self.rt.live.subscribed if i not in chosen and i not in crypto and self.rt.registry.is_mapped(broker, i)]
+        result["_candidates"] = chosen + crypto + live
+        return {"count": len(chosen) + len(crypto) + len(live), "by_liquidity": len(chosen), "crypto": len(crypto), "live_only": len(live), "broker_id": broker}
 
     def _validate(self, result: dict) -> dict:
         cfg, now = self.cfg, self.rt.clock()

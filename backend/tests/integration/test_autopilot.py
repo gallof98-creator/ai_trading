@@ -76,6 +76,7 @@ def rt(tmp_path):
 
 
 def configure(rt, **kw):
+    kw.setdefault("crypto_pairs", [])     # crypto has its own test below
     kw.setdefault("allow_short", True)  # the trend rule then trades often enough on the test series to be fully validated
     cfg = AutopilotSettings(enabled=True, strategies=["ema_crossover", "rsi_reversion"], max_instruments=10, min_traded_value=1e6, **kw)
     with rt.db.session() as s:
@@ -88,7 +89,7 @@ def test_a_cycle_goes_from_an_empty_universe_to_a_proposal_without_a_click(rt):
     configure(rt)
     out = rt.autopilot.tick()
     assert out["universe"]["added"] == ["STOCK:AAA", "STOCK:BBB", "STOCK:CCC", "STOCK:NOPE"] and out["universe"]["histories_requested"] == 4
-    assert out["candidates"] == {"count": 2, "by_liquidity": 2, "live_only": 0, "broker_id": "paper-main"}  # the penny stock and the one without data are left out
+    assert out["candidates"] == {"count": 2, "by_liquidity": 2, "crypto": 0, "live_only": 0, "broker_id": "paper-main"}  # the penny stock and the one without data are left out
     assert out["validation"] == {"run": 4, "passed": 2, "candidates": 0, "could_not_run": 0, "remaining": 0}  # the trend rule passes, the mean-reversion rule does not
     assert out["live"] == {"subscribed": 2, "no_live_source": 0} and set(rt.live.subscribed) == {"STOCK:AAA", "STOCK:BBB"}
     assert out["scan"]["validated_setups"] == 2 and out["scan"]["proposed"] == 1
@@ -176,6 +177,7 @@ def test_autopilot_endpoints(client):
     assert saved["enabled"] is True and saved["settings"]["max_instruments"] == 12
     assert client.get("/api/settings", headers=admin).json()["autopilot"]["enabled"] is True
     assert client.post("/api/quant/autopilot/run", headers=viewer).status_code == 403
+    client.app.state.container.runtime.autopilot.fetch_crypto = lambda pair: pd.DataFrame()
     client.app.state.container.runtime.autopilot.fetch_fx = lambda: []  # the background cycle must not reach the internet from a test
     assert client.post("/api/quant/autopilot/run", headers=admin).status_code == 202
 
@@ -192,3 +194,54 @@ def test_long_only_default_reaches_the_candidate_level_and_trades_it_on_paper_on
     other.now[0] += timedelta(minutes=16)
     again = other.autopilot.tick()
     assert again["scan"]["proposed"] == 0 and any("candidate only" in r for r in again["scan"]["reasons"])
+
+
+def test_crypto_pairs_are_added_priced_and_analysed_without_a_key(rt):
+    from tests.integration.test_opportunities import cyclical
+
+    rt.set_provider_key("alpaca", None, "admin")  # crypto data needs no key
+    end = rt.frames["AAA"].index[-1]
+    bars = cyclical()
+    bars.index = pd.date_range(end=end, periods=len(bars), freq="1D", tz="UTC", name="ts")
+    bars["volume"] = 3.0   # Alpaca's crypto bars carry its own small venue volume, far below any stock liquidity floor
+    asked = []
+
+    def fetch(pair):
+        asked.append(pair)
+        if pair == "NOPE/USD":
+            raise ConnectionError("unknown pair")
+        return bars
+
+    rt.autopilot.fetch_crypto = fetch
+    configure(rt, crypto_pairs=["btc/usd", "ETH/USD", "NOPE/USD"], seed_most_active=False)
+    out = rt.autopilot.tick()
+    assert asked == ["BTC/USD", "ETH/USD", "NOPE/USD"]
+    assert out["crypto"]["refreshed"] == 2 and out["crypto"]["not_available"][0].startswith("NOPE/USD (ConnectionError")
+    assert out["candidates"]["crypto"] == 2 and out["candidates"]["by_liquidity"] == 0   # followed whatever Alpaca's own venue volume says
+    assert out["validation"]["run"] == 4 and out["validation"]["passed"] == 2
+    with rt.db.session() as s:
+        stored = rt.store.load(s, "CRYPTO:BTC/USD", "1d")
+    assert stored.source == "alpaca-crypto" and stored.kind.value == "historical" and len(stored.bars) == len(bars)
+    assert rt.registry.get("CRYPTO:BTC/USD").quote_currency == "USD" and rt.registry.is_mapped("paper-main", "CRYPTO:BTC/USD")
+    rt.now[0] += timedelta(minutes=16)
+    assert rt.autopilot.tick()["crypto"] == {"skipped": "already updated in the last 20 hours"} and len(asked) == 3
+
+
+def test_the_forming_daily_bar_of_a_crypto_pair_is_never_stored():
+    import httpx
+
+    from app.quant_ai.autopilot import alpaca_crypto_daily
+
+    now = pd.Timestamp("2026-11-14 10:30", tz="UTC").to_pydatetime()
+    pages = [{"bars": {"BTC/USD": [{"t": "2026-11-12T00:00:00Z", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10}]}, "next_page_token": "p2"},
+             {"bars": {"BTC/USD": [{"t": "2026-11-13T00:00:00Z", "o": 1.5, "h": 3, "l": 1, "c": 2, "v": 20},
+                                   {"t": "2026-11-14T00:00:00Z", "o": 2, "h": 2.5, "l": 1.9, "c": 2.2, "v": 3}]}, "next_page_token": None}]
+    calls = []
+
+    def handler(request):
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json=pages[len(calls) - 1])
+
+    frame = alpaca_crypto_daily("BTC/USD", client=httpx.Client(transport=httpx.MockTransport(handler)), now=now)
+    assert [str(t.date()) for t in frame.index] == ["2026-11-12", "2026-11-13"]  # today's bar is still forming and is left out
+    assert frame["close"].tolist() == [1.5, 2.0] and calls[1]["page_token"] == "p2" and calls[0]["timeframe"] == "1Day"

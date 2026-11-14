@@ -56,7 +56,7 @@ function Universe({ onChange }: { onChange: () => void }) {
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <Field label="Market"><select value={market} onChange={(e) => setMarket(e.target.value)}>{(markets.data ?? []).map((m: { code: string; label: string; currency: string }) => <option key={m.code} value={m.code}>{m.label} · {m.currency}</option>)}</select></Field>
-            <Field label="Type"><select value={kind} onChange={(e) => setKind(e.target.value)}><option value="stock">Stocks</option><option value="etf">ETFs</option></select></Field>
+            <Field label="Type"><select value={kind} onChange={(e) => setKind(e.target.value)}><option value="stock">Stocks</option><option value="etf">ETFs</option><option value="crypto">Crypto pairs (e.g. BTC/USD)</option></select></Field>
           </div>
           <Field label="Add tickers (separated by spaces, commas or new lines)">
             <textarea aria-label="Tickers" rows={3} value={tickers} onChange={(e) => setTickers(e.target.value)} placeholder="MSFT NVDA AMZN GOOGL" className="w-full rounded border border-line bg-bg p-2 font-mono text-xs" />

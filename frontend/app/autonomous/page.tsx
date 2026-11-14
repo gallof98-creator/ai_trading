@@ -102,7 +102,7 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
       <div className="mt-3 grid gap-4 lg:grid-cols-2">
         <div className="space-y-1 font-mono text-xs">
           <div className="text-dim">Last cycle {when(st.last_cycle)} · next {st.enabled ? when(st.next_cycle) : "—"} · {st.cycles} cycles since start</div>
-          {[["exchange_rates", "Exchange rates"], ["universe", "Universe"], ["prices", "Prices"], ["candidates", "Candidates"], ["validation", "Validation"], ["live", "Live prices"], ["scan", "Scan"]].map(([k, l]) => line(k, l))}
+          {[["exchange_rates", "Exchange rates"], ["universe", "Universe"], ["prices", "Prices"], ["crypto", "Crypto"], ["candidates", "Candidates"], ["validation", "Validation"], ["live", "Live prices"], ["scan", "Scan"]].map(([k, l]) => line(k, l))}
           {r.scan?.funnel && <div className="mt-2 rounded border border-line p-2">
             <div className="text-dim">Where the {r.scan.funnel.setups} strategy/instrument pairs ended up</div>
             <div className="mt-1 flex flex-wrap gap-1.5">
@@ -135,6 +135,8 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
               ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
               .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
           </div>
+          <div className="mt-3"><Field label="Crypto pairs followed (quoted in USD, comma separated; empty = no crypto). Their prices come from Alpaca's crypto data and need no key.">
+            <input className="w-full" value={(cfg.crypto_pairs ?? []).join(", ")} onChange={(e) => set("crypto_pairs", e.target.value.split(",").map((x: string) => x.trim().toUpperCase()).filter(Boolean))} /></Field></div>
           <div className="mt-3 text-xs text-dim">Timeframes: {TFS.map((t) => <label key={t} className="ml-2 inline-flex items-center gap-1"><input type="checkbox" className="!w-auto" checked={cfg.timeframes.includes(t)}
             onChange={(e) => set("timeframes", e.target.checked ? [...cfg.timeframes, t] : cfg.timeframes.filter((x: string) => x !== t))} />{t}</label>)} <span className="ml-2">(minute and hour timeframes need live prices)</span></div>
           <div className="mt-3 text-xs text-dim">Strategies to validate:

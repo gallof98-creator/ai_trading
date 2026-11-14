@@ -36,6 +36,7 @@ Off by default; switched on from the Autonomous Quant page. Every cycle (15 minu
 | Exchange rates | Fetches the European Central Bank's daily reference rates | internet |
 | Universe | When fewer instruments than configured have prices, adds the most traded US stocks (Alpaca's screener) and downloads their history | Alpaca key |
 | Prices | Brings daily prices up to date once a day | Alpaca key |
+| Crypto | Adds the configured crypto pairs (BTC/USD, ETH/USD and others, quoted in USD) and refreshes their daily history from Alpaca's crypto data; the still-forming bar of the current day is never stored | - |
 | Candidates | Keeps the most traded instruments above the price and traded-value floors that the account can trade, plus anything with a live feed | - |
 | Validation | Runs the walk-forward validation of each chosen strategy on each candidate; redoes it when it is older than 30 days | - |
 | Live prices | Subscribes instruments that have a validated strategy | a live source |
@@ -168,6 +169,8 @@ orders sent in the same moment could each fit a limit and together exceed it.
 
 ## Limits
 
+- Crypto is followed whatever its traded value: the volume in Alpaca's crypto bars is Alpaca's own venue, a small part of the market.
+  On the internal paper account, fills are limited to a tenth of each bar's volume, so a crypto order on one-minute bars can fill in several pieces.
 - No free real-time source for non-US stocks. They stay END OF DAY.
 - Alpaca trades US stocks, ETFs and crypto only; everything else in the catalog is analysable, not tradable there.
 - Alpaca does not accept plain stop orders for crypto: the platform then watches the stop itself and closes at the bar close beyond it.
