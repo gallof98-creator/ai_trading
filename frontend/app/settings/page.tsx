@@ -157,7 +157,8 @@ function BrokerPanel({ isAdmin }: { isAdmin: boolean }) {
             <div className="space-y-3 rounded border border-line p-3">
               <h3 className="text-sm font-semibold">Add an exchange or broker account</h3>
               <div className="grid gap-3 sm:grid-cols-3">
-                <Field label="Account id"><input value={form.id} placeholder="alpaca-paper" onChange={(e) => setForm({ ...form, id: e.target.value })} /></Field>
+                <Field label="Name for this account here (your choice, not the broker's account number)"><input value={form.id} placeholder="alpaca-paper"
+                  onChange={(e) => setForm({ ...form, id: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "-") })} /></Field>
                 <Field label="Adapter"><select value={form.adapter} onChange={(e) => setForm({ ...form, adapter: e.target.value, currency: e.target.value === "ccxt" ? "USDT" : e.target.value === "alpaca" ? "USD" : "EUR" })}><option value="alpaca">Alpaca (US stocks, ETFs, crypto)</option><option value="ccxt">CCXT (crypto)</option><option value="ibkr">Interactive Brokers</option></select></Field>
                 <Field label="Account currency"><input value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value.toUpperCase() })} /></Field>
                 {form.adapter === "alpaca" ? <>
