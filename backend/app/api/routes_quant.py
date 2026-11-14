@@ -104,3 +104,44 @@ def pause(body: PauseIn, user: User = Depends(trader), rt: TradingRuntime = Depe
 @router.post("/resume", status_code=status.HTTP_204_NO_CONTENT)
 def resume(user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> None:
     rt.kill_switch(False, "", user.email)
+
+
+# ---------------------------------------------------------------- autopilot
+@router.get("/autopilot")
+def autopilot_status(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    return rt.autopilot.status()
+
+
+@router.put("/autopilot")
+def autopilot_configure(body: dict, user: User = Depends(trader), session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    """Change what the autopilot does. It cannot change the trading mode or a risk limit: those stay under Settings."""
+    from pydantic import ValidationError
+
+    from ..database.settings_store import AutopilotSettings, save_settings
+    from ..monitoring import audit
+    from ..strategies.registry import list_strategies
+
+    try:
+        new = AutopilotSettings.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())) from None
+    known = {s["name"] for s in list_strategies()}
+    unknown = [s for s in new.strategies if s not in known]
+    if unknown:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown strategies: {', '.join(unknown)}")
+    save_settings(session, rt.user_settings.model_copy(update={"autopilot": new}))
+    audit.record(session, user.email, "autopilot.configured", enabled=new.enabled, cycle_minutes=new.cycle_minutes, max_instruments=new.max_instruments)
+    session.flush()
+    rt.reload_settings(session)
+    return rt.autopilot.status()
+
+
+@router.post("/autopilot/run", status_code=status.HTTP_202_ACCEPTED)
+def autopilot_run(_: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    """Start one cycle now, in the background (it can take minutes: downloads and validations)."""
+    import threading
+
+    if rt.autopilot.state["running"]:
+        raise HTTPException(status.HTTP_409_CONFLICT, "A cycle is already running")
+    threading.Thread(target=rt.autopilot.run_cycle, name="autopilot-cycle", daemon=True).start()
+    return {"started": True}

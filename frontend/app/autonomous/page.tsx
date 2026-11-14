@@ -61,6 +61,68 @@ function Proposal({ p, canTrade, onDone }: { p: Json; canTrade: boolean; onDone:
   );
 }
 
+function AutopilotPanel({ canTrade, strategies }: { canTrade: boolean; strategies: Json[] }) {
+  const ap = useApi("/api/quant/autopilot", 5_000);
+  const [draft, setDraft] = useState<Json>(null);
+  const act = useAction();
+  if (!ap.data) return <Panel title="Autopilot"><p className="text-sm text-dim">{ap.error ?? "Loading…"}</p></Panel>;
+  const st = ap.data;
+  const cfg = draft ?? st.settings;
+  const set = (k: string, v: unknown) => setDraft({ ...cfg, [k]: v });
+  const save = (next: Json, msg: string) => act.run(async () => { await post("/api/quant/autopilot", next, "PUT"); setDraft(null); }, msg).then(ap.reload);
+  const r = st.last_result ?? {};
+  const line = (k: string, label: string) => {
+    const v = r[k];
+    if (!v) return null;
+    const text = v.error ? `problem: ${v.error}` : v.skipped ? `skipped — ${v.skipped}` : Object.entries(v).filter(([key, val]) => key !== "reasons" && typeof val !== "object").map(([key, val]) => `${key.replace(/_/g, " ")} ${val}`).join(" · ");
+    return <div key={k} className="flex gap-2"><span className="w-28 shrink-0 text-dim">{label}</span><span className={v.error ? "text-down" : ""}>{text}</span></div>;
+  };
+  return (
+    <Panel title="Autopilot" right={<span className="flex flex-wrap items-center gap-2">
+      <Badge kind={st.enabled ? "up" : "dim"}>{st.enabled ? (st.running ? "RUNNING A CYCLE" : "ON") : "OFF"}</Badge>
+      {canTrade && <Button kind={st.enabled ? "ghost" : "primary"} disabled={act.busy} onClick={() => save({ ...st.settings, enabled: !st.enabled }, st.enabled ? "Autopilot switched off." : "Autopilot switched on.")}>{st.enabled ? "Switch off" : "Switch on"}</Button>}
+      {canTrade && <Button kind="ghost" disabled={act.busy || st.running} onClick={() => act.run(() => post("/api/quant/autopilot/run"), "Cycle started; it can take a few minutes.").then(ap.reload)}>Run a cycle now</Button>}
+    </span>}>
+      <p className="text-sm">Every {st.settings.cycle_minutes} minutes the platform refreshes exchange rates and prices, picks the most traded instruments, validates the chosen strategies on them, asks for live prices and scans for opportunities. <span className="text-accent">{st.sends_orders_by_itself ? "Automatic mode is on: paper orders are sent without asking." : "It creates proposals only: every order still waits for your approval."}</span></p>
+      {!st.alpaca_key && <p className="mt-2 text-xs text-warn">No Alpaca key yet: the universe and daily prices cannot be refreshed automatically. Add the key under Markets, or connect an Alpaca account under Settings.</p>}
+      {!st.broker_id && <p className="mt-2 text-xs text-warn">No trading account: create a paper account under Execution.</p>}
+      <div className="mt-3 grid gap-4 lg:grid-cols-2">
+        <div className="space-y-1 font-mono text-xs">
+          <div className="text-dim">Last cycle {when(st.last_cycle)} · next {st.enabled ? when(st.next_cycle) : "—"} · {st.cycles} cycles since start</div>
+          {[["exchange_rates", "Exchange rates"], ["universe", "Universe"], ["prices", "Prices"], ["candidates", "Candidates"], ["validation", "Validation"], ["live", "Live prices"], ["scan", "Scan"]].map(([k, l]) => line(k, l))}
+          {r.scan?.reasons?.length > 0 && <details className="pt-1"><summary className="cursor-pointer text-accent">why {r.scan.reasons.length} setups were not proposed</summary><ul className="mt-1 max-h-40 list-disc overflow-auto pl-5 text-dim">{r.scan.reasons.map((x: string) => <li key={x}>{x}</li>)}</ul></details>}
+        </div>
+        <div className="max-h-48 overflow-auto font-mono text-xs">
+          {st.activity.length === 0 ? <p className="text-dim">No activity yet.</p> : st.activity.map((a: Json, i: number) => <div key={i} className={a.level === "info" ? "" : "text-warn"}><span className="text-dim">{when(a.ts).slice(5)} {a.step}</span> {a.text}</div>)}
+        </div>
+      </div>
+      {canTrade && (
+        <details className="mt-3 border-t border-line pt-3">
+          <summary className="cursor-pointer text-xs text-accent">What the autopilot does (settings)</summary>
+          <div className="mt-3 flex flex-wrap items-end gap-3">
+            <Field label="Cycle every (minutes)"><input type="number" min="5" className="w-24" value={cfg.cycle_minutes} onChange={(e) => set("cycle_minutes", Number(e.target.value))} /></Field>
+            <Field label="Instruments followed"><input type="number" min="1" max="200" className="w-24" value={cfg.max_instruments} onChange={(e) => set("max_instruments", Number(e.target.value))} /></Field>
+            <Field label="Minimum price"><input type="number" min="0" step="any" className="w-24" value={cfg.min_price} onChange={(e) => set("min_price", Number(e.target.value))} /></Field>
+            <Field label="Minimum traded value / day"><input type="number" min="0" step="any" className="w-36" value={cfg.min_traded_value} onChange={(e) => set("min_traded_value", Number(e.target.value))} /></Field>
+            <Field label="Validations per cycle"><input type="number" min="1" className="w-24" value={cfg.validations_per_cycle} onChange={(e) => set("validations_per_cycle", Number(e.target.value))} /></Field>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-dim">
+            {[["seed_most_active", "Add the most traded US stocks when the universe is small"], ["daily_price_update", "Refresh daily prices"], ["live_subscribe", "Ask for live prices where a strategy is validated"]]
+              .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
+          </div>
+          <div className="mt-3 text-xs text-dim">Timeframes: {TFS.map((t) => <label key={t} className="ml-2 inline-flex items-center gap-1"><input type="checkbox" className="!w-auto" checked={cfg.timeframes.includes(t)}
+            onChange={(e) => set("timeframes", e.target.checked ? [...cfg.timeframes, t] : cfg.timeframes.filter((x: string) => x !== t))} />{t}</label>)} <span className="ml-2">(minute and hour timeframes need live prices)</span></div>
+          <div className="mt-3 text-xs text-dim">Strategies to validate:
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">{strategies.map((x: Json) => <label key={x.name} className="inline-flex items-center gap-1"><input type="checkbox" className="!w-auto" checked={cfg.strategies.includes(x.name)}
+              onChange={(e) => set("strategies", e.target.checked ? [...cfg.strategies, x.name] : cfg.strategies.filter((n: string) => n !== x.name))} />{nice(x.name)}</label>)}</div></div>
+          <div className="mt-3 flex items-center gap-3"><Button kind="ghost" disabled={act.busy || !draft} onClick={() => save(cfg, "Autopilot settings saved.")}>Save settings</Button>
+            <span className="text-xs text-dim">The trading mode and every risk limit are changed under Settings only; the autopilot cannot touch them.</span></div>
+        </details>)}
+      <Msg msg={act.msg} />
+    </Panel>
+  );
+}
+
 function Autonomous({ user }: { user: User }) {
   const d = useApi("/api/quant/dashboard", 4_000);
   const modules = useApi("/api/quant/modules");
@@ -108,6 +170,8 @@ function Autonomous({ user }: { user: User }) {
         <Stat label="Risk per trade" value={pct(c.risk_per_trade, 1)} hint={c.risk_amount ? `≈ ${num(c.risk_amount)} ${ccy} at the stop, costs included` : ""} />
         <Stat label="Open positions" value={positions.length} hint={`${proposals.length} proposals waiting`} />
       </div>
+
+      <AutopilotPanel canTrade={canTrade} strategies={strategies.data ?? []} />
 
       <Panel title={`Proposals waiting for your decision (${proposals.length})`} right={canTrade && account ? (
         <Button kind="ghost" disabled={act.busy || halted} onClick={() => act.run(async () => setScan(await post("/api/quant/scan", { broker_id: account })), "Scan complete.").then(refresh)}>Scan for opportunities</Button>) : undefined}>

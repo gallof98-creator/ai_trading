@@ -419,7 +419,7 @@ class TradingEngine:
         out = []
         for a in [a for a in self.approvals.values() if a.expires_at is not None and ts > a.expires_at]:
             del self.approvals[a.id]
-            self._client_ids.pop(a.order.client_order_id, None)
+            # The client id stays registered: a proposal that lapsed is not made again for the same signal bar.
             out.append(self._record(a.order.model_copy(update={"status": OrderStatus.CANCELLED, "updated_at": ts, "reason": f"{a.order.reason} | proposal expired"})))
         return out
 

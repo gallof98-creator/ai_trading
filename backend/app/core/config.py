@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     # live prices and trading. The other connectors stay in the code; "all" (or a list of names) switches them back on.
     enabled_providers: str = "alpaca"
     alpaca_trading_url: str = "https://paper-api.alpaca.markets"  # where the asset list is read from; paper keys work here
+    autopilot_tick_seconds: int = Field(60, ge=0)  # how often the autopilot checks whether a cycle is due; 0 switches the loop off
     live_feed_autostart: bool = True  # reconnect the live subscriptions saved by the user when the API starts
 
     def provider_enabled(self, name: str) -> bool:

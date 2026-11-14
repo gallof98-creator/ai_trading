@@ -48,6 +48,25 @@ class NotificationSettings(BaseModel):
     muted_categories: list[str] = Field(default_factory=list, max_length=50)
 
 
+class AutopilotSettings(BaseModel):
+    """What the platform does by itself. It never sends an order on its own in semi-automatic mode: it prepares
+    data, validates strategies and creates proposals; a person still approves each order."""
+
+    enabled: bool = False
+    broker_id: str = Field("", max_length=64)  # empty = the first account that can trade
+    cycle_minutes: int = Field(15, ge=5, le=1440)
+    max_instruments: int = Field(30, ge=1, le=200)
+    strategies: list[str] = Field(default_factory=lambda: ["ema_crossover", "macd", "donchian_breakout", "momentum_breakout", "rsi_reversion",
+                                                           "volatility_expansion"], max_length=20)
+    timeframes: list[Literal["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]] = Field(default_factory=lambda: ["1d"], max_length=4)
+    seed_most_active: bool = True     # add the most traded US stocks to the universe when it is too small
+    daily_price_update: bool = True
+    live_subscribe: bool = True       # request live prices for instruments with a validated strategy
+    min_price: float = Field(5.0, ge=0)
+    min_traded_value: float = Field(20_000_000.0, ge=0)  # 20-day average traded value, quote currency
+    validations_per_cycle: int = Field(25, ge=1, le=500)
+
+
 class UserSettings(BaseModel):
     base_currency: str = Field("EUR", pattern=r"^[A-Z]{3,5}$")
     # No default on purpose: paper accounts cannot start until the user sets this.
@@ -64,6 +83,7 @@ class UserSettings(BaseModel):
     live_orders_require_approval: bool = True
     risk: RiskLimits = RiskLimits()
     notifications: NotificationSettings = NotificationSettings()
+    autopilot: AutopilotSettings = AutopilotSettings()
 
     @model_validator(mode="after")
     def _automatic_needs_confirmed_limits(self) -> "UserSettings":

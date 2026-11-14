@@ -27,6 +27,28 @@ Automatic mode cannot be selected until the box "I have reviewed the daily-loss,
 Pause and Emergency Stop both engage the kill switch: no new risk can be taken. Positions keep their stops; whether working orders
 are cancelled or positions closed follows the emergency policy in Settings (default: nothing is liquidated).
 
+## Autopilot
+
+Off by default; switched on from the Autonomous Quant page. Every cycle (15 minutes by default) it does what would otherwise need clicks:
+
+| Step | What it does | Needs |
+|---|---|---|
+| Exchange rates | Fetches the European Central Bank's daily reference rates | internet |
+| Universe | When fewer instruments than configured have prices, adds the most traded US stocks (Alpaca's screener) and downloads their history | Alpaca key |
+| Prices | Brings daily prices up to date once a day | Alpaca key |
+| Candidates | Keeps the most traded instruments above the price and traded-value floors that the account can trade, plus anything with a live feed | - |
+| Validation | Runs the walk-forward validation of each chosen strategy on each candidate; redoes it when it is older than 30 days | - |
+| Live prices | Subscribes instruments that have a validated strategy | a live source |
+| Scan | Creates a proposal wherever a validated strategy opens a position on its latest bar | - |
+
+Each step reports what it did or why it was skipped, and one failing step does not stop the others. Every minute, independently of the
+cycle, lapsed proposals are removed and orders working at an external broker are followed up.
+
+What it does not do: it never changes the trading mode or a risk limit, and in semi-automatic mode it sends no order. Its output is
+proposals; a signal whose proposal was rejected or lapsed is not proposed again for the same bar. If the user selects automatic mode
+(Settings, after confirming the limits), orders of deployed strategies are sent to paper accounts without asking; real-money orders
+still wait for approval.
+
 ## One data source: Alpaca
 
 A default installation uses Alpaca for everything: the instrument list (`/v2/assets`), daily history, live prices and trading.

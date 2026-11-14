@@ -37,5 +37,6 @@ export type UserSettings = {
   base_currency: string; initial_paper_capital: number | null; trading_mode: "manual" | "semi_auto" | "auto";
   fx_conversion_cost_bps: number; live_orders_require_approval: boolean; risk: RiskLimits;
   proposal_ttl_minutes: number; max_entry_drift: number; safety_limits_confirmed: boolean;
+  autopilot: Record<string, unknown>;
   notifications: { external_min_severity: "info" | "warning" | "critical"; muted_categories: string[] };
 };

@@ -129,6 +129,9 @@ class TradingRuntime:
 
         self.live_hub = LiveHub(clock, on_bar=self._on_live_bar)
         self.live = LiveFeed(self.live_hub)
+        from ..quant_ai.autopilot import Autopilot
+
+        self.autopilot = Autopilot(self)
         self.live_source_factory = None  # test hook: callable(runtime) -> list[(LiveSource, route)]
         self.driven: dict[str, str] = {}  # instrument -> last stored daily bar fed to the engine for global (portfolio) strategies
         from ..global_markets.service import GlobalMarkets

@@ -229,3 +229,21 @@ def test_continuous_futures_back_adjustment_preserves_price_changes():
     assert series.close.iloc[-1] == pytest.approx(base.iloc[-1] + 3)  # latest prices are real, history is shifted
     with pytest.raises(ValueError, match="overlap"):
         build_continuous([("H", idx[24], front), ("M", idx[39], contract(3, slice(30, 40)))])
+
+
+def test_fx_uses_the_newest_observation_whichever_way_the_pair_was_recorded():
+    from datetime import datetime, timedelta, timezone
+
+    from app.market_data.fx import FxRateProvider, FxRateUnavailable
+
+    t0 = datetime(2026, 1, 5, 12, tzinfo=timezone.utc)
+    fx = FxRateProvider(max_age=timedelta(days=5))
+    fx.add_rate("USD", "EUR", t0, 0.90, "manual")
+    assert fx.quote("USD", "EUR", t0 + timedelta(days=1)).rate == 0.90
+    with pytest.raises(FxRateUnavailable):
+        fx.quote("USD", "EUR", t0 + timedelta(days=30))
+    fx.add_rate("EUR", "USD", t0 + timedelta(days=29), 1.25, "ecb")  # published the other way round, a month later
+    q = fx.quote("USD", "EUR", t0 + timedelta(days=30))
+    assert q.rate == pytest.approx(0.8) and q.source == "ecb"       # the stale manual rate no longer hides the fresh one
+    assert fx.quote("EUR", "USD", t0 + timedelta(days=30)).rate == 1.25
+    assert fx.quote("USD", "EUR", t0 + timedelta(days=1)).rate == 0.90  # no look-ahead: an earlier moment still sees the earlier rate

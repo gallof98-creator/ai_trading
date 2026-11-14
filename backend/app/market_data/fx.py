@@ -56,6 +56,9 @@ class FxRateProvider:
         self._rows[key].insert(i, (rate, source))
 
     def _direct(self, a: str, b: str, ts: datetime) -> FxQuote | None:
+        """The newest observation at or before `ts`, whichever way round the pair was recorded (a rate entered as
+        USD/EUR and a later one published as EUR/USD describe the same thing: the later one wins)."""
+        best = None
         for key, invert in (((a, b), False), ((b, a), True)):
             times = self._ts.get(key)
             if not times:
@@ -63,11 +66,15 @@ class FxRateProvider:
             i = bisect.bisect_right(times, ts) - 1
             if i < 0:
                 continue
-            if ts - times[i] > self.max_age and self._rows[key][i][1] != STATIC_SOURCE:
-                raise FxRateUnavailable(f"Newest {a}/{b} rate at {ts.isoformat()} is from {times[i].isoformat()} (older than {self.max_age})")
             rate, source = self._rows[key][i]
-            return FxQuote(1 / rate if invert else rate, times[i], source)
-        return None
+            if best is None or times[i] > best[0]:
+                best = (times[i], 1 / rate if invert else rate, source)
+        if best is None:
+            return None
+        when, rate, source = best
+        if ts - when > self.max_age and source != STATIC_SOURCE:
+            raise FxRateUnavailable(f"Newest {a}/{b} rate at {ts.isoformat()} is from {when.isoformat()} (older than {self.max_age})")
+        return FxQuote(rate, when, source)
 
     def quote(self, from_ccy: str, to_ccy: str, ts: datetime) -> FxQuote:
         if ts.tzinfo is None:

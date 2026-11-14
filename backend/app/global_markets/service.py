@@ -262,7 +262,7 @@ class GlobalMarkets:
         now = now or datetime.now(timezone.utc)
         for name in DISCOVERY_CLASSES:
             try:
-                if self.runtime._provider_key(name) is None:
+                if not self.runtime.settings.provider_enabled(name) or self.runtime._provider_key(name) is None:
                     continue
             except Exception:
                 continue

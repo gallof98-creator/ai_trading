@@ -52,6 +52,15 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
                         log.error("feed_tick_failed", error=str(exc))
 
             task = asyncio.create_task(loop())
+        async def autopilot_loop() -> None:
+            while True:
+                await asyncio.sleep(settings.autopilot_tick_seconds)
+                try:
+                    await asyncio.to_thread(runtime.autopilot.tick)
+                except Exception as exc:  # the next minute tries again
+                    log.error("autopilot_tick_failed", error=str(exc))
+
+        autopilot_task = asyncio.create_task(autopilot_loop()) if settings.autopilot_tick_seconds > 0 else None
         catalog_task = None
         if settings.catalog_sync_hours > 0:
             async def catalog_loop() -> None:
@@ -64,7 +73,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
 
             catalog_task = asyncio.create_task(catalog_loop())
         yield
-        for t in (task, catalog_task):
+        for t in (task, catalog_task, autopilot_task):
             if t:
                 t.cancel()
 

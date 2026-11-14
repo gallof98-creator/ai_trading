@@ -147,7 +147,8 @@ def validations(session: Session, now: datetime | None = None) -> list[dict]:
             continue
         seen.add(r.title)
         expired = now is not None and datetime.fromisoformat(r.payload["valid_until"]) < now
-        out.append({"id": r.id, "status": "expired" if expired and r.status == "validated" else r.status, "tested_at": r.created_at.isoformat(), **r.payload})
+        out.append({"id": r.id, "status": "expired" if expired and r.status == "validated" else r.status, "tested_at": r.created_at.isoformat(),
+                    "due_for_retest": bool(expired), **r.payload})
     return out
 
 
@@ -264,7 +265,7 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
             proposed.append({**label, "proposal_ids": new, "regime": regime})
         else:
             reason = next((o.reason for o in orders if o.status.value == "rejected"), None)
-            skip(f"refused by the risk engine: {reason}" if reason else "already proposed or already in position for this bar")
+            skip(f"refused by the risk engine: {reason}" if reason else "already proposed for this bar (it was rejected or lapsed), or already in position")
     return {"scanned_at": now.isoformat(), "broker_id": broker_id, "proposed": proposed, "skipped": skipped,
             "validated": sum(1 for v in validations(session, now) if v["status"] == "validated")}
 
