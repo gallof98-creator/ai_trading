@@ -239,6 +239,9 @@ class AlpacaAdapter(BrokerAdapter):
             reasons.append("Alpaca does not accept plain stop orders for crypto")
         if not crypto and abs(order.qty - round(order.qty)) > 1e-9 and (order.type is not OrderType.MARKET or not asset.get("fractionable", False)):
             reasons.append("fractional share quantities are accepted only for market orders in fractionable stocks")
+        price = order.limit_price or order.stop_price
+        if not crypto and price and order.qty * price < 1.0:
+            reasons.append("Alpaca does not accept orders worth less than 1 USD")
         if not order.reduce_only and order.side is Side.BUY:
             try:
                 power = self.broker_account()["buying_power"]

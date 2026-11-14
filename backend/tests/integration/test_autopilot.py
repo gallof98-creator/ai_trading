@@ -76,6 +76,7 @@ def rt(tmp_path):
 
 
 def configure(rt, **kw):
+    kw.setdefault("allow_short", True)  # the trend rule then trades often enough on the test series to be fully validated
     cfg = AutopilotSettings(enabled=True, strategies=["ema_crossover", "rsi_reversion"], max_instruments=10, min_traded_value=1e6, **kw)
     with rt.db.session() as s:
         save_settings(s, initial_settings().model_copy(update={"autopilot": cfg}))
@@ -88,7 +89,7 @@ def test_a_cycle_goes_from_an_empty_universe_to_a_proposal_without_a_click(rt):
     out = rt.autopilot.tick()
     assert out["universe"]["added"] == ["STOCK:AAA", "STOCK:BBB", "STOCK:CCC", "STOCK:NOPE"] and out["universe"]["histories_requested"] == 4
     assert out["candidates"] == {"count": 2, "by_liquidity": 2, "live_only": 0, "broker_id": "paper-main"}  # the penny stock and the one without data are left out
-    assert out["validation"] == {"run": 4, "passed": 2, "could_not_run": 0, "remaining": 0}  # the trend rule passes, the mean-reversion rule does not
+    assert out["validation"] == {"run": 4, "passed": 2, "candidates": 0, "could_not_run": 0, "remaining": 0}  # the trend rule passes, the mean-reversion rule does not
     assert out["live"] == {"subscribed": 2, "no_live_source": 0} and set(rt.live.subscribed) == {"STOCK:AAA", "STOCK:BBB"}
     assert out["scan"]["validated_setups"] == 2 and out["scan"]["proposed"] == 1
     assert any("rsi_reversion AAA 1d: did not pass validation" == r for r in out["scan"]["reasons"])
@@ -100,15 +101,19 @@ def test_a_cycle_goes_from_an_empty_universe_to_a_proposal_without_a_click(rt):
     assert rt.user_settings.trading_mode == "semi_auto" and rt.user_settings.risk.risk_per_trade == 0.02
     st = rt.autopilot.status()
     assert st["sends_orders_by_itself"] is False and st["cycles"] == 1 and st["alpaca_key"] and "every order still waits for your approval" in st["note"]
-    assert any("1 new proposal" in a["text"] for a in st["activity"]) and any("validations run, 2 passed" in a["text"] for a in st["activity"])
+    assert any("1 new proposal" in a["text"] for a in st["activity"]) and any("4 validations run: 2 validated, 0 candidates, 2 rejected" in a["text"] for a in st["activity"])
 
     # Not due yet: the next tick does nothing. Once due, nothing is repeated needlessly.
     assert rt.autopilot.tick() is None
     rt.now[0] += timedelta(minutes=16)
     again = rt.autopilot.tick()
     assert "skipped" in again["universe"] and "skipped" in again["prices"] and again["validation"]["run"] == 0 and again["scan"]["proposed"] == 0
-    # The first proposal lapsed after fifteen minutes; the same signal is not proposed a second time.
-    assert rt.proposals() == [] and any("lapsed" in r for r in again["scan"]["reasons"])
+    assert len(rt.proposals()) == 1 and again["scan"]["funnel"]["already"] == 1  # still waiting for a decision: not duplicated
+    assert again["scan"]["blockers"][0][1] >= 1 and isinstance(again["scan"]["blockers"][0][0], str)
+    # A proposal from a daily bar lives twelve hours. Once it has lapsed, the same entry is not proposed a second time.
+    rt.now[0] += timedelta(hours=13)
+    later = rt.autopilot.tick()
+    assert rt.proposals() == [] and later["scan"]["proposed"] == 0 and any("lapsed" in r for r in later["scan"]["reasons"])
 
 
 def test_prices_are_refreshed_daily_and_expired_validations_are_redone(rt):
@@ -171,4 +176,19 @@ def test_autopilot_endpoints(client):
     assert saved["enabled"] is True and saved["settings"]["max_instruments"] == 12
     assert client.get("/api/settings", headers=admin).json()["autopilot"]["enabled"] is True
     assert client.post("/api/quant/autopilot/run", headers=viewer).status_code == 403
+    client.app.state.container.runtime.autopilot.fetch_fx = lambda: []  # the background cycle must not reach the internet from a test
     assert client.post("/api/quant/autopilot/run", headers=admin).status_code == 202
+
+
+def test_long_only_default_reaches_the_candidate_level_and_trades_it_on_paper_only_when_allowed(rt):
+    configure(rt, allow_short=False)
+    out = rt.autopilot.tick()
+    assert out["validation"]["passed"] == 0 and out["validation"]["candidates"] == 2 and out["scan"]["candidate_setups"] == 2
+    assert out["scan"]["proposed"] == 1 and rt.proposals()[0]["rationale"]["validation"]["level"] == "candidate"
+    assert rt.proposals()[0]["side"] == "BUY"  # long-only: never a short sale
+
+    other = rt  # a second pass with candidates switched off proposes nothing new and says why
+    configure(other, allow_short=False, paper_candidates=False)
+    other.now[0] += timedelta(minutes=16)
+    again = other.autopilot.tick()
+    assert again["scan"]["proposed"] == 0 and any("candidate only" in r for r in again["scan"]["reasons"])

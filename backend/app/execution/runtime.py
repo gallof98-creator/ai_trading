@@ -181,6 +181,7 @@ class TradingRuntime:
                 self.fx.add_rate(row.base, row.quote, ts, float(row.rate), row.source)
             for row in session.scalars(select(InstrumentRow).where(InstrumentRow.is_active.is_(True))):
                 self.registry.register(Instrument.model_validate(row.spec))
+            self._apply_share_lots()
             for account in session.scalars(select(BrokerAccount).where(BrokerAccount.adapter == "paper")):
                 state = session.get(AppSetting, f"paper:{account.id}")
                 if state is not None:
@@ -208,8 +209,18 @@ class TradingRuntime:
 
     def reload_settings(self, session: Session) -> None:
         self.user_settings = load_settings(session)
+        self._apply_share_lots()
         self.fx.conversion_cost_bps = self.user_settings.fx_conversion_cost_bps
         self.portfolio.base = self.engine.base = self.user_settings.base_currency
+
+    FRACTION = 0.0001  # smallest share quantity when fractional shares are on
+
+    def _apply_share_lots(self) -> None:
+        """US stocks and ETFs trade in fractions of a share when the user allows it, otherwise in whole shares."""
+        lot = self.FRACTION if self.user_settings.fractional_shares else 1.0
+        for inst in self.registry.all():
+            if inst.asset_class in (AssetClass.STOCK, AssetClass.ETF) and market_of(inst) == "US" and inst.lot_size in (1.0, self.FRACTION) and inst.lot_size != lot:
+                self.registry.register(inst.model_copy(update={"lot_size": lot, "min_qty": lot}))
 
     def persist(self) -> None:
         def write(session: Session) -> None:
@@ -458,6 +469,7 @@ class TradingRuntime:
             for adapter in self.brokers.all():
                 if isinstance(adapter, SimulatedBroker):
                     adapter.map_all_instruments()
+            self._apply_share_lots()
             if out["created"]:
                 audit.record(session, actor, "instruments.added", market=market, count=len(out["created"]), ids=out["created"][:200])
         return out

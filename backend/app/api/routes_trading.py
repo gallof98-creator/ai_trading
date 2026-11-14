@@ -70,7 +70,9 @@ def instruments(q: str = "", limit: int = 300, has_data: bool | None = None, _: 
     with rt.lock:
         builtin = {i.id for i in default_instruments()}
         rows = [i for i in rt.registry.all() if (not needle or needle in i.id.upper()) and (has_data is None or (i.id in series) == has_data)]
-        rows.sort(key=lambda i: (i.id not in series and i.id not in builtin, i.id))
+        # An exact ticker match first, then tickers that start with the text, then the rest; instruments with prices before those without.
+        rows.sort(key=lambda i: (bool(needle) and i.symbol.upper() != needle, bool(needle) and not i.symbol.upper().startswith(needle),
+                                 i.id not in series and i.id not in builtin, i.id))
         rows = rows[: max(1, min(limit, 2000))]
         # Last price: a fresh live tick when there is one, otherwise the close of the newest stored bar, each labelled as what it is.
         keys = [(i.id, newest[i.id][1], newest[i.id][0]) for i in rows if i.id in newest]

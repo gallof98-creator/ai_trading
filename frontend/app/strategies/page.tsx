@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { ParamForm } from "@/components/ParamForm";
+import { InstrumentPicker } from "@/components/InstrumentPicker";
 import { Shell } from "@/components/Shell";
 import { Badge, Button, Field, type Json, Msg, num, Panel, pct, post, signed, Table, TIMEFRAMES, tone, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
@@ -8,7 +9,6 @@ import type { User } from "@/services/api";
 function Strategies({ user }: { user: User }) {
   const library = useApi("/api/strategies");
   const deployments = useApi("/api/deployments", 15_000);
-  const instruments = useApi("/api/instruments");
   const brokers = useApi("/api/brokers/status");
   const [selected, setSelected] = useState<Json>(null);
   const [params, setParams] = useState<Record<string, Json>>({});
@@ -82,7 +82,7 @@ function Strategies({ user }: { user: User }) {
             <div className="space-y-4">
               <ParamForm schema={selected.params_schema} value={params} onChange={setParams} />
               <div className="grid gap-3 sm:grid-cols-3">
-                <Field label="Instrument"><select value={target.instrument_id} onChange={(e) => setTarget({ ...target, instrument_id: e.target.value })}>{(instruments.data ?? []).map((i: Json) => <option key={i.id}>{i.id}</option>)}</select></Field>
+                <Field label="Instrument"><InstrumentPicker value={target.instrument_id} onChange={(id) => setTarget({ ...target, instrument_id: id })} /></Field>
                 <Field label="Timeframe"><select value={target.timeframe} onChange={(e) => setTarget({ ...target, timeframe: e.target.value })}>{TIMEFRAMES.map((t) => <option key={t}>{t}</option>)}</select></Field>
                 <Field label="Account"><select value={target.broker_id} onChange={(e) => setTarget({ ...target, broker_id: e.target.value })}>{tradable.map((b: Json) => <option key={b.id}>{b.id}</option>)}</select></Field>
               </div>

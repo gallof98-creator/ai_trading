@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { CalibrationChart, PlainBars } from "@/components/charts/Charts";
+import { InstrumentPicker } from "@/components/InstrumentPicker";
 import { Shell } from "@/components/Shell";
 import { useActiveSymbol } from "@/components/symbol";
 import { Badge, Button, Field, type Json, Msg, Notice, num, Panel, pct, post, Stat, Table, TIMEFRAMES, tone, useAction, useApi, when } from "@/components/ui";
@@ -10,7 +11,6 @@ const MODELS = ["logistic_regression", "random_forest", "gradient_boosting", "xg
 const statusKind = (s: string) => (s === "validated" || s === "applied" ? "up" : s === "rejected" || s === "failed_validation" ? "down" : "dim");
 
 function QuantAI({ user }: { user: User }) {
-  const instruments = useApi("/api/instruments");
   const library = useApi("/api/strategies");
   const brokers = useApi("/api/brokers/status");
   const [iid, setIid] = useActiveSymbol("CRYPTO:BTC/USDT", true);
@@ -34,7 +34,7 @@ function QuantAI({ user }: { user: User }) {
     <div className="space-y-4">
       <Panel title="Research scope" right={<Msg msg={act.msg} />}>
         <div className="grid gap-3 sm:grid-cols-4">
-          <Field label="Instrument"><select value={iid} onChange={(e) => setIid(e.target.value)}>{(instruments.data ?? []).map((i: Json) => <option key={i.id}>{i.id}</option>)}</select></Field>
+          <Field label="Instrument"><InstrumentPicker value={iid} onChange={(id, row) => { setIid(id); if (row?.series.length && !row.series.some((c) => c.timeframe === tf)) setTf(row.series[0].timeframe); }} /></Field>
           <Field label="Timeframe"><select value={tf} onChange={(e) => setTf(e.target.value)}>{TIMEFRAMES.map((t) => <option key={t}>{t}</option>)}</select></Field>
         </div>
       </Panel>

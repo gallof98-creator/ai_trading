@@ -49,12 +49,14 @@ class ScanIn(BaseModel):
     broker_id: str = Field(min_length=1, max_length=64)
     instrument_ids: list[str] = Field(default_factory=list, max_length=500)
     min_traded_value: float = Field(0.0, ge=0)
+    include_candidates: bool = False
+    require_regime_fit: bool = False
 
 
 @router.post("/scan")
 def scan(body: ScanIn, user: User = Depends(trader), session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> dict:
     try:
-        return opportunities.scan(session, rt, body.broker_id, user.email, body.instrument_ids or None, body.min_traded_value)
+        return opportunities.scan(session, rt, body.broker_id, user.email, body.instrument_ids or None, body.min_traded_value, body.include_candidates, body.require_regime_fit)
     except (ValueError, RuntimeError_) as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
 

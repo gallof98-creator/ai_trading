@@ -68,9 +68,9 @@ def test_the_nine_modules_cover_every_strategy_and_state_what_they_are():
 
 def test_validation_needs_several_unseen_periods_and_is_recorded(rt):
     with rt.db.session() as s:
-        good = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin")
-        bad = opp.validate(s, rt, "rsi_reversion", CYC, "1d", "admin")
-        fake = opp.validate(s, rt, "ema_crossover", "CRYPTO:SIM/USD", "1d", "admin")
+        good = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
+        bad = opp.validate(s, rt, "rsi_reversion", CYC, "1d", "admin", allow_short=True)
+        fake = opp.validate(s, rt, "ema_crossover", "CRYPTO:SIM/USD", "1d", "admin", allow_short=True)
     assert good["status"] == "validated" and all(c["passed"] for c in good["checks"]) and len(good["checks"]) == 7
     assert good["profitable_folds"] >= 3 and good["out_of_sample"]["number_of_trades"] >= 20 and good["family"] == "trend_following" and good["horizon"] == "swing"
     assert good["params"]["take_profit_atr"] == 4.0 and good["params"]["stop_atr"] in (1.5, 2.0, 2.5) and "does not mean it will be profitable" in good["caveat"]
@@ -88,18 +88,21 @@ def test_validation_needs_several_unseen_periods_and_is_recorded(rt):
 
 def test_scan_proposes_only_validated_strategies_and_explains_itself(rt):
     with rt.db.session() as s:
-        assert opp.scan(s, rt, "paper-main", "admin") == {"scanned_at": rt.clock().isoformat(), "broker_id": "paper-main", "proposed": [], "skipped": [], "validated": 0}
-        opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin")
-        opp.validate(s, rt, "rsi_reversion", CYC, "1d", "admin")
+        assert opp.scan(s, rt, "paper-main", "admin") == {"scanned_at": rt.clock().isoformat(), "broker_id": "paper-main", "proposed": [], "sent": [], "skipped": [],
+                                                              "funnel": {"setups": 0}, "validated": 0, "candidates": 0}
+        opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
+        opp.validate(s, rt, "rsi_reversion", CYC, "1d", "admin", allow_short=True)
     with rt.db.session() as s:
         out = opp.scan(s, rt, "paper-main", "admin")
     assert [(p["strategy"], p["instrument_id"]) for p in out["proposed"]] == [("ema_crossover", CYC)]
-    assert {"strategy": "rsi_reversion", "instrument_id": CYC, "timeframe": "1d", "reason": "did not pass validation"} in out["skipped"]
+    assert {"strategy": "rsi_reversion", "instrument_id": CYC, "timeframe": "1d", "stage": "validation", "reason": "did not pass validation"} in out["skipped"]
+    assert out["funnel"] == {"setups": 2, "validation": 1, "proposed": 1} and out["sent"] == []
     assert not [o for o in rt.engine.orders.values() if o.status is OrderStatus.SUBMITTED]  # a scan sends nothing
     [p] = rt.proposals()
     bars = rt.test_bars
     assert p["side"] == "BUY" and p["strategy"] == "ema_crossover" and p["timeframe"] == "1d" and p["entry_price"] == pytest.approx(bars["close"].iloc[-1])
     assert p["risk_base"] <= 20.0 and p["stop_price"] < p["entry_price"] < p["take_profit_price"]
+    assert 11.5 * 3600 < p["seconds_left"] <= 12 * 3600  # a daily signal stays open for half a day, not fifteen minutes
     r = p["rationale"]
     assert r["opportunity"]["family"] == "trend_following" and r["opportunity"]["horizon"] == "swing" and r["opportunity"]["regime"] in r["opportunity"]["regime_fits"]
     assert f"{bars.index[-1]:%Y-%m-%d %H:%M}" in r["opportunity"]["why"] and f"{bars['close'].iloc[-1]:g}" in r["opportunity"]["why"]  # checkable against the stored bar
@@ -134,7 +137,7 @@ def test_scan_proposes_only_validated_strategies_and_explains_itself(rt):
 
 def test_scan_refuses_stale_prices_untradable_instruments_and_a_halted_engine(rt):
     with rt.db.session() as s:
-        opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin")
+        opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
     rt.now[0] += timedelta(days=6)
     with rt.db.session() as s:
         stale = opp.scan(s, rt, "paper-main", "admin")
@@ -171,3 +174,30 @@ def test_quant_endpoints_over_http(client):
     assert client.get("/api/quant/dashboard", headers=viewer).json()["overview"]["risk"]["halted"] is True
     assert client.post("/api/quant/resume", headers=admin).status_code == 204
     assert client.get("/api/proposals", headers=viewer).json() == []
+
+
+def test_candidate_level_is_weaker_evidence_labelled_and_kept_to_paper_accounts(rt):
+    """Long-only, the same rule trades half as often: profitable on most unseen periods, but on too few trades to be validated."""
+    from app.brokers.ccxt_adapter import CcxtAdapter
+    from tests.execution.fakes import FakeCcxt
+
+    with rt.db.session() as s:
+        v = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin")  # long-only is the default
+    assert v["status"] == "candidate" and v["long_only"] is True and v["params"]["allow_short"] is False
+    assert all(c["passed"] for c in v["candidate_checks"]) and not all(c["passed"] for c in v["checks"])
+    assert [c["name"] for c in v["checks"] if not c["passed"]] == ["at least 20 trades on unseen data"] and "by chance" in v["caveat"]
+    with rt.db.session() as s:
+        strict = opp.scan(s, rt, "paper-main", "admin")
+    assert strict["proposed"] == [] and "candidate only" in strict["skipped"][0]["reason"] and strict["candidates"] == 1 and strict["validated"] == 0
+    rt.brokers.register(CcxtAdapter("exchange-x", rt.registry, FakeCcxt()))
+    rt.brokers.get("exchange-x").connect()
+    rt.registry.map_symbol("exchange-x", CYC, "CYC/USD")
+    with rt.db.session() as s:
+        real = opp.scan(s, rt, "exchange-x", "admin", include_candidates=True)
+    assert real["proposed"] == [] and any("never on a broker account" in x["reason"] for x in real["skipped"])
+    rt.brokers.remove("exchange-x")
+    with rt.db.session() as s:
+        paper = opp.scan(s, rt, "paper-main", "admin", include_candidates=True)
+    assert len(paper["proposed"]) == 1
+    [p] = rt.proposals()
+    assert p["rationale"]["validation"]["level"] == "candidate" and "by chance" in p["rationale"]["validation"]["caveat"]

@@ -318,3 +318,26 @@ def test_real_money_orders_wait_for_approval_even_in_auto_mode():
     assert order.status is OrderStatus.PENDING_APPROVAL and h.exchange.create_calls == 0
     sent = h.engine.resolve_approval(next(iter(h.engine.approvals)), True, "admin@example.com", T0)
     assert sent.status is OrderStatus.SUBMITTED and h.exchange.create_calls == 1
+
+
+def test_orders_sent_but_not_yet_filled_count_towards_the_exposure_limits():
+    """Two strategies entering the same instrument before either order fills must not together exceed the per-asset limit."""
+    limits = RiskLimits(max_exposure_per_asset=0.25, max_exposure_per_strategy=5, max_exposure_per_broker=5, max_gross_leverage=5,
+                        max_margin_utilization=1, max_correlated_exposure=5)
+    h = Harness(limits=limits)
+    ts = h.bar(100, 101, 99, 100)
+    (first,) = h.signal(1, ts, stop=1.0)   # a tight stop would allow 1,000 units; the 25% limit caps it at 250 (25,000 at 100)
+    assert first.status is OrderStatus.SUBMITTED and first.qty == pytest.approx(250.0, rel=1e-4)
+    other = Deployment("d2", create_strategy("macd"), BTC, "1h", "paper")
+    # Nothing has filled yet, but the room in this instrument is already spoken for: the second strategy gets (next to) nothing.
+    second = h.signal(1, ts, stop=1.0, dep=other)
+    assert sum(o.qty for o in second) < 0.01
+    assert h.engine._risk_state(ts).gross_exposure <= 25_000 * (1 + 1e-6)
+    ts = h.bar(100, 101, 99.5, 100)     # the orders fill (the low stays above the 99 stop); the limit is still the same 25%
+    assert h.portfolio.qty(h.dep.key) == pytest.approx(250, rel=1e-4)
+    assert sum(o.qty for o in h.signal(1, ts, stop=1.0, dep=Deployment("d3", create_strategy("adx_trend"), BTC, "1h", "paper"))) < 0.01
+    assert h.engine._risk_state(ts).gross_exposure == pytest.approx(25_000, rel=1e-4)   # counted once: as positions, no longer as working orders
+
+    restarted = Harness(limits=limits)
+    restarted.engine.load_state({**h.engine.to_state(), "working": {"ghost": 5.0}})
+    assert restarted.engine._risk_state(ts).gross_exposure == 0   # an entry that is no longer open stops counting

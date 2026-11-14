@@ -43,6 +43,10 @@ function TradingSettings({ readOnly }: { readOnly: boolean }) {
             <Field label="A proposed order lapses after (minutes)"><input type="number" min="1" max="1440" value={s.proposal_ttl_minutes} onChange={(e) => setS({ ...s, proposal_ttl_minutes: Number(e.target.value) })} /></Field>
             <Field label="Void a proposal if price moved more than (% of its stop distance)"><input type="number" min="1" step="any" value={+(s.max_entry_drift * 100).toFixed(4)} onChange={(e) => setS({ ...s, max_entry_drift: Number(e.target.value) / 100 })} /></Field>
             <label className="flex items-center gap-2 text-xs text-dim sm:col-span-2">
+              <input type="checkbox" className="!w-auto" checked={s.fractional_shares} onChange={(e) => setS({ ...s, fractional_shares: e.target.checked })} />
+              Fractional shares for US stocks and ETFs (needed with a small capital: otherwise one share of an expensive stock is out of reach)
+            </label>
+            <label className="flex items-center gap-2 text-xs text-dim sm:col-span-2">
               <input type="checkbox" className="!w-auto" checked={s.safety_limits_confirmed} onChange={(e) => setS({ ...s, safety_limits_confirmed: e.target.checked })} />
               I have reviewed the daily-loss, drawdown and exposure limits on this page (required before automatic mode can be selected)
             </label>

@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { InstrumentPicker } from "@/components/InstrumentPicker";
 import { Shell } from "@/components/Shell";
 import { Badge, Button, Field, type Json, Msg, Notice, num, Panel, parseFx, post, SimBadge, Table, TIMEFRAMES, useAction, useApi, when } from "@/components/ui";
 import type { Health, User } from "@/services/api";
@@ -12,7 +13,6 @@ function Execution({ user }: { user: User }) {
   const approvals = useApi("/api/approvals", 5_000);
   const orders = useApi("/api/orders?limit=150", 10_000);
   const fills = useApi("/api/fills?limit=100", 10_000);
-  const instruments = useApi("/api/instruments");
   const settings = useApi("/api/settings");
   const log = useApi(user.role === "admin" ? "/api/audit?limit=80" : null, 20_000);
   const [account, setAccount] = useState({ id: "paper-main", label: "Main paper account" });
@@ -52,7 +52,7 @@ function Execution({ user }: { user: User }) {
                 <h3 className="text-sm font-semibold">Simulated market replay</h3>
                 <p className="mt-1 text-xs text-dim">Feeds seeded random-walk bars to the paper engine so you can watch the full pipeline without a market-data connection. Needs an active strategy on the instrument and timeframe. Not market data.</p>
                 <div className="mt-2 grid gap-3 sm:grid-cols-5">
-                  <Field label="Instrument"><select value={replay.instrument_id} onChange={(e) => setReplay({ ...replay, instrument_id: e.target.value })}>{(instruments.data ?? []).map((i: Json) => <option key={i.id}>{i.id}</option>)}</select></Field>
+                  <Field label="Instrument"><InstrumentPicker value={replay.instrument_id} onChange={(id) => setReplay({ ...replay, instrument_id: id })} /></Field>
                   <Field label="Timeframe"><select value={replay.timeframe} onChange={(e) => setReplay({ ...replay, timeframe: e.target.value })}>{TIMEFRAMES.map((t) => <option key={t}>{t}</option>)}</select></Field>
                   <Field label="Bars"><input type="number" min="1" max="1000" value={replay.bars} onChange={(e) => setReplay({ ...replay, bars: Number(e.target.value) })} /></Field>
                   <Field label="Seed"><input type="number" min="0" value={replay.seed} onChange={(e) => setReplay({ ...replay, seed: Number(e.target.value) })} /></Field>

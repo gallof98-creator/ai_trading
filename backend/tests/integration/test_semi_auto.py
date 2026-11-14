@@ -339,6 +339,8 @@ def test_semi_automatic_flow_through_alpaca_paper_with_a_virtual_eur_ledger(tmp_
     db = Database(f"sqlite:///{tmp_path}/a.db")
     db.create_all()
     now = [T0]
+    with db.session() as s:  # whole shares here, so that the protective stop can rest at the broker
+        save_settings(s, initial_settings().model_copy(update={"fractional_shares": False}))
     rt = TradingRuntime(db, Settings(_env_file=None, credential_key=key), clock=lambda: now[0])
     rt.start()
     rt.now = now
@@ -391,3 +393,43 @@ def test_semi_automatic_flow_through_alpaca_paper_with_a_virtual_eur_ledger(tmp_
     again.connect_broker("alpaca-paper", "admin", http_client=fake.client())
     assert again.brokers.get("alpaca-paper").get_account_balance().equity == pytest.approx(1080 + 30)
     rt.live.stop()
+
+
+def test_fractional_shares_make_expensive_stocks_tradable_and_are_handled_honestly_at_alpaca(tmp_path):
+    # 1,000 EUR, 25% per instrument = 250 EUR: not enough for one whole share of a 400 USD stock.
+    whole = Instrument(id="STOCK:X", asset_class=AssetClass.STOCK, symbol="X", quote_currency="USD", calendar="XNYS", lot_size=1, min_qty=1)
+    fraction = whole.model_copy(update={"lot_size": 0.0001, "min_qty": 0.0001})
+    assert position_size(1000, 0.02, 20.0, 400.0, whole, 0.9, max_notional=250) == 0
+    assert position_size(1000, 0.02, 20.0, 400.0, fraction, 0.9, max_notional=250) == pytest.approx(0.6944, abs=1e-4)
+
+    db = Database(f"sqlite:///{tmp_path}/f.db")
+    db.create_all()
+    rt = TradingRuntime(db, Settings(_env_file=None))
+    rt.start()  # initial profile: fractional shares on
+    assert rt.user_settings.fractional_shares and rt.registry.get("STOCK:AAPL").lot_size == 0.0001 and rt.registry.get("ETF:SPY").min_qty == 0.0001
+    assert rt.registry.get("FUTURE:ES").lot_size == 1 and rt.registry.get("CRYPTO:BTC/USDT").lot_size == 0.00001  # only US stocks and ETFs change
+    rt.add_instruments(["NEWCO"], "US", "stock", "admin")
+    assert rt.registry.get("STOCK:NEWCO").lot_size == 0.0001
+    with db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"fractional_shares": False}))
+        rt.reload_settings(s)
+    assert rt.registry.get("STOCK:AAPL").lot_size == 1 and rt.registry.get("STOCK:NEWCO").min_qty == 1
+
+    fake = FakeAlpaca()
+    a, registry = adapter(fake)
+    registry.register(registry.get("STOCK:AAPL").model_copy(update={"lot_size": 0.0001, "min_qty": 0.0001}))
+    a.connect()
+
+    def order(**kw):
+        return Order(broker_id="alpaca-paper", instrument_id="STOCK:AAPL", side=Side.BUY, qty=0.6944, **kw)
+
+    assert a.unsupported_reasons(order()) == []                                   # a fractional market order is accepted
+    sent = a.submit_order(order(client_order_id="frac-1"))
+    assert fake.orders[sent.broker_order_id]["qty"] == "0.6944" and fake.orders[sent.broker_order_id]["time_in_force"] == "day"
+    stop = Order(broker_id="alpaca-paper", instrument_id="STOCK:AAPL", side=Side.SELL, qty=0.6944, type=OrderType.STOP, stop_price=190.0, reduce_only=True)
+    assert any("fractional share quantities" in r for r in a.unsupported_reasons(stop))  # no resting stop: the platform watches it itself
+    tiny = Order(broker_id="alpaca-paper", instrument_id="STOCK:AAPL", side=Side.BUY, qty=0.0001, type=OrderType.LIMIT, limit_price=200.0)
+    assert any("less than 1 USD" in r for r in a.unsupported_reasons(tiny))
+    fake.assets[0]["fractionable"] = False
+    a.connect()
+    assert any("fractional share quantities" in r for r in a.unsupported_reasons(order()))

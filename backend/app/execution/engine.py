@@ -22,7 +22,7 @@ from ..instruments.registry import InstrumentRegistry
 from ..market_data.fx import FxRateProvider
 from ..portfolio.engine import Key, PortfolioEngine
 from ..risk.engine import RiskEngine
-from ..risk.models import EmergencyAction, OrderIntent, RiskEventRecord
+from ..risk.models import EmergencyAction, Exposure, OrderIntent, PortfolioState, RiskEventRecord
 from ..risk.sizing import position_size
 from ..strategies.base import Strategy
 
@@ -115,12 +115,28 @@ class TradingEngine:
         self._proposal_ttl = proposal_ttl or (lambda: None)
         self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
         self._rationale: dict = {}  # set while a signal is being turned into orders
+        self._working: dict[str, float] = {}  # order id -> signed notional (base currency) of entries sent but not yet filled
         self.orders: dict[str, Order] = {}
         self._client_ids: dict[str, str] = {}  # client order id -> order id (duplicate-order guard)
         self._entry_protection: dict[str, tuple[Key, tuple]] = {}
         self.protections: dict[Key, Protection] = {}
         self.approvals: dict[str, PendingApproval] = {}
         self._n = 0
+
+    def _risk_state(self, ts: datetime) -> PortfolioState:
+        """The book the risk engine judges: open positions PLUS entry orders already sent and not yet filled.
+        Without the second part, several orders sent before any of them fills could together exceed a limit."""
+        state = self.portfolio.state(ts)
+        for oid in list(self._working):
+            o = self.orders.get(oid)
+            if o is None or not o.is_open:
+                del self._working[oid]
+                continue
+            remaining = self._working[oid] * max(0.0, 1 - o.filled_qty / o.qty)
+            inst = self.registry.get(o.instrument_id)
+            state.exposures.append(Exposure(o.broker_id, o.instrument_id, o.strategy, inst.asset_class.value, inst.quote_currency, remaining,
+                                            abs(remaining) * inst.margin_rate))
+        return state
 
     # ------------------------------------------------------------------ helpers
     def _new_id(self, prefix: str = "o") -> str:
@@ -342,7 +358,7 @@ class TradingEngine:
             created.append(self._route(close, intent, None, mode, ts))
         # Entries are taken only on the bar where the strategy's target changes (never re-entered after a stop-out).
         if target != 0 and signal.action.value != "HOLD":
-            state = self.portfolio.state(ts)
+            state = self._risk_state(ts)
             if direction != 0:  # the slice being reversed is closed by the order above
                 state.exposures = [e for e in state.exposures if (e.broker_id, e.instrument_id, e.strategy) != key]
             limits = self._limits()
@@ -372,7 +388,7 @@ class TradingEngine:
                pending_close: bool = False) -> Order:
         if order.client_order_id in self._client_ids:  # the same signal was already acted on
             return self.orders[self._client_ids[order.client_order_id]]
-        state = self.portfolio.state(ts)
+        state = self._risk_state(ts)
         if pending_close:
             # The slice being reversed is closed by the order just created; judge the entry against the book without it.
             key = (order.broker_id, order.instrument_id, order.strategy)
@@ -385,6 +401,13 @@ class TradingEngine:
             self._client_ids[order.client_order_id] = order.id
             pending = order.model_copy(update={"status": OrderStatus.PENDING_APPROVAL})
             ttl = self._proposal_ttl()
+            timeframe = self._rationale.get("timeframe")
+            if ttl and timeframe:
+                # A signal from a daily bar stays actionable far longer than one from a one-minute bar: the proposal lives
+                # at least half a bar of its timeframe (never more than a day). Price and risk are re-checked on approval anyway.
+                from ..market_data.timeframes import tf_delta
+
+                ttl = max(ttl, min(tf_delta(timeframe).to_pytimedelta() / 2, timedelta(hours=24)))
             # An order that only reduces risk (closing a position) never lapses: letting it expire would leave the risk on.
             expires = (self._wall_clock() if self._wall_clock else ts) + ttl if ttl and not order.reduce_only else None
             approval = PendingApproval(self._new_id("a"), pending, intent, protection, ts, expires, dict(self._rationale))
@@ -394,6 +417,8 @@ class TradingEngine:
             return self._record(pending)
         if protection:
             self._entry_protection[order.id] = ((order.broker_id, order.instrument_id, order.strategy), protection)
+        if decision.risk_increasing:
+            self._working[order.id] = intent.signed_notional
         return self._submit(order, ts)
 
     def resolve_approval(self, approval_id: str, approve: bool, actor: str, ts: datetime) -> Order:
@@ -406,11 +431,13 @@ class TradingEngine:
         if not approve:
             return self._record(order.model_copy(update={"status": OrderStatus.CANCELLED, "reason": f"{order.reason} | declined by {actor}"}))
         # Conditions may have changed while the order waited: the risk engine decides again, now.
-        decision = self.risk.evaluate(replace(approval.intent, order=order), self.portfolio.state(ts))
+        decision = self.risk.evaluate(replace(approval.intent, order=order), self._risk_state(ts))
         if not decision.approved:
             return self._reject(order, "; ".join(decision.reasons), ts)
         if approval.protection:
             self._entry_protection[order.id] = ((order.broker_id, order.instrument_id, order.strategy), approval.protection)
+        if decision.risk_increasing:
+            self._working[order.id] = approval.intent.signed_notional
         del self._client_ids[order.client_order_id]
         return self._submit(order, ts)
 
@@ -477,7 +504,7 @@ class TradingEngine:
         keep = {o.id for o in self.orders.values() if o.is_open or o.status is OrderStatus.PENDING_APPROVAL}
         keep |= set(list(self.orders)[-1000:])
         return {
-            "n": self._n, "orders": [self.orders[i].model_dump(mode="json") for i in self.orders if i in keep],
+            "n": self._n, "working": dict(self._working), "orders": [self.orders[i].model_dump(mode="json") for i in self.orders if i in keep],
             "client_ids": dict(list(self._client_ids.items())[-20000:]),
             "entry_protection": [[oid, list(key), list(p)] for oid, (key, p) in self._entry_protection.items()],
             "protections": [[list(key), p.direction, p.stop_distance, p.take_profit_distance, p.trailing_distance, p.stop_price,
@@ -492,6 +519,7 @@ class TradingEngine:
         self._n = state["n"]
         self.orders = {o["id"]: Order.model_validate(o) for o in state["orders"]}
         self._client_ids = dict(state["client_ids"])
+        self._working = dict(state.get("working", {}))
         self._entry_protection = {oid: (tuple(key), tuple(p)) for oid, key, p in state["entry_protection"]}
         self.protections = {}
         for key, direction, stop, target, trailing, stop_price, stop_id, target_id, soft in state["protections"]:

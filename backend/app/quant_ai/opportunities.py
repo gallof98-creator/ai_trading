@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..backtesting import service as bt
 from ..backtesting.walk_forward import WalkForwardSpec, walk_forward
 from ..database.models import ResearchItem, StrategyDeployment
-from ..domain.models import TradingMode
+from ..domain.models import SignalAction, TradingMode
 from ..market_data.quality import DataKind
 from ..market_data.timeframes import tf_delta
 from ..strategies.registry import create_strategy, list_strategies
@@ -60,6 +60,9 @@ CRITERIA = {
     "valid_for_days": 30,
 }
 STOP_GRID = [1.5, 2.5]
+CANDIDATE = {"min_profitable_folds": 3, "min_out_of_sample_trades": 8}
+# How long after its signal bar an entry may still be proposed, and how far the price may have moved by then.
+SCAN = {"entry_window_bars": 3, "max_drift_stop_fraction": 0.5}
 
 
 def horizon_of(timeframe: str) -> str:
@@ -94,12 +97,19 @@ def _static_fx(rt, instrument_id: str) -> dict[str, float]:
     return {inst.quote_currency: rt.engine._fx(inst.quote_currency, rt.clock())}
 
 
-def validate(session: Session, rt, strategy: str, instrument_id: str, timeframe: str, actor: str) -> dict:
-    """Walk-forward validation of one strategy on one stored series, judged against CRITERIA and recorded."""
+def validate(session: Session, rt, strategy: str, instrument_id: str, timeframe: str, actor: str, allow_short: bool = False,
+             max_bars: int | None = None) -> dict:
+    """Walk-forward validation of one strategy on one stored series, judged against CRITERIA and recorded.
+    Long-only unless `allow_short`: a strategy is validated the way it will be traded, and a small cash account cannot sell short.
+    `max_bars` limits the history to the most recent bars (older markets say less about today, and the test runs faster)."""
     data = bt.load_dataset(session, instrument_id, timeframe)
     category = create_strategy(strategy, {}).category
     exits = MODULES[horizon_of(timeframe)]["exits"]
-    fixed = {"take_profit_atr": exits["take_profit_atr"]}
+    fixed = {"take_profit_atr": exits["take_profit_atr"], "allow_short": bool(allow_short)}
+    if max_bars and len(data.bars) > max_bars:
+        from ..market_data.sources import Dataset
+
+        data = Dataset(data.bars.iloc[-max_bars:], data.kind, data.source)
     capital = rt.user_settings.initial_paper_capital or 1000.0
     result = walk_forward(WalkForwardSpec(
         strategy=strategy, instrument_id=instrument_id, timeframe=timeframe, data=data, param_grid={"stop_atr": sorted({exits["stop_atr"], *STOP_GRID})},
@@ -121,19 +131,35 @@ def validate(session: Session, rt, strategy: str, instrument_id: str, timeframe:
          (s.get("walk_forward_efficiency") or 0) >= CRITERIA["min_walk_forward_efficiency"], s.get("walk_forward_efficiency")),
     ]
     passed = all(ok for _, ok, _ in checks)
+    # A second, weaker level. Daily strategies trade a handful of times a year on one instrument, so twenty unseen trades are
+    # rarely available; "candidate" keeps the requirements that do not depend on sample size and is allowed on paper accounts
+    # only, where trading it is itself the next stage of evidence.
+    candidate_checks = [
+        ("market data, not simulated", data.kind is not DataKind.SIMULATED),
+        (f"profitable in at least {CANDIDATE['min_profitable_folds']} of {CRITERIA['min_folds']} unseen periods", s.get("profitable_folds", 0) >= CANDIDATE["min_profitable_folds"]),
+        (f"at least {CANDIDATE['min_out_of_sample_trades']} trades on unseen data", oos.get("number_of_trades", 0) >= CANDIDATE["min_out_of_sample_trades"]),
+        ("positive return on unseen data", (oos.get("total_return") or -1) > 0),
+        (f"drawdown on unseen data at most {CRITERIA['max_out_of_sample_drawdown']:.0%}",
+         oos.get("max_drawdown") is not None and oos["max_drawdown"] <= CRITERIA["max_out_of_sample_drawdown"]),
+    ]
+    tier = "validated" if passed else "candidate" if all(ok for _, ok in candidate_checks) else "rejected"
     last = next((f for f in reversed(result["folds"]) if f["best_params"]), None)
     payload = {
         "strategy": strategy, "category": category, "family": family_of(category), "horizon": horizon_of(timeframe), "instrument_id": instrument_id,
         "timeframe": timeframe, "params": last["best_params"] if last else None, "data_kind": data.kind.value, "bars": int(len(data.bars)),
-        "data_from": data.bars.index[0].isoformat(), "data_to": data.bars.index[-1].isoformat(),
+        "data_from": data.bars.index[0].isoformat(), "data_to": data.bars.index[-1].isoformat(), "long_only": not allow_short,
         "checks": [{"name": n, "passed": bool(ok), "value": v} for n, ok, v in checks],
+        "candidate_checks": [{"name": n, "passed": bool(ok)} for n, ok in candidate_checks],
         "out_of_sample": {k: oos.get(k) for k in ("total_return", "max_drawdown", "sharpe_ratio", "sortino_ratio", "number_of_trades")},
         "profitable_folds": s.get("profitable_folds", 0), "folds": CRITERIA["min_folds"], "walk_forward_efficiency": s.get("walk_forward_efficiency"),
         "combinations_tested": result["combinations_tested"], "tested_by": actor,
         "valid_until": (rt.clock() + timedelta(days=CRITERIA["valid_for_days"])).isoformat(),
-        "caveat": "Passing means the rule held up on several unseen periods of this history after costs. It does not mean it will be profitable.",
+        "caveat": ("Passing means the rule held up on several unseen periods of this history after costs. It does not mean it will be profitable."
+                   if tier != "candidate" else
+                   "Candidate: profitable on most unseen periods, but on too few trades to count as validated. When many strategy/instrument "
+                   "pairs are tested, some reach this level by chance. Paper accounts only."),
     }
-    row = ResearchItem(id=uuid.uuid4().hex, kind="validation", status="validated" if passed else "rejected", title=_key(strategy, instrument_id, timeframe),
+    row = ResearchItem(id=uuid.uuid4().hex, kind="validation", status=tier, title=_key(strategy, instrument_id, timeframe),
                        created_at=rt.clock(), payload=payload)
     session.add(row)
     return {"id": row.id, "status": row.status, "tested_at": row.created_at.isoformat(), **payload}
@@ -158,10 +184,11 @@ def _recent(last_bar_close: pd.Timestamp, timeframe: str, now: datetime) -> bool
     return age <= max(2 * tf_delta(timeframe), pd.Timedelta(days=4) if tf_delta(timeframe) >= pd.Timedelta(days=1) else pd.Timedelta(0))
 
 
-def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[str] | None = None, min_traded_value: float = 0.0) -> dict:
+def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[str] | None = None, min_traded_value: float = 0.0,
+         include_candidates: bool = False, require_regime_fit: bool = False) -> dict:
     """Look at every validated (strategy, instrument, timeframe): where the strategy opened a position on the latest
     completed bar and the market regime suits it, deploy it (if it is not already) and create a proposal."""
-    from ..signals.engine import SignalEngine
+    from ..signals.engine import signal_from_row
 
     now = rt.clock()
     try:
@@ -170,72 +197,115 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         raise ValueError(f"Unknown account {broker_id}") from None
     if rt.risk.halted:
         raise ValueError("Trading is halted by the risk engine (kill switch or circuit breaker): no new proposals")
-    proposed, skipped = [], []
-    for v in validations(session, now):
+    proposed, sent, skipped = [], [], []
+    funnel: dict = {"setups": 0}
+    automatic = TradingMode(rt.user_settings.trading_mode) is TradingMode.AUTO
+    # Strongest evidence first: fully validated setups before candidates, then by out-of-sample return. With one
+    # proposal per instrument, this decides which strategy gets it.
+    ordered = sorted(validations(session, now), key=lambda v: (v["status"] != "validated", -(v["out_of_sample"].get("total_return") or -1e9)))
+    for v in ordered:
         iid, tf, strategy = v["instrument_id"], v["timeframe"], v["strategy"]
         if instrument_ids and iid not in instrument_ids:
             continue
         label = {"strategy": strategy, "instrument_id": iid, "timeframe": tf}
 
-        def skip(reason: str) -> None:
-            skipped.append({**label, "reason": reason})
+        def skip(stage: str, reason: str) -> None:
+            skipped.append({**label, "stage": stage, "reason": reason})
+            funnel[stage] = funnel.get(stage, 0) + 1
 
-        if v["status"] != "validated":
-            skip("validation expired; run it again" if v["status"] == "expired" else "did not pass validation")
+        funnel["setups"] += 1
+
+        if v["status"] == "candidate":
+            if not include_candidates:
+                skip("validation", "candidate only (too few unseen trades): not proposed unless candidates are allowed")
+                continue
+            if not adapter.capabilities.is_simulated:
+                skip("validation", "candidate only: weaker evidence is traded on paper accounts, never on a broker account")
+                continue
+        elif v["status"] != "validated":
+            skip("validation", "validation expired; it will be run again" if v["status"] == "expired" else "did not pass validation")
             continue
         try:
             inst = rt.registry.get(iid)
         except KeyError:
-            skip("instrument no longer in the universe")
+            skip("tradable", "instrument no longer in the universe")
             continue
         if not rt.registry.is_mapped(broker_id, iid) or inst.asset_class not in adapter.capabilities.asset_classes:
-            skip(f"not tradable at {broker_id}")
+            skip("tradable", f"not tradable at {broker_id}")
             continue
         try:
             data = bt.load_dataset(session, iid, tf)
         except bt.DataUnavailable as exc:
-            skip(str(exc))
+            skip("data", str(exc))
             continue
         if data.kind is DataKind.SIMULATED:
-            skip("only simulated prices are stored")
+            skip("data", "only simulated prices are stored")
             continue
         bars = data.bars
         instance = create_strategy(strategy, v["params"])
         if len(bars) < instance.warmup() + 50:
-            skip("not enough history for a dependable signal")
+            skip("data", "not enough history for a dependable signal")
             continue
         close_time = bars.index[-1] + tf_delta(tf)
         if not _recent(close_time, tf, now):
-            skip(f"prices are out of date (last bar closed {close_time:%Y-%m-%d %H:%M} UTC)")
+            skip("data", f"prices are out of date (last bar closed {close_time:%Y-%m-%d %H:%M} UTC)")
             continue
         if MODULES[v["horizon"]]["needs_live"] and iid not in rt.live.subscribed:
-            skip(f"{MODULES[v['horizon']]['label']} needs a live feed for this instrument")
+            skip("data", f"{MODULES[v['horizon']]['label']} needs a live feed for this instrument")
             continue
         traded = float((bars["close"] * bars["volume"]).iloc[-20:].mean())
         if traded < min_traded_value:
-            skip(f"average traded value {traded:,.0f} is below the liquidity floor {min_traded_value:,.0f}")
+            skip("liquidity", f"average traded value {traded:,.0f} is below the liquidity floor {min_traded_value:,.0f}")
             continue
         regime = str(detect_regimes(bars)["primary"].iloc[-1])
         fits = MODULES[v["family"]]["fits"]
-        if regime == "unknown":
-            skip("market regime cannot be determined yet")
+        if regime == "unknown" and require_regime_fit:
+            skip("regime", "market regime cannot be determined yet")
             continue
-        if regime not in fits:
-            skip(f"current regime {regime.replace('_', ' ')} does not suit {MODULES[v['family']]['label'].lower()}")
+        # The validation tested the strategy in every regime, so by default the regime is reported, not used as a gate:
+        # filtering on it would trade a different rule from the one that was tested.
+        if require_regime_fit and regime not in fits:
+            skip("regime", f"current regime {regime.replace('_', ' ')} does not suit {MODULES[v['family']]['label'].lower()}")
             continue
-        signal = SignalEngine().latest(bars, instance, iid, tf)
-        if signal is None or signal.action.value == "HOLD" or signal.target == 0:
-            skip("no new entry on the latest bar")
+        frame = instance.generate(bars)
+        last = frame.iloc[-1]
+        target = int(last["target"])
+        if target == 0:
+            skip("signal", "the strategy holds no position on the latest bar")
             continue
+        # The bar on which the strategy took this position. An entry is still worth proposing for a few bars after
+        # it, as long as the price has not run away from it; older than that, the opportunity has passed.
+        opened = int((frame["target"] != frame["target"].shift()).to_numpy().nonzero()[0][-1])
+        age = len(frame) - 1 - opened
+        if age > SCAN["entry_window_bars"]:
+            skip("signal", f"in position since {age} bars: the entry is older than the {SCAN['entry_window_bars']}-bar window")
+            continue
+        stop = float(last["stop_distance"])
+        drift = abs(float(last["close"]) - float(frame["close"].iloc[opened]))
+        if age and drift > SCAN["max_drift_stop_fraction"] * stop:
+            skip("signal", f"the price has moved {drift / stop:.0%} of the stop distance since the entry signal {age} bar(s) ago")
+            continue
+        signal = signal_from_row(frame.index[-1], last, instance, iid, tf, close_time).model_copy(
+            update={"action": SignalAction.BUY if target > 0 else SignalAction.SELL})
+        # Identified by the bar that opened the position, so the same entry is never proposed twice on later bars.
+        signal.meta["bar_open"] = frame.index[opened].isoformat()
+        signal.meta["signal_age_bars"] = age
         if signal.target < 0 and not (inst.shortable and adapter.capabilities.supports_short):
-            skip("the signal is a short sale, which this account does not allow for the instrument")
+            skip("signal", "the signal is a short sale, which this account does not allow for the instrument")
             continue
         slice_key = (broker_id, iid, strategy)
         if any((a.order.broker_id, a.order.instrument_id, a.order.strategy) == slice_key for a in rt.engine.approvals.values()):
-            skip("already proposed and waiting for a decision")
+            skip("already", "already proposed and waiting for a decision")
             continue
         if rt.portfolio.qty(slice_key) != 0:
-            skip("already in position")
+            skip("already", "already in position")
+            continue
+        # One entry per instrument: several strategies agreeing on the same stock are one bet, not several.
+        busy = (any(k[0] == broker_id and k[1] == iid and s.qty for k, s in rt.portfolio.slices.items())
+                or any(a.order.broker_id == broker_id and a.order.instrument_id == iid and not a.order.reduce_only for a in rt.engine.approvals.values())
+                or any(o.is_open and o.broker_id == broker_id and o.instrument_id == iid and not o.reduce_only for o in rt.engine.orders.values()))
+        if busy:
+            skip("already", "another strategy already holds or has proposed this instrument")
             continue
         row = session.scalar(select(StrategyDeployment).where(StrategyDeployment.strategy == strategy, StrategyDeployment.instrument_id == iid,
                                                               StrategyDeployment.broker_account_id == broker_id))
@@ -249,25 +319,34 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         rt.bars.setdefault((iid, tf), bars.iloc[-5000:])  # indicators are warm: the next stored or live bar can trade
         signal.regime = regime
         signal.meta.update({
-            "opportunity": {"family": v["family"], "horizon": v["horizon"], "regime": regime, "regime_fits": fits, "average_traded_value": traded,
+            "opportunity": {"family": v["family"], "horizon": v["horizon"], "regime": regime, "regime_fits": fits, "regime_suits": regime in fits,
+                            "average_traded_value": traded,
                             "why": f"{strategy} opened a {'long' if signal.target > 0 else 'short'} position at the close of the bar that started "
-                                   f"{bars.index[-1]:%Y-%m-%d %H:%M} UTC, at {signal.price:g}; the market regime ({regime.replace('_', ' ')}) is one "
-                                   f"that {MODULES[v['family']]['label'].lower()} is meant for."},
-            "validation": {"id": v["id"], "tested_at": v["tested_at"], **v["out_of_sample"], "profitable_folds": v["profitable_folds"], "folds": v["folds"],
+                                   f"{frame.index[opened]:%Y-%m-%d %H:%M} UTC" + (f" ({age} bar(s) ago)" if age else "") + f"; the latest close is {signal.price:g}. "
+                                   f"Market regime: {regime.replace('_', ' ')}, which "
+                                   + ("is one" if regime in fits else "is NOT one") + f" that {MODULES[v['family']]['label'].lower()} is meant for."},
+            "validation": {"id": v["id"], "level": v["status"], "tested_at": v["tested_at"], **v["out_of_sample"], "profitable_folds": v["profitable_folds"], "folds": v["folds"],
                            "walk_forward_efficiency": v["walk_forward_efficiency"], "caveat": v["caveat"]},
             "data": {"kind": data.kind.value, "source": data.source, "last_bar_close": close_time.isoformat(), "bars": int(len(bars))}})
         before = set(rt.engine.approvals)
         with rt.lock:
-            orders = rt.engine.on_signal(signal, dep, mode_override=TradingMode.SEMI_AUTO)  # a scan never sends anything by itself
+            # Orders are sent without asking only when the user has chosen automatic mode; real-money accounts still wait for approval.
+            orders = rt.engine.on_signal(signal, dep, mode_override=None if automatic else TradingMode.SEMI_AUTO)
             rt.persist()
         new = [a for a in rt.engine.approvals if a not in before]
+        submitted = [o for o in orders if o.status.value in ("submitted", "filled", "partially_filled")]
         if new:
             proposed.append({**label, "proposal_ids": new, "regime": regime})
+            funnel["proposed"] = funnel.get("proposed", 0) + 1
+        elif submitted:
+            sent.append({**label, "order_ids": [o.id for o in submitted], "regime": regime})
+            funnel["sent"] = funnel.get("sent", 0) + 1
         else:
             reason = next((o.reason for o in orders if o.status.value == "rejected"), None)
-            skip(f"refused by the risk engine: {reason}" if reason else "already proposed for this bar (it was rejected or lapsed), or already in position")
-    return {"scanned_at": now.isoformat(), "broker_id": broker_id, "proposed": proposed, "skipped": skipped,
-            "validated": sum(1 for v in validations(session, now) if v["status"] == "validated")}
+            skip("risk" if reason else "already", f"refused by the risk engine: {reason}" if reason else "already proposed for this entry (it was rejected or lapsed)")
+    return {"scanned_at": now.isoformat(), "broker_id": broker_id, "proposed": proposed, "sent": sent, "skipped": skipped, "funnel": funnel,
+            "validated": sum(1 for v in validations(session, now) if v["status"] == "validated"),
+            "candidates": sum(1 for v in validations(session, now) if v["status"] == "candidate")}
 
 
 def universes(session: Session, rt, broker_id: str | None = None) -> dict:

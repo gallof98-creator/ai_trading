@@ -300,17 +300,29 @@ class ScanIn(BaseModel):
     end: str | None = None
 
 
+SCAN_LIMIT = 300
+
+
 @router.post("/backtests/scan")
 def scan(body: ScanIn, _: User = Depends(trader), session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> dict:
     capital = _capital(body.initial_capital, rt)
     ids = body.instrument_ids
+    available = None
     if ids is None:
         known = {i.id for i in rt.registry.all()}
-        ids = sorted({c["instrument_id"] for c in _store.coverage(session) if c["timeframe"] == body.timeframe and c["instrument_id"] in known})[:300]
+        everything = sorted({c["instrument_id"] for c in _store.coverage(session) if c["timeframe"] == body.timeframe and c["instrument_id"] in known})
+        available, ids = len(everything), everything[:SCAN_LIMIT]
     if not ids:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No instrument has stored {body.timeframe} bars yet")
-    return guard(bt.scan_universe, session, body.strategy, body.params, body.timeframe, ids, capital, rt.user_settings.base_currency,
-                 rt.user_settings.risk, body.execution.model_dump(), body.static_fx, body.start, body.end, rt.registry.all())
+    out = guard(bt.scan_universe, session, body.strategy, body.params, body.timeframe, ids, capital, rt.user_settings.base_currency,
+                rt.user_settings.risk, body.execution.model_dump(), body.static_fx, body.start, body.end, rt.registry.all())
+    if isinstance(out, dict):
+        out["instruments_scanned"] = len(ids)
+        out["instruments_available"] = available if available is not None else len(ids)
+        if available is not None and available > len(ids):  # say so instead of calling a part "all"
+            out["limit_note"] = (f"{available} instruments have {body.timeframe} bars; this run covered the first {len(ids)} in alphabetical order. "
+                                 "It is one backtest per instrument, so the run is capped.")
+    return out
 
 
 class WalkForwardIn(BaseModel):

@@ -229,26 +229,29 @@ class Autopilot:
             stored = {(c["instrument_id"], c["timeframe"]) for c in self.rt.store.coverage(session) if c["kind"] != "simulated"}
         todo = [(s, i, tf) for i in candidates for tf in cfg.timeframes for s in cfg.strategies
                 if (i, tf) in stored and known.get((s, i, tf)) in (None, "expired")]
-        done = passed = failed = 0
+        done = passed = failed = candidates = 0
         for strategy, iid, tf in todo[: cfg.validations_per_cycle]:
             try:
                 with self.rt.db.session() as session:
-                    out = opp.validate(session, self.rt, strategy, iid, tf, ACTOR)
+                    out = opp.validate(session, self.rt, strategy, iid, tf, ACTOR, allow_short=cfg.allow_short, max_bars=cfg.validation_bars)
                 done += 1
                 passed += out["status"] == "validated"
+                candidates += out["status"] == "candidate"
             except Exception as exc:  # e.g. too little history for this timeframe
                 failed += 1
                 self._note("validation", f"{strategy} on {iid} {tf}: {str(exc)[:160]}", "warning")
         if done or failed:
-            self._note("validation", f"{done} validations run, {passed} passed, {max(0, len(todo) - done - failed)} still to do")
-        return {"run": done, "passed": passed, "could_not_run": failed, "remaining": max(0, len(todo) - done - failed)}
+            self._note("validation", f"{done} validations run: {passed} validated, {candidates} candidates, {done - passed - candidates} rejected; "
+                                     f"{max(0, len(todo) - done - failed)} still to do")
+        return {"run": done, "passed": passed, "candidates": candidates, "could_not_run": failed, "remaining": max(0, len(todo) - done - failed)}
 
     def _live(self, _: dict) -> dict:
         cfg, now = self.cfg, self.rt.clock()
         if not cfg.live_subscribe:
             return {"skipped": "switched off"}
         with self.rt.db.session() as session:
-            wanted = list(dict.fromkeys(v["instrument_id"] for v in opp.validations(session, now) if v["status"] == "validated"))
+            levels = ("validated", "candidate") if cfg.paper_candidates else ("validated",)
+            wanted = list(dict.fromkeys(v["instrument_id"] for v in opp.validations(session, now) if v["status"] in levels))
         new = [i for i in wanted if i not in self.rt.live.subscribed and self.rt.kinds.get(i) != "simulated"][: cfg.max_instruments]
         if not new:
             return {"subscribed": 0}
@@ -264,10 +267,20 @@ class Autopilot:
         if self.rt.risk.halted:
             return {"skipped": "trading is paused by the risk engine"}
         with self.rt.db.session() as session:
-            out = opp.scan(session, self.rt, broker, ACTOR)
+            out = opp.scan(session, self.rt, broker, ACTOR, include_candidates=self.cfg.paper_candidates, require_regime_fit=self.cfg.require_regime_fit)
         if out["proposed"]:
             names = ", ".join(f"{p['strategy']} on {p['instrument_id'].split(':')[1]}" for p in out["proposed"])
             self._note("scan", f"{len(out['proposed'])} new proposal(s): {names}")
             self.rt.notifier.notify(self.rt.clock(), "approval", "info", f"Autopilot: {len(out['proposed'])} new order proposal(s)", names)
-        return {"validated_setups": out["validated"], "proposed": len(out["proposed"]), "not_proposed": len(out["skipped"]),
+        if out["sent"]:
+            names = ", ".join(f"{p['strategy']} on {p['instrument_id'].split(':')[1]}" for p in out["sent"])
+            self._note("scan", f"{len(out['sent'])} order(s) sent automatically: {names}")
+            self.rt.notifier.notify(self.rt.clock(), "execution", "info", f"Autopilot: {len(out['sent'])} order(s) sent", names)
+        # Where the setups stopped, most common reason first: this is what to look at when nothing is proposed.
+        blockers: dict[str, int] = {}
+        for s in out["skipped"]:
+            key = s["reason"].split(" (")[0].split(":")[0]
+            blockers[key] = blockers.get(key, 0) + 1
+        return {"validated_setups": out["validated"], "candidate_setups": out["candidates"], "proposed": len(out["proposed"]), "sent": len(out["sent"]), "not_proposed": len(out["skipped"]),
+                "funnel": out["funnel"], "blockers": sorted(([k, n] for k, n in blockers.items()), key=lambda x: -x[1])[:8],
                 "reasons": [f"{s['strategy']} {s['instrument_id'].split(':')[1]} {s['timeframe']}: {s['reason']}" for s in out["skipped"][:40]]}

@@ -44,6 +44,10 @@ Off by default; switched on from the Autonomous Quant page. Every cycle (15 minu
 Each step reports what it did or why it was skipped, and one failing step does not stop the others. Every minute, independently of the
 cycle, lapsed proposals are removed and orders working at an external broker are followed up.
 
+Order handling is the user's choice, made with an explicit confirmation in the Autopilot panel (or under Settings): by default every
+order waits for approval; with "send paper orders by itself" the scan and deployed strategies send orders to paper accounts without
+asking, still sized and judged by the risk engine and protected by a stop. Orders for real-money accounts wait for approval in both cases.
+
 What it does not do: it never changes the trading mode or a risk limit, and in semi-automatic mode it sends no order. Its output is
 proposals; a signal whose proposal was rejected or lapsed is not proposed again for the same bar. If the user selects automatic mode
 (Settings, after confirming the limits), orders of deployed strategies are sent to paper accounts without asking; real-money orders
@@ -93,8 +97,34 @@ market (not simulated) prices; parameters found in all 4 periods; profitable in 
 unseen data; positive out-of-sample return; out-of-sample drawdown at most 25%; at least 30% of the in-sample result survived.
 A validation is valid for 30 days. Passing is not a promise of profit.
 
-The scan also requires: prices not out of date, a live feed for scalping and intraday, a market regime the family is meant for, an
-entry on the latest completed bar, the instrument tradable at the chosen account. Each reason for not proposing is listed.
+Two levels of evidence, measured rather than assumed. On twelve years of real daily prices of four US stocks (AAPL, TSLA, VTI, AMZN)
+and all 17 strategies, no pair reached twenty out-of-sample trades in the three most recent years: a daily strategy trades one
+instrument too rarely. Hence:
+
+| Level | Requirements | Where it may trade |
+|---|---|---|
+| validated | all seven checks above | any account |
+| candidate | market prices, profitable in 3 of 4 unseen periods, at least 8 unseen trades, positive return, drawdown at most 25% | paper accounts only |
+
+On that same data, long-only: 1 pair validated, 11 candidates, 52 rejected. Candidates are weaker evidence, and when many pairs are
+tested some reach the level by chance; every proposal says which level it rests on. Candidates can be switched off in the Autopilot settings.
+
+Strategies are validated and traded long-only by default: a small cash account cannot sell short, and a rule should be tested the way
+it will be traded. Validation uses the most recent 1,500 bars (about six years of daily data).
+
+The market regime is reported on every proposal but is not a gate by default: the validation tested the rule in every regime, so
+filtering on it would trade a different rule from the one tested. It can be made a requirement in the Autopilot settings.
+
+One entry per instrument: when several strategies signal the same stock, the one with the strongest evidence gets the proposal.
+
+The scan also requires: prices not out of date, a live feed for scalping and intraday, a market regime the family is meant for, the
+instrument tradable at the chosen account, and an entry that is still current: the strategy took its position on the latest bar or at
+most three bars ago, and the price has not moved by more than half the stop distance since. Each reason for not proposing is listed,
+and the Autopilot panel counts where the strategy/instrument pairs stopped (not validated, stale prices, regime, no entry now...).
+An entry is identified by the bar that opened it, so it is proposed once, however many scans see it.
+
+A proposal lives for the configured time (15 minutes) or half a bar of its timeframe, whichever is longer, up to a day: twelve hours
+for a daily signal. Price and risk are checked again when it is approved.
 
 ## Alpaca
 
@@ -122,6 +152,19 @@ exchanges and Interactive Brokers already exist.
 | Alpaca broker adapter | Automated tests against an emulated Alpaca API. **Not exercised with real Alpaca credentials** |
 | Alpaca WebSocket against the real service | **Not verified**: the development environment blocks WebSocket connections |
 | Alpaca stock data (IEX), Finnhub stream against the real services | **Not verified** (need keys; Finnhub needs WebSocket) |
+
+## Fractional shares
+
+US stocks and ETFs trade in fractions of a share (0.0001) when "Fractional shares" is on in Settings; it is on for new installations
+and for installations saved before the option existed. With 1,000 EUR and at most 25% per instrument, a position is worth 250 EUR:
+without fractions, any stock above that price could never be bought. At Alpaca, fractional quantities are sent as market orders for
+the day; a protective stop for a fractional position is not left resting at the broker (the platform watches it and closes at the
+bar that crosses it), and orders worth less than 1 USD are refused.
+
+## Exposure counts orders on their way
+
+The risk engine judges every new order against open positions plus entry orders already sent and not yet filled. Before this, several
+orders sent in the same moment could each fit a limit and together exceed it.
 
 ## Limits
 

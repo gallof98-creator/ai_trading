@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
+import { InstrumentPicker } from "@/components/InstrumentPicker";
 import { Shell } from "@/components/Shell";
 import { useNow } from "@/components/live";
 import { chartHref } from "@/components/symbol";
@@ -40,7 +41,8 @@ function Proposal({ p, canTrade, onDone }: { p: Json; canTrade: boolean; onDone:
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
         <Badge kind="up">risk engine: approved when proposed</Badge>
         {p.live ? <Badge kind={p.live.fresh ? "up" : "warn"}>{p.live.fresh ? `● LIVE ${num(p.live.price)}` : `price ${Math.round(p.live.age_seconds)}s old`}</Badge> : <Badge>no live feed: priced on the last stored bar</Badge>}
-        {r.validation && <Badge>validated: {r.validation.profitable_folds}/{r.validation.folds} unseen periods profitable, {r.validation.number_of_trades} trades</Badge>}
+        {r.validation && <Badge kind={r.validation.level === "candidate" ? "warn" : "up"}>{r.validation.level === "candidate" ? "CANDIDATE (weaker evidence)" : "validated"}: {r.validation.profitable_folds}/{r.validation.folds} unseen periods profitable, {r.validation.number_of_trades} trades</Badge>}
+        {r.opportunity && !r.opportunity.regime_suits && <Badge kind="warn">regime {nice(r.opportunity.regime)}: not the one this family is meant for</Badge>}
         <button className="text-accent underline" onClick={() => setOpen(!open)}>{open ? "hide details" : "why and how it was checked"}</button>
       </div>
       {open && (
@@ -61,7 +63,10 @@ function Proposal({ p, canTrade, onDone }: { p: Json; canTrade: boolean; onDone:
   );
 }
 
-function AutopilotPanel({ canTrade, strategies }: { canTrade: boolean; strategies: Json[] }) {
+const FUNNEL: [string, string][] = [["validation", "not validated"], ["tradable", "not tradable"], ["data", "prices stale or missing"], ["liquidity", "too illiquid"],
+  ["regime", "regime does not fit"], ["signal", "no entry now"], ["already", "already proposed or held"], ["risk", "refused by risk engine"]];
+
+function AutopilotPanel({ canTrade, isAdmin, strategies }: { canTrade: boolean; isAdmin: boolean; strategies: Json[] }) {
   const ap = useApi("/api/quant/autopilot", 5_000);
   const [draft, setDraft] = useState<Json>(null);
   const act = useAction();
@@ -84,12 +89,29 @@ function AutopilotPanel({ canTrade, strategies }: { canTrade: boolean; strategie
       {canTrade && <Button kind="ghost" disabled={act.busy || st.running} onClick={() => act.run(() => post("/api/quant/autopilot/run"), "Cycle started; it can take a few minutes.").then(ap.reload)}>Run a cycle now</Button>}
     </span>}>
       <p className="text-sm">Every {st.settings.cycle_minutes} minutes the platform refreshes exchange rates and prices, picks the most traded instruments, validates the chosen strategies on them, asks for live prices and scans for opportunities. <span className="text-accent">{st.sends_orders_by_itself ? "Automatic mode is on: paper orders are sent without asking." : "It creates proposals only: every order still waits for your approval."}</span></p>
+      {isAdmin && <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-dim">Orders:</span>
+        <Badge kind={st.trading_mode === "auto" ? "warn" : "accent"}>{st.trading_mode === "auto" ? "sent automatically (paper)" : st.trading_mode === "semi_auto" ? "each one waits for my approval" : "manual mode: proposals only"}</Badge>
+        {st.trading_mode === "auto"
+          ? <button className="text-accent underline" onClick={() => act.run(async () => { const cur = await post("/api/settings", undefined, "GET"); await post("/api/settings", { ...cur, trading_mode: "semi_auto" }, "PUT"); }, "Back to approval for every order.").then(ap.reload)}>ask me for every order again</button>
+          : <button className="text-accent underline" onClick={() => window.confirm("Let the platform send PAPER orders by itself, without asking?\n\nIt will size every order at the configured risk, pass it through the risk engine and place its stop. Daily-loss, drawdown and exposure limits stay in force. Real-money orders still wait for your approval, and live trading stays disabled.\n\nBy confirming you also confirm that you have reviewed the risk limits under Settings.")
+              && act.run(async () => { const cur = await post("/api/settings", undefined, "GET"); await post("/api/settings", { ...cur, trading_mode: "auto", safety_limits_confirmed: true }, "PUT"); }, "Automatic mode on: paper orders are now sent without asking.").then(ap.reload)}>let it send paper orders by itself…</button>}
+      </div>}
       {!st.alpaca_key && <p className="mt-2 text-xs text-warn">No Alpaca key yet: the universe and daily prices cannot be refreshed automatically. Add the key under Markets, or connect an Alpaca account under Settings.</p>}
       {!st.broker_id && <p className="mt-2 text-xs text-warn">No trading account: create a paper account under Execution.</p>}
       <div className="mt-3 grid gap-4 lg:grid-cols-2">
         <div className="space-y-1 font-mono text-xs">
           <div className="text-dim">Last cycle {when(st.last_cycle)} · next {st.enabled ? when(st.next_cycle) : "—"} · {st.cycles} cycles since start</div>
           {[["exchange_rates", "Exchange rates"], ["universe", "Universe"], ["prices", "Prices"], ["candidates", "Candidates"], ["validation", "Validation"], ["live", "Live prices"], ["scan", "Scan"]].map(([k, l]) => line(k, l))}
+          {r.scan?.funnel && <div className="mt-2 rounded border border-line p-2">
+            <div className="text-dim">Where the {r.scan.funnel.setups} strategy/instrument pairs ended up</div>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {FUNNEL.filter(([k]) => r.scan.funnel[k]).map(([k, label]) => <Badge key={k}>{label}: {r.scan.funnel[k]}</Badge>)}
+              <Badge kind={r.scan.funnel.proposed ? "up" : "dim"}>proposed: {r.scan.funnel.proposed ?? 0}</Badge>
+              {r.scan.funnel.sent ? <Badge kind="up">sent: {r.scan.funnel.sent}</Badge> : null}
+            </div>
+            {r.scan.blockers?.length > 0 && <ul className="mt-1.5 list-disc pl-5 text-dim">{r.scan.blockers.slice(0, 4).map(([reason, n]: [string, number]) => <li key={reason}>{n} × {reason}</li>)}</ul>}
+          </div>}
           {r.scan?.reasons?.length > 0 && <details className="pt-1"><summary className="cursor-pointer text-accent">why {r.scan.reasons.length} setups were not proposed</summary><ul className="mt-1 max-h-40 list-disc overflow-auto pl-5 text-dim">{r.scan.reasons.map((x: string) => <li key={x}>{x}</li>)}</ul></details>}
         </div>
         <div className="max-h-48 overflow-auto font-mono text-xs">
@@ -107,7 +129,8 @@ function AutopilotPanel({ canTrade, strategies }: { canTrade: boolean; strategie
             <Field label="Validations per cycle"><input type="number" min="1" className="w-24" value={cfg.validations_per_cycle} onChange={(e) => set("validations_per_cycle", Number(e.target.value))} /></Field>
           </div>
           <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-dim">
-            {[["seed_most_active", "Add the most traded US stocks when the universe is small"], ["daily_price_update", "Refresh daily prices"], ["live_subscribe", "Ask for live prices where a strategy is validated"]]
+            {[["seed_most_active", "Add the most traded US stocks when the universe is small"], ["daily_price_update", "Refresh daily prices"], ["live_subscribe", "Ask for live prices where a strategy is validated"],
+              ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
               .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
           </div>
           <div className="mt-3 text-xs text-dim">Timeframes: {TFS.map((t) => <label key={t} className="ml-2 inline-flex items-center gap-1"><input type="checkbox" className="!w-auto" checked={cfg.timeframes.includes(t)}
@@ -127,7 +150,6 @@ function Autonomous({ user }: { user: User }) {
   const d = useApi("/api/quant/dashboard", 4_000);
   const modules = useApi("/api/quant/modules");
   const strategies = useApi("/api/strategies");
-  const instruments = useApi("/api/instruments?has_data=true&limit=500");
   const act = useAction();
   const [scan, setScan] = useState<Json>(null);
   const [v, setV] = useState({ strategy: "ema_crossover", instrument_id: "", timeframe: "1d" });
@@ -171,7 +193,7 @@ function Autonomous({ user }: { user: User }) {
         <Stat label="Open positions" value={positions.length} hint={`${proposals.length} proposals waiting`} />
       </div>
 
-      <AutopilotPanel canTrade={canTrade} strategies={strategies.data ?? []} />
+      <AutopilotPanel canTrade={canTrade} isAdmin={user.role === "admin"} strategies={strategies.data ?? []} />
 
       <Panel title={`Proposals waiting for your decision (${proposals.length})`} right={canTrade && account ? (
         <Button kind="ghost" disabled={act.busy || halted} onClick={() => act.run(async () => setScan(await post("/api/quant/scan", { broker_id: account })), "Scan complete.").then(refresh)}>Scan for opportunities</Button>) : undefined}>
@@ -219,14 +241,14 @@ function Autonomous({ user }: { user: User }) {
         <Panel title="Strategy validation">
           {canTrade && <div className="mb-3 flex flex-wrap items-end gap-2">
             <Field label="Strategy"><select value={v.strategy} onChange={(e) => setV({ ...v, strategy: e.target.value })}>{(strategies.data ?? []).map((s: Json) => <option key={s.name} value={s.name}>{nice(s.name)}</option>)}</select></Field>
-            <Field label="Instrument"><select value={v.instrument_id} onChange={(e) => setV({ ...v, instrument_id: e.target.value })}><option value="">Choose…</option>{(instruments.data?.items ?? instruments.data ?? []).map((i: Json) => <option key={i.id} value={i.id}>{i.id}</option>)}</select></Field>
+            <Field label="Instrument"><InstrumentPicker value={v.instrument_id} hasData onChange={(id, row) => setV({ ...v, instrument_id: id, timeframe: row?.series.length && !row.series.some((c) => c.timeframe === v.timeframe) ? row.series[0].timeframe : v.timeframe })} /></Field>
             <Field label="Timeframe"><select value={v.timeframe} onChange={(e) => setV({ ...v, timeframe: e.target.value })}>{TFS.map((t) => <option key={t}>{t}</option>)}</select></Field>
             <Button kind="ghost" disabled={act.busy || !v.instrument_id} onClick={() => act.run(async () => { const r = await post("/api/quant/validations", v); if (r.status !== "validated") throw new Error(`Not validated: ${r.checks.filter((c: Json) => !c.passed).map((c: Json) => c.name).join("; ")}`); }, "Validated: it may now be proposed.").then(refresh)}>Validate</Button>
           </div>}
           <Table max="max-h-64" empty="No strategy has been validated yet, so nothing can be proposed by a scan." head={["Strategy", "Instrument", "TF", "Status", "Unseen periods", "OOS return", "OOS drawdown", "Trades", "Tested"]}
-            rows={validations.map((x: Json) => [nice(x.strategy), sym(x.instrument_id), x.timeframe, <Badge key="s" kind={x.status === "validated" ? "up" : x.status === "expired" ? "warn" : "down"}>{x.status}</Badge>,
+            rows={validations.map((x: Json) => [nice(x.strategy), sym(x.instrument_id), x.timeframe, <Badge key="s" kind={x.status === "validated" ? "up" : x.status === "expired" || x.status === "candidate" ? "warn" : "down"}>{x.status}</Badge>,
               `${x.profitable_folds}/${x.folds} profitable`, <span key="r" className={tone(x.out_of_sample.total_return)}>{pct(x.out_of_sample.total_return)}</span>, pct(x.out_of_sample.max_drawdown), x.out_of_sample.number_of_trades ?? "—", when(x.tested_at)])} />
-          <p className="mt-2 text-xs text-dim">A strategy must be profitable in at least {modules.data?.criteria.min_profitable_folds} of {modules.data?.criteria.min_folds} unseen periods, with at least {modules.data?.criteria.min_out_of_sample_trades} trades, on market (not simulated) prices. One good backtest is not enough, and passing is not a promise of profit. Valid for {modules.data?.criteria.valid_for_days} days.</p>
+          <p className="mt-2 text-xs text-dim">Validated: a strategy must be profitable in at least {modules.data?.criteria.min_profitable_folds} of {modules.data?.criteria.min_folds} unseen periods, with at least {modules.data?.criteria.min_out_of_sample_trades} trades, on market (not simulated) prices. Candidate: the same without the trade-count requirement (at least 8 trades); it is weaker evidence, some pairs reach it by chance, and it is traded on paper accounts only. One good backtest is never enough, and neither level is a promise of profit. Valid for {modules.data?.criteria.valid_for_days} days.</p>
         </Panel>
         <Panel title="Active strategies and performance">
           <Table max="max-h-40" empty="No strategy is active." head={["Strategy", "Instrument", "Timeframe", "Account"]} rows={deployments.map((x: Json) => [nice(x.strategy), sym(x.instrument_id), x.timeframe, x.broker_id])} />

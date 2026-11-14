@@ -64,7 +64,13 @@ class AutopilotSettings(BaseModel):
     live_subscribe: bool = True       # request live prices for instruments with a validated strategy
     min_price: float = Field(5.0, ge=0)
     min_traded_value: float = Field(20_000_000.0, ge=0)  # 20-day average traded value, quote currency
-    validations_per_cycle: int = Field(25, ge=1, le=500)
+    validations_per_cycle: int = Field(60, ge=1, le=500)
+    validation_bars: int = Field(1500, ge=450, le=10_000)  # validate on the most recent bars (about six years of daily data)
+    allow_short: bool = False          # strategies are validated and traded long-only unless this is on
+    # Also propose "candidate" setups: profitable on most unseen periods but on too few trades to be validated.
+    # Paper accounts only; each proposal says which level of evidence it rests on.
+    paper_candidates: bool = True
+    require_regime_fit: bool = False   # only propose when the current market regime is one the strategy family is meant for
 
 
 class UserSettings(BaseModel):
@@ -76,6 +82,9 @@ class UserSettings(BaseModel):
     proposal_ttl_minutes: int = Field(15, ge=1, le=1440)
     # A proposal is void if, when approved, the price has moved by more than this fraction of its stop distance.
     max_entry_drift: float = Field(0.25, gt=0, le=2)
+    # Fractional share quantities for US stocks and ETFs (Alpaca supports them). Without this, a small account cannot
+    # hold even one share of an expensive stock, so most instruments would never be traded.
+    fractional_shares: bool = False
     # Automatic mode is refused until the user has reviewed the risk limits and ticked this.
     safety_limits_confirmed: bool = False
     fx_conversion_cost_bps: float = Field(5.0, ge=0, le=500)
@@ -95,7 +104,8 @@ class UserSettings(BaseModel):
 def initial_settings() -> UserSettings:
     """The configuration a new installation starts with. It is ordinary, editable settings (Settings page), not a
     constant in the trading code: 1,000 EUR of virtual capital, semi-automatic mode, 2% risk per trade."""
-    return UserSettings(base_currency="EUR", initial_paper_capital=1000.0, trading_mode="semi_auto", risk=RiskLimits(risk_per_trade=0.02))
+    return UserSettings(base_currency="EUR", initial_paper_capital=1000.0, trading_mode="semi_auto", risk=RiskLimits(risk_per_trade=0.02),
+                        fractional_shares=True)
 
 
 def load_settings(session: Session) -> UserSettings:
@@ -107,6 +117,8 @@ def load_settings(session: Session) -> UserSettings:
     # it falls back to semi-automatic (the safer mode) until the limits are confirmed on the Settings page.
     if value.get("trading_mode") == "auto" and not value.get("safety_limits_confirmed"):
         value["trading_mode"] = "semi_auto"
+    # Installations saved before fractional shares existed get them switched on: it only widens what can be traded.
+    value.setdefault("fractional_shares", True)
     return UserSettings.model_validate(value)
 
 

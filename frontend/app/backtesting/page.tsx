@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { DrawdownChart, EquityChart, PlainBars, SignedBars } from "@/components/charts/Charts";
 import { ParamForm } from "@/components/ParamForm";
+import { InstrumentPicker } from "@/components/InstrumentPicker";
 import { Shell } from "@/components/Shell";
 import { Badge, Button, Field, type Json, Msg, Notice, num, Panel, parseFx, pct, post, signed, Stat, Table, TIMEFRAMES, tone, useAction, useApi, when } from "@/components/ui";
 import type { User } from "@/services/api";
@@ -50,7 +51,6 @@ function Results({ r }: { r: Json }) {
 
 function Backtesting({ user }: { user: User }) {
   const library = useApi("/api/strategies");
-  const instruments = useApi("/api/instruments");
   const coverage = useApi("/api/market/coverage");
   const runs = useApi("/api/backtests");
   const [form, setForm] = useState({ strategy: "ema_crossover", instrument_id: "CRYPTO:BTC/USDT", timeframe: "1h", start: "", end: "", capital: "", fx: "USDT=0.92, USD=0.92",
@@ -82,7 +82,7 @@ function Backtesting({ user }: { user: User }) {
         <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="Strategy"><select value={form.strategy} onChange={(e) => { set("strategy", e.target.value); setParams(null); }}>{(library.data ?? []).map((s: Json) => <option key={s.name}>{s.name}</option>)}</select></Field>
-            <Field label="Asset"><select value={form.instrument_id} onChange={(e) => set("instrument_id", e.target.value)}>{(instruments.data ?? []).map((i: Json) => <option key={i.id}>{i.id}</option>)}</select></Field>
+            <Field label="Asset"><InstrumentPicker value={form.instrument_id} onChange={(id) => set("instrument_id", id)} /></Field>
             <Field label="Timeframe"><select value={form.timeframe} onChange={(e) => set("timeframe", e.target.value)}>{TIMEFRAMES.map((t) => <option key={t}>{t}</option>)}</select></Field>
             <Field label="Capital (blank = paper capital)"><input type="number" min="0" value={form.capital} onChange={(e) => set("capital", e.target.value)} /></Field>
             <Field label="From (UTC, optional)"><input type="date" value={form.start} onChange={(e) => set("start", e.target.value)} /></Field>
@@ -161,7 +161,8 @@ function Backtesting({ user }: { user: User }) {
           {canWrite && <Button kind="ghost" disabled={act.busy} onClick={() => act.run(async () => {
             setScan(await post("/api/backtests/scan", { strategy: form.strategy, params: p, timeframe: form.timeframe, ...common(),
               execution: { spread_bps: Number(form.spread_bps), slippage_bps: Number(form.slippage_bps), participation_rate: Number(form.participation_rate) || null } }));
-          }, "Scan finished.")}>{act.busy ? "Running…" : `Scan all instruments (${form.timeframe})`}</Button>}
+          }, "Scan finished.")}>{act.busy ? "Running…" : `Scan the universe (${form.timeframe}, up to 300 instruments)`}</Button>}
+          {scan?.limit_note && <Notice>{scan.limit_note}</Notice>}
           {scan && (
             <>
               <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
