@@ -131,13 +131,15 @@ function FxPanel({ isAdmin }: { isAdmin: boolean }) {
 function BrokerPanel({ isAdmin }: { isAdmin: boolean }) {
   const brokers = useApi("/api/brokers");
   const status = useApi("/api/brokers/status", 15_000);
-  const [form, setForm] = useState({ id: "", adapter: "ccxt", label: "", currency: "USDT", exchange: "binance", market_type: "spot", host: "127.0.0.1", port: "7497" });
+  const [form, setForm] = useState({ id: "alpaca-paper", adapter: "alpaca", label: "", currency: "USD", exchange: "binance", market_type: "spot", host: "127.0.0.1", port: "7497", virtual_capital: "" });
   const [cred, setCred] = useState({ broker: "", api_key: "", api_secret: "", passphrase: "" });
   const act = useAction();
   const connected = (id: string) => (status.data ?? []).some((b: Json) => b.id === id && b.connected);
   const refresh = () => { brokers.reload(); status.reload(); };
   const create = () => act.run(() => post("/api/brokers", { id: form.id, adapter: form.adapter, label: form.label || form.id, currency: form.currency, is_live: false,
-    config: form.adapter === "ccxt" ? { exchange: form.exchange, market_type: form.market_type } : { host: form.host, port: Number(form.port) } }), "Account added.").then(refresh);
+    config: form.adapter === "ccxt" ? { exchange: form.exchange, market_type: form.market_type }
+      : form.adapter === "alpaca" ? (form.virtual_capital ? { virtual_capital: Number(form.virtual_capital) } : {})
+      : { host: form.host, port: Number(form.port) } }), "Account added. Now store its API key and secret below, then press Connect.").then(refresh);
   return (
     <Panel title="Broker management and API credentials">
       <div className="space-y-4">
@@ -155,10 +157,12 @@ function BrokerPanel({ isAdmin }: { isAdmin: boolean }) {
             <div className="space-y-3 rounded border border-line p-3">
               <h3 className="text-sm font-semibold">Add an exchange or broker account</h3>
               <div className="grid gap-3 sm:grid-cols-3">
-                <Field label="Account id"><input value={form.id} placeholder="binance-test" onChange={(e) => setForm({ ...form, id: e.target.value })} /></Field>
-                <Field label="Adapter"><select value={form.adapter} onChange={(e) => setForm({ ...form, adapter: e.target.value, currency: e.target.value === "ccxt" ? "USDT" : "EUR" })}><option value="ccxt">CCXT (crypto)</option><option value="ibkr">Interactive Brokers</option></select></Field>
+                <Field label="Account id"><input value={form.id} placeholder="alpaca-paper" onChange={(e) => setForm({ ...form, id: e.target.value })} /></Field>
+                <Field label="Adapter"><select value={form.adapter} onChange={(e) => setForm({ ...form, adapter: e.target.value, currency: e.target.value === "ccxt" ? "USDT" : e.target.value === "alpaca" ? "USD" : "EUR" })}><option value="alpaca">Alpaca (US stocks, ETFs, crypto)</option><option value="ccxt">CCXT (crypto)</option><option value="ibkr">Interactive Brokers</option></select></Field>
                 <Field label="Account currency"><input value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value.toUpperCase() })} /></Field>
-                {form.adapter === "ccxt" ? <>
+                {form.adapter === "alpaca" ? <>
+                  <Field label="Virtual capital (base currency; blank = the paper capital in Settings)" className="sm:col-span-2"><input type="number" min="0" step="any" value={form.virtual_capital} onChange={(e) => setForm({ ...form, virtual_capital: e.target.value })} /></Field>
+                </> : form.adapter === "ccxt" ? <>
                   <Field label="Exchange (CCXT id)"><input value={form.exchange} onChange={(e) => setForm({ ...form, exchange: e.target.value })} /></Field>
                   <Field label="Market"><select value={form.market_type} onChange={(e) => setForm({ ...form, market_type: e.target.value })}><option>spot</option><option>swap</option></select></Field>
                 </> : <>
@@ -166,7 +170,8 @@ function BrokerPanel({ isAdmin }: { isAdmin: boolean }) {
                   <Field label="Gateway port"><input value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} /></Field>
                 </>}
               </div>
-              <p className="text-xs text-dim">Accounts added here connect to the exchange testnet or an IBKR paper gateway. Real-money accounts cannot be created unless the deployment itself authorizes live trading.</p>
+              {form.adapter === "alpaca" && <p className="text-xs text-dim">Use the API key and secret of your Alpaca <b>paper</b> account (Alpaca dashboard → Paper Trading → API Keys). The platform trades the virtual capital above, not the balance Alpaca shows. An exchange rate between your base currency and USD must exist: press "Load ECB reference rates" in the exchange-rate panel on this page first.</p>}
+              <p className="text-xs text-dim">Accounts added here connect to Alpaca paper, an exchange testnet or an IBKR paper gateway. Real-money accounts cannot be created unless the deployment itself authorizes live trading.</p>
               <Button kind="ghost" disabled={act.busy || !form.id} onClick={create}>Add account</Button>
             </div>
             <div className="space-y-3 rounded border border-line p-3">

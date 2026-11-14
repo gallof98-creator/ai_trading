@@ -95,3 +95,14 @@ def test_settings_saved_before_the_confirmation_existed_do_not_stop_the_platform
     rt = TradingRuntime(db, settings)
     rt.start()
     assert rt.started and rt.user_settings.trading_mode == "semi_auto"
+
+
+def test_an_alpaca_paper_account_can_be_added_and_refuses_to_connect_without_a_key(client):
+    admin = login(client)
+    body = {"id": "alpaca-paper", "adapter": "alpaca", "label": "Alpaca paper", "currency": "USD", "is_live": False, "config": {"virtual_capital": 1000}}
+    assert client.post("/api/brokers", headers=admin, json=body).status_code in (200, 201)
+    assert client.post("/api/brokers", headers=admin, json={**body, "id": "alpaca-live", "is_live": True}).status_code in (400, 403)  # live is not authorized
+    listed = {b["id"]: b for b in client.get("/api/brokers", headers=admin).json()}
+    assert listed["alpaca-paper"]["adapter"] == "alpaca" and listed["alpaca-paper"]["has_credentials"] is False
+    r = client.post("/api/brokers/alpaca-paper/connect", headers=admin)
+    assert r.status_code == 400 and ("exchange rate" in r.json()["detail"] or "API key" in r.json()["detail"])  # says what is missing; nothing is contacted

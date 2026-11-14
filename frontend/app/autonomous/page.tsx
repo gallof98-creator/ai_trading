@@ -66,7 +66,7 @@ function Proposal({ p, canTrade, onDone }: { p: Json; canTrade: boolean; onDone:
 const FUNNEL: [string, string][] = [["validation", "not validated"], ["tradable", "not tradable"], ["data", "prices stale or missing"], ["liquidity", "too illiquid"],
   ["regime", "regime does not fit"], ["signal", "no entry now"], ["already", "already proposed or held"], ["risk", "refused by risk engine"]];
 
-function AutopilotPanel({ canTrade, isAdmin, strategies }: { canTrade: boolean; isAdmin: boolean; strategies: Json[] }) {
+function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade: boolean; isAdmin: boolean; strategies: Json[]; accounts: string[] }) {
   const ap = useApi("/api/quant/autopilot", 5_000);
   const [draft, setDraft] = useState<Json>(null);
   const act = useAction();
@@ -122,6 +122,8 @@ function AutopilotPanel({ canTrade, isAdmin, strategies }: { canTrade: boolean; 
         <details className="mt-3 border-t border-line pt-3">
           <summary className="cursor-pointer text-xs text-accent">What the autopilot does (settings)</summary>
           <div className="mt-3 flex flex-wrap items-end gap-3">
+            <Field label="Account it works on"><select value={cfg.broker_id} onChange={(e) => set("broker_id", e.target.value)}><option value="">first available ({st.broker_id ?? "none"})</option>
+              {accounts.map((b) => <option key={b} value={b}>{b}</option>)}</select></Field>
             <Field label="Cycle every (minutes)"><input type="number" min="5" className="w-24" value={cfg.cycle_minutes} onChange={(e) => set("cycle_minutes", Number(e.target.value))} /></Field>
             <Field label="Instruments followed"><input type="number" min="1" max="200" className="w-24" value={cfg.max_instruments} onChange={(e) => set("max_instruments", Number(e.target.value))} /></Field>
             <Field label="Minimum price"><input type="number" min="0" step="any" className="w-24" value={cfg.min_price} onChange={(e) => set("min_price", Number(e.target.value))} /></Field>
@@ -193,7 +195,7 @@ function Autonomous({ user }: { user: User }) {
         <Stat label="Open positions" value={positions.length} hint={`${proposals.length} proposals waiting`} />
       </div>
 
-      <AutopilotPanel canTrade={canTrade} isAdmin={user.role === "admin"} strategies={strategies.data ?? []} />
+      <AutopilotPanel canTrade={canTrade} isAdmin={user.role === "admin"} strategies={strategies.data ?? []} accounts={(brokers ?? []).filter((b: Json) => b.capabilities?.trading_enabled).map((b: Json) => b.id)} />
 
       <Panel title={`Proposals waiting for your decision (${proposals.length})`} right={canTrade && account ? (
         <Button kind="ghost" disabled={act.busy || halted} onClick={() => act.run(async () => setScan(await post("/api/quant/scan", { broker_id: account })), "Scan complete.").then(refresh)}>Scan for opportunities</Button>) : undefined}>
