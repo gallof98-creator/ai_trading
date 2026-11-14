@@ -150,3 +150,15 @@ def test_bulk_import_scan_and_backtest_on_stocks(api):
     assert client.get("/api/market/analysis", headers=admin, params=q).json()["kind"] == "historical"
     trade_days = {pd.Timestamp(t["entry_ts"]).day_of_week for t in one["trades"]}
     assert trade_days and trade_days <= {0, 1, 2, 3, 4}  # fills only on trading days
+
+
+def test_instrument_list_shows_the_last_stored_price_and_says_what_it_is(client):
+    admin = login(client)
+    client.put("/api/settings", headers=admin, json=UserSettings(initial_paper_capital=100_000).model_dump())
+    client.post("/api/market/import-csv-bulk", headers=admin, json={"market": "US", "timeframe": "1d", "files": [{"name": "MSFT.csv", "csv": vendor_csv(1)}]})
+    rows = {r["id"]: r for r in client.get("/api/instruments", headers=admin).json()}
+    msft = rows["STOCK:MSFT"]
+    expected = daily_frame(1)
+    assert msft["last_price"] == pytest.approx(expected["close"].iloc[-1] * 0.97, rel=1e-3) or msft["last_price"] == pytest.approx(expected["close"].iloc[-1], rel=1e-3)
+    assert msft["last_price_source"] == "last stored bar" and msft["last_price_at"][:10] == expected.index[-1].date().isoformat()
+    assert rows["STOCK:AAPL"]["last_price"] is None and rows["STOCK:AAPL"]["last_price_source"] is None  # nothing stored: nothing shown

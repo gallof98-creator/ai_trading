@@ -4,6 +4,8 @@ from __future__ import annotations
 from typing import Literal
 
 import httpx
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
@@ -54,17 +56,43 @@ def instruments(q: str = "", limit: int = 300, has_data: bool | None = None, _: 
     (the universe can hold thousands of stocks) - use /api/instruments/stats for totals."""
     from ..market_data.store import BarStore
 
+    from sqlalchemy import select, tuple_
+
+    from ..database.models import BarRow, BarSeries
+
     series: dict[str, list] = {}
-    for c in BarStore().coverage(session):
-        series.setdefault(c["instrument_id"], []).append({"timeframe": c["timeframe"], "bars": c["bars"], "kind": c["kind"]})
+    newest: dict[str, tuple[int, str]] = {}  # instrument -> (time of its newest stored bar, timeframe)
+    for r in session.scalars(select(BarSeries)):
+        series.setdefault(r.instrument_id, []).append({"timeframe": r.timeframe, "bars": r.bars, "kind": r.kind})
+        if r.instrument_id not in newest or r.last_ms > newest[r.instrument_id][0]:
+            newest[r.instrument_id] = (r.last_ms, r.timeframe)
     needle = q.strip().upper()
     with rt.lock:
         builtin = {i.id for i in default_instruments()}
         rows = [i for i in rt.registry.all() if (not needle or needle in i.id.upper()) and (has_data is None or (i.id in series) == has_data)]
         rows.sort(key=lambda i: (i.id not in series and i.id not in builtin, i.id))
-        return [{**i.model_dump(mode="json"), "last_price": rt.portfolio.prices.get(i.id), "data_kind": rt.kinds.get(i.id),
-                 "feed_status": rt.feed_status.get(i.id), "removable": i.id not in builtin, "series": series.get(i.id, [])}
-                for i in rows[: max(1, min(limit, 2000))]]
+        rows = rows[: max(1, min(limit, 2000))]
+        # Last price: a fresh live tick when there is one, otherwise the close of the newest stored bar, each labelled as what it is.
+        keys = [(i.id, newest[i.id][1], newest[i.id][0]) for i in rows if i.id in newest]
+        closes: dict[str, float] = {}
+        for k in range(0, len(keys), 400):
+            for iid, close in session.execute(select(BarRow.instrument_id, BarRow.close).where(
+                    tuple_(BarRow.instrument_id, BarRow.timeframe, BarRow.ts_ms).in_(keys[k:k + 400]))):
+                closes[iid] = close
+        out = []
+        for i in rows:
+            live = rt.live_hub.quote(i.id)
+            if live and live["fresh"]:
+                price, at, source = live["price"], live["ts_source"], "live"
+            elif i.id in closes:
+                price, source = closes[i.id], "last stored bar"
+                at = datetime.fromtimestamp(newest[i.id][0] / 1000, tz=timezone.utc).isoformat()
+            else:
+                price, at, source = rt.portfolio.prices.get(i.id), None, None
+            out.append({**i.model_dump(mode="json"), "last_price": price, "last_price_at": at, "last_price_source": source, "data_kind": rt.kinds.get(i.id),
+                        "feed_status": rt.feed_status.get(i.id) or (f"live ({rt.live.subscribed[i.id]})" if i.id in rt.live.subscribed else None),
+                        "removable": i.id not in builtin, "series": series.get(i.id, [])})
+        return out
 
 
 @router.get("/instruments/stats")

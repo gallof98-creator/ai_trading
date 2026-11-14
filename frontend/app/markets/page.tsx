@@ -217,11 +217,13 @@ function Markets({ user }: { user: User }) {
       <Panel title={`Watchlist · ${stats.data?.total ?? "…"} instruments, ${stats.data?.with_data ?? "…"} with stored prices`}
         right={<input aria-label="Search instruments" placeholder="Search ticker…" value={search} onChange={(e) => setSearch(e.target.value)} className="!w-44" />}>
         <Table max="max-h-72" head={["Instrument", "Class", "Currency", "Stored data", "Last price", "Feed", ""]}
-          rows={(instruments.data ?? []).map((i: { id: string; asset_class: string; quote_currency: string; last_price: number | null; feed_status: string | null; removable: boolean; series: { timeframe: string; bars: number; kind: string }[] }) => [
+          rows={(instruments.data ?? []).map((i: { id: string; asset_class: string; quote_currency: string; last_price: number | null; last_price_at: string | null; last_price_source: string | null; feed_status: string | null; removable: boolean; series: { timeframe: string; bars: number; kind: string }[] }) => [
             <button key="i" className={`underline-offset-2 hover:underline ${i.id === iid ? "text-accent" : ""}`} onClick={() => { setIid(i.id); if (i.series.length && !i.series.some((c) => c.timeframe === tf)) setTf(i.series[0].timeframe); }}>{i.id}</button>,
             i.asset_class, i.quote_currency,
             i.series.length ? i.series.map((c) => <span key={c.timeframe} className="mr-2"><Badge kind={c.kind === "simulated" ? "accent" : "up"}>{c.timeframe} · {c.bars} {c.kind}</Badge></span>) : <span className="text-dim">none</span>,
-            num(i.last_price, 4), i.feed_status ?? "—",
+            i.last_price === null || i.last_price === undefined ? "—" : <span key="p" title={i.last_price_source ?? ""}>{num(i.last_price, i.last_price < 10 ? 4 : 2)}
+              <span className="ml-2 text-dim">{i.last_price_source === "live" ? "● live" : i.last_price_at ? `close ${i.last_price_at.slice(0, 10)}` : ""}</span></span>,
+            i.feed_status ?? (i.series.length ? "end of day" : "—"),
             canWrite && i.removable ? <button key="x" className="text-down hover:underline" onClick={() => window.confirm(`Remove ${i.id} and its stored prices?`) && act.run(() => post(`/api/instruments/${encodeURIComponent(i.id)}`, undefined, "DELETE"), "Removed.").then(refreshAll)}>Remove</button> : ""])} />
         {(instruments.data?.length ?? 0) >= 200 && <p className="mt-2 text-xs text-dim">Showing the first 200 matches (instruments with stored prices first). Use the search box to find others.</p>}
       </Panel>
