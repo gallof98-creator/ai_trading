@@ -1064,7 +1064,20 @@ class TradingRuntime:
                         continue
                     for ts, row in ds.bars[ds.bars.index > since].iterrows():
                         events.setdefault(ts, []).append((iid, row))
-            delta, bars_used = pd.Timedelta(days=1), 0
+            # Strategies deployed on daily bars of instruments without a live feed advance on downloaded bars too.
+            daily = sorted({d.instrument_id for d in self.deployments.values()
+                            if self._exec_tf(d.instrument_id) == "1d" and d.instrument_id not in self.live.subscribed
+                            and self.kinds.get(d.instrument_id) != DataKind.SIMULATED.value})
+            fed = 0
+            for iid in daily:
+                with self.db.session() as session:
+                    ds = self.store.load(session, iid, "1d")
+                if ds is not None and ds.kind is not DataKind.SIMULATED:
+                    try:
+                        fed += self.ingest(iid, "1d", ds, trade=(iid, "1d") in self.bars)  # the first pass only warms up indicators
+                    except (RuntimeError_, ValueError) as exc:
+                        self.notifier.notify(self.clock(), "system", "warning", f"Daily bars of {iid} were not applied", str(exc))
+            delta, bars_used = pd.Timedelta(days=1), fed
             fills_before = len(self.portfolio.trades) + sum(1 for s in self.portfolio.slices.values() if s.qty)
             for ts in sorted(events):
                 t_open = ts.to_pydatetime()

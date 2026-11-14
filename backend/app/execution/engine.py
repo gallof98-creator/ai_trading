@@ -308,10 +308,10 @@ class TradingEngine:
         return self._submit(order, ts)
 
     # ------------------------------------------------------------------ signals
-    def on_signal(self, signal: Signal, dep: Deployment) -> list[Order]:
+    def on_signal(self, signal: Signal, dep: Deployment, mode_override: TradingMode | None = None) -> list[Order]:
         """Turn a strategy signal into orders according to the trading mode. Returns the orders created."""
         self.journal.signal(signal)
-        mode = self._mode()
+        mode = mode_override or self._mode()
         if mode is TradingMode.MANUAL:
             return []
         ts, key = signal.ts, dep.key
@@ -385,8 +385,9 @@ class TradingEngine:
             self._client_ids[order.client_order_id] = order.id
             pending = order.model_copy(update={"status": OrderStatus.PENDING_APPROVAL})
             ttl = self._proposal_ttl()
-            approval = PendingApproval(self._new_id("a"), pending, intent, protection, ts,
-                                       (self._wall_clock() if self._wall_clock else ts) + ttl if ttl else None, dict(self._rationale))
+            # An order that only reduces risk (closing a position) never lapses: letting it expire would leave the risk on.
+            expires = (self._wall_clock() if self._wall_clock else ts) + ttl if ttl and not order.reduce_only else None
+            approval = PendingApproval(self._new_id("a"), pending, intent, protection, ts, expires, dict(self._rationale))
             self._rationale = {}
             self.approvals[approval.id] = approval
             self.journal.alert(ts, "approval", "info", f"Approval needed: {order.side.value} {order.qty:g} {order.instrument_id}", order.strategy or "")

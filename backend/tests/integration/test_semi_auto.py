@@ -81,7 +81,7 @@ def make_rt(tmp_path, name="t"):
 def tick(rt, symbol, price, minute, second=10):
     ts = T0 + timedelta(minutes=minute, seconds=second)
     rt.now[0] = ts + timedelta(milliseconds=200)
-    rt.feeder.trade(symbol, price, ts, 0.01)
+    rt.feeder.trade(symbol, price, ts, 1000.0)  # ample volume: paper fills take at most 10% of a bar
 
 
 def proposal_on_live_feed(tmp_path, name="t", symbol="BTC/USD", iid="CRYPTO:BTC/USD", broker="paper-main", base=68000.0):
