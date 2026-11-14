@@ -1032,6 +1032,11 @@ class TradingRuntime:
         source = f"live:{provider}"
         exec_tf = self._exec_tf(instrument_id)
         self.ingest(instrument_id, "1m", Dataset(frame, DataKind.REALTIME, source), trade=exec_tf in (None, "1m"), drive_without_deployment=True)
+        with self.lock:
+            # Exits the broker cannot hold for us are checked on every live minute, whatever timeframe the strategy runs on.
+            closed = self.engine.check_soft_exits(instrument_id, float(frame["close"].iloc[-1]), self.clock())
+            if closed:
+                self.persist()
         with self.lock:  # orders working at an external broker are followed up on every live minute
             if any(o.is_open and not o.is_simulated_venue for o in self.engine.orders.values()):
                 self.engine.poll_orders(self.clock())
@@ -1285,8 +1290,23 @@ class TradingRuntime:
             price, age, spread = self.portfolio.prices.get(iid, intent.price), None, None
         if intent.stop_distance and abs(price - intent.price) > self.user_settings.max_entry_drift * intent.stop_distance:
             return (f"the price moved from {intent.price:g} to {price:g}, more than {self.user_settings.max_entry_drift:.0%} of the stop distance")
-        approval.intent = replace(intent, price=price, data_age_seconds=age, spread_bps=(spread / price * 10_000) if spread and price else None,
-                                  cost_per_unit=self.cost_per_unit(intent.instrument, price, spread))
+        order, inst = approval.order, intent.instrument
+        cost = self.cost_per_unit(inst, price, spread)
+        # The order was sized for the proposal's price. If the price has moved, the same quantity may no longer fit the
+        # exposure room or the risk budget: it is reduced to what fits now (never increased).
+        state = self.engine._risk_state(ts)
+        unit = price * inst.contract_multiplier * intent.fx_rate
+        fits = [order.qty, self.risk.headroom(order.broker_id, inst, order.strategy, state) / unit]
+        if intent.stop_distance:
+            fits.append(self.user_settings.risk.risk_per_trade * state.equity / ((intent.stop_distance + cost) * inst.contract_multiplier * intent.fx_rate))
+        qty = inst.round_qty(min(fits))
+        if qty <= 0 or qty < inst.min_qty:
+            return f"at the current price {price:g} no tradable quantity fits the risk and exposure limits any more"
+        if qty != order.qty:
+            order = order.model_copy(update={"qty": qty})
+            approval.order = order
+        approval.intent = replace(intent, order=order, price=price, data_age_seconds=age, spread_bps=(spread / price * 10_000) if spread and price else None,
+                                  cost_per_unit=cost)
         return None
 
     def proposals(self) -> list[dict]:

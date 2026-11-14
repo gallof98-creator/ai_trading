@@ -129,7 +129,8 @@ def test_semi_automatic_proposal_shows_everything_and_sends_nothing_until_approv
     tick(rt, "BTC/USD", price * 1.0002, minute + 1)
     tick(rt, "BTC/USD", price * 1.0003, minute + 2)
     key = ("paper-main", "CRYPTO:BTC/USD", "ema_crossover")
-    assert rt.portfolio.qty(key) == pytest.approx(p["qty"])
+    # The price was a hair higher at approval, so the quantity was trimmed to stay inside the 25% limit: never more than proposed.
+    assert order.qty <= p["qty"] and rt.portfolio.qty(key) == pytest.approx(order.qty) and order.qty == pytest.approx(p["qty"], rel=0.01)
     stops = [o for o in rt.engine.orders.values() if o.is_open and o.type is OrderType.STOP]
     assert len(stops) == 1 and stops[0].reduce_only
     with rt.db.session() as s:
@@ -433,3 +434,123 @@ def test_fractional_shares_make_expensive_stocks_tradable_and_are_handled_honest
     fake.assets[0]["fractionable"] = False
     a.connect()
     assert any("fractional share quantities" in r for r in a.unsupported_reasons(order()))
+
+
+def alpaca_runtime(tmp_path, fake, fractional=True):
+    from app.security.credentials import store_credentials
+    from app.security.vault import CredentialVault
+
+    key = CredentialVault.generate_key()
+    db = Database(f"sqlite:///{tmp_path}/x.db")
+    db.create_all()
+    with db.session() as s:
+        save_settings(s, initial_settings().model_copy(update={"fractional_shares": fractional}))
+    now = [T0]
+    rt = TradingRuntime(db, Settings(_env_file=None, credential_key=key), clock=lambda: now[0])
+    rt.start()
+    rt.now = now
+    rt.add_fx_rate("EUR", "USD", 1.08, "manual", "admin", T0 - timedelta(hours=1))
+    with db.session() as s:
+        s.add(BrokerAccount(id="alpaca-paper", adapter="alpaca", label="Alpaca paper", is_live=False, currency="USD", config={}))
+        s.flush()
+        store_credentials(s, CredentialVault(key), "alpaca-paper", {"api_key": "PK-PAPER", "api_secret": "SECRET"}, ["trade"], "admin")
+    rt.connect_broker("alpaca-paper", "admin", http_client=fake.client())
+    feeder = Feeder(rt.live_hub)
+    rt.live_source_factory = lambda _rt: [(feeder, lambda inst: inst.symbol if inst.asset_class is AssetClass.STOCK else None)]
+    rt.feeder = feeder
+    return rt
+
+
+def open_position_at_alpaca(rt, fake):
+    """Proposal from the live feed, approved, filled at Alpaca. Returns (proposal, entry price, next minute)."""
+    dep = rt.add_deployment("ema_crossover", {"fast": 2, "slow": 5, "allow_short": False}, "STOCK:AAPL", "1m", "alpaca-paper", "admin")
+    rt.update_deployment(dep, "admin", active=True)
+    rt.live_subscribe(["STOCK:AAPL"], "admin")
+    minute = 0
+    for price in [200 * (1 - 0.0005 * k) for k in range(60)] + [200 * (0.97 + 0.002 * k) for k in range(1, 30)]:
+        tick(rt, "AAPL", price, minute)
+        minute += 1
+        if rt.engine.approvals:
+            break
+    [p] = rt.proposals()
+    tick(rt, "AAPL", p["entry_price"] * 1.0001, minute, 30)
+    rt.resolve_approval(p["id"], True, "trader@example.com")
+    entry_id = next(i for i, o in fake.orders.items() if o["side"] == "buy")
+    fill = p["entry_price"] * 1.0002
+    fake.fill(entry_id, fill)
+    fake.positions = [{"symbol": "AAPL", "qty": fake.orders[entry_id]["qty"], "side": "long", "avg_entry_price": str(fill), "current_price": str(fill)}]
+    tick(rt, "AAPL", fill, minute + 1)
+    tick(rt, "AAPL", fill, minute + 2)
+    return p, fill, minute + 3
+
+
+def test_fractional_position_at_alpaca_is_protected_by_the_platform_on_live_prices(tmp_path):
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    held = rt.portfolio.qty(key)
+    assert p["qty"] != int(p["qty"]) and 0 < held <= p["qty"] and held == pytest.approx(p["qty"], rel=0.01)   # a fraction of a share
+    p = {**p, "qty": held}
+    # Nothing can rest at Alpaca for a fractional quantity: no stop and no target were sent, and the platform knows it is watching.
+    assert [o["type"] for o in fake.orders.values()] == ["market"] and rt.engine.unwatched_positions() == [key]
+    prot = rt.engine.protections[key]
+    assert prot.soft_stop and prot.stop_order is None and prot.target_order is None and prot.stop_price < fill
+
+    tick(rt, "AAPL", prot.stop_price * 1.001, minute)        # above the stop: nothing happens
+    tick(rt, "AAPL", prot.stop_price * 1.001, minute + 1)
+    assert len(fake.orders) == 1
+    tick(rt, "AAPL", prot.stop_price * 0.995, minute + 2)    # through the stop within the minute
+    tick(rt, "AAPL", prot.stop_price * 0.995, minute + 3)    # that minute completes: the platform closes at market
+    sells = [o for o in fake.orders.values() if o["side"] == "sell"]
+    assert len(sells) == 1 and sells[0]["type"] == "market" and float(sells[0]["qty"]) == pytest.approx(p["qty"])
+    # The sale has not filled yet (think: after hours). More bad prices must not send it a second time.
+    tick(rt, "AAPL", prot.stop_price * 0.99, minute + 4)
+    tick(rt, "AAPL", prot.stop_price * 0.99, minute + 5)
+    assert len([o for o in fake.orders.values() if o["side"] == "sell"]) == 1
+    fake.fill(sells[0]["id"], prot.stop_price * 0.995)
+    fake.positions = []
+    tick(rt, "AAPL", prot.stop_price * 0.99, minute + 6)
+    assert rt.portfolio.qty(key) == 0 and rt.portfolio.trades[-1].exit_reason == "stop_loss" and rt.portfolio.trades[-1].pnl < 0
+    assert rt.engine.unwatched_positions() == [] and rt.portfolio.reconcile() == []
+    rt.live.stop()
+
+
+def test_take_profit_at_alpaca_is_watched_by_the_platform_and_whole_shares_keep_a_resting_stop(tmp_path):
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake, fractional=False)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    prot = rt.engine.protections[key]
+    # Whole shares: the stop rests at Alpaca. The target cannot rest next to it (Alpaca reserves the shares), so it is watched.
+    assert [o["type"] for o in fake.orders.values()] == ["market", "stop"] and not prot.soft_stop and prot.target_order is None
+    assert rt.engine.unwatched_positions() == [key]
+    target = fill + prot.take_profit_distance
+    tick(rt, "AAPL", target * 1.001, minute)
+    tick(rt, "AAPL", target * 1.001, minute + 1)
+    sells = [o for o in fake.orders.values() if o["side"] == "sell" and o["type"] == "market"]
+    assert len(sells) == 1
+    fake.fill(sells[0]["id"], target * 1.001)
+    fake.positions = []
+    tick(rt, "AAPL", target, minute + 2)
+    assert rt.portfolio.qty(key) == 0 and rt.portfolio.trades[-1].exit_reason == "take_profit" and rt.portfolio.trades[-1].pnl > 0
+    assert next(o for o in fake.orders.values() if o["type"] == "stop")["status"] == "canceled"   # the resting stop is withdrawn with the position
+    rt.live.stop()
+
+
+def test_a_position_without_live_prices_and_without_a_resting_stop_raises_a_critical_alert(tmp_path):
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake)
+    open_position_at_alpaca(rt, fake)
+    rt.live_unsubscribe(["STOCK:AAPL"], "admin")
+    rt.autopilot.tick()   # the live source still exists: the feed is requested again by itself
+    assert "STOCK:AAPL" in rt.live.subscribed
+    rt.live_unsubscribe(["STOCK:AAPL"], "admin")
+    rt.live_source_factory = lambda _rt: []   # now nothing can supply live prices for it
+    rt.configure_live()
+    rt.autopilot.tick()
+    rt.autopilot.tick()
+    with rt.db.session() as s:
+        alerts = [n for n in s.query(Notification) if n.severity == "critical" and "No working stop on STOCK:AAPL" in n.title]
+    assert len(alerts) == 1   # said once, loudly, not every minute
+    rt.live.stop()

@@ -66,6 +66,8 @@ class AutopilotSettings(BaseModel):
     # from Alpaca's crypto data, which needs no key. An empty list switches crypto off.
     crypto_pairs: list[str] = Field(default_factory=lambda: ["BTC/USD", "ETH/USD", "SOL/USD", "LTC/USD", "LINK/USD", "AVAX/USD", "DOGE/USD",
                                                              "UNI/USD", "AAVE/USD", "BCH/USD"], max_length=50)
+    # Exchange-traded funds always kept in the universe (the "most traded stocks" screen does not reliably include them).
+    etfs: list[str] = Field(default_factory=lambda: ["SPY", "QQQ", "IWM", "DIA", "VTI", "EFA", "EEM", "GLD", "TLT", "XLK", "XLF", "XLE"], max_length=100)
     min_price: float = Field(5.0, ge=0)
     min_traded_value: float = Field(20_000_000.0, ge=0)  # 20-day average traded value, quote currency
     validations_per_cycle: int = Field(60, ge=1, le=500)

@@ -173,6 +173,7 @@ class TradingEngine:
         for key, prot in list(self.protections.items()):
             if key[1] == instrument_id:
                 self._update_protection_at_close(key, prot, close, ts)
+        self.check_soft_exits(instrument_id, close, ts)  # targets the venue could not hold are watched on the close as well
 
     def end_of_timestamp(self, ts: datetime, reconcile: bool = False) -> None:
         """Call once after all bars closing at `ts`: revalue, run circuit breakers, apply the emergency policy."""
@@ -308,11 +309,40 @@ class TradingEngine:
                     if prot.stop_order is None:
                         prot.soft_stop = True
 
+    def check_soft_exits(self, instrument_id: str, price: float, ts: datetime) -> list[Order]:
+        """Stops and targets that could not be left resting at the broker (fractional shares, crypto at Alpaca, a target
+        next to a stop on the same shares) are watched here: called on every price the platform receives for the
+        instrument, it closes the position at market once the price is through the level."""
+        out = []
+        for key, prot in list(self.protections.items()):
+            if key[1] != instrument_id or prot.stop_price is None or self.portfolio.qty(key) == 0:
+                continue
+            s = self.portfolio.slices[key]
+            order = None
+            if prot.soft_stop and (price - prot.stop_price) * prot.direction <= 0:
+                order = self._close_slice(key, "stop_loss", ts)
+            elif prot.take_profit_distance and prot.target_order is None and \
+                    (price - (s.avg_price + prot.direction * prot.take_profit_distance)) * prot.direction >= 0:
+                order = self._close_slice(key, "take_profit", ts)
+            if order is not None:
+                out.append(order)
+        return out
+
+    def unwatched_positions(self) -> list[Key]:
+        """Positions whose stop or target depends on the platform seeing prices (nothing rests at the broker for them)."""
+        return [key for key, prot in self.protections.items()
+                if self.portfolio.qty(key) != 0 and (prot.soft_stop or (prot.take_profit_distance and prot.target_order is None))]
+
     def _close_slice(self, key: Key, reason: str, ts: datetime) -> Order | None:
         qty = self.portfolio.qty(key)
         if qty == 0:
             return None
         broker_id, instrument_id, strategy = key
+        # A closing market order that is already on its way (e.g. sent after hours) is never sent a second time:
+        # at a broker that does not enforce reduce-only, a duplicate could turn the position the other way.
+        for o in self.orders.values():
+            if o.is_open and o.reduce_only and o.type is OrderType.MARKET and (o.broker_id, o.instrument_id, o.strategy) == key:
+                return o
         inst = self.registry.get(instrument_id)
         oid = self._new_id()
         order = Order(id=oid, client_order_id=f"{oid}:{reason}", broker_id=broker_id, instrument_id=instrument_id,

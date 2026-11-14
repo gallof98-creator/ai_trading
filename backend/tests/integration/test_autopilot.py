@@ -76,7 +76,8 @@ def rt(tmp_path):
 
 
 def configure(rt, **kw):
-    kw.setdefault("crypto_pairs", [])     # crypto has its own test below
+    kw.setdefault("crypto_pairs", [])     # crypto and ETFs have their own tests below
+    kw.setdefault("etfs", [])
     kw.setdefault("allow_short", True)  # the trend rule then trades often enough on the test series to be fully validated
     cfg = AutopilotSettings(enabled=True, strategies=["ema_crossover", "rsi_reversion"], max_instruments=10, min_traded_value=1e6, **kw)
     with rt.db.session() as s:
@@ -142,7 +143,7 @@ def test_prices_are_refreshed_daily_and_expired_validations_are_redone(rt):
 def test_autopilot_respects_the_kill_switch_missing_key_and_one_failing_step(rt):
     configure(rt, seed_most_active=False)
     out = rt.autopilot.tick()
-    assert out["universe"] == {"skipped": "switched off"} and "error" in out["candidates"] or out["candidates"]["count"] == 0
+    assert out["universe"] == {"etfs": 0, "skipped": "0 US instruments already have prices"} and out["candidates"]["count"] == 0
     configure(rt)
     rt.set_provider_key("alpaca", None, "admin")
     out = rt.autopilot.run_cycle()
@@ -245,3 +246,19 @@ def test_the_forming_daily_bar_of_a_crypto_pair_is_never_stored():
     frame = alpaca_crypto_daily("BTC/USD", client=httpx.Client(transport=httpx.MockTransport(handler)), now=now)
     assert [str(t.date()) for t in frame.index] == ["2026-11-12", "2026-11-13"]  # today's bar is still forming and is left out
     assert frame["close"].tolist() == [1.5, 2.0] and calls[1]["page_token"] == "p2" and calls[0]["timeframe"] == "1Day"
+
+
+def test_etfs_are_kept_in_the_universe_as_etfs_and_analysed(rt):
+    end = rt.frames["AAA"].index[-1]
+    rt.frames["SPY"] = us_series(7)[:end]
+    rt.frames["QQQ"] = us_series(8)[:end]
+    rt.autopilot.most_active = lambda key, secret, top: ["AAA", "SPY"]   # the screener may return an ETF: it must not become a second, "stock" SPY
+    configure(rt, etfs=["spy", "QQQ"])
+    out = rt.autopilot.tick()
+    assert out["universe"]["etfs"] == 2 and out["universe"]["added"] == ["STOCK:AAA"] and out["universe"]["histories_requested"] == 3
+    ids = {i.id for i in rt.registry.all()}
+    assert {"ETF:SPY", "ETF:QQQ"} <= ids and "STOCK:SPY" not in ids and rt.registry.get("ETF:QQQ").asset_class is AssetClass.ETF
+    with rt.db.session() as s:
+        assert rt.store.load(s, "ETF:QQQ", "1d") is not None and rt.store.load(s, "ETF:SPY", "1d") is not None
+    assert out["candidates"]["by_liquidity"] == 3 and out["validation"]["run"] == 6   # ETFs are validated like any other instrument
+    assert rt.registry.is_mapped("paper-main", "ETF:QQQ") and rt.registry.get("ETF:QQQ").lot_size == 0.0001

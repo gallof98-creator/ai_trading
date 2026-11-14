@@ -35,6 +35,7 @@ Off by default; switched on from the Autonomous Quant page. Every cycle (15 minu
 |---|---|---|
 | Exchange rates | Fetches the European Central Bank's daily reference rates | internet |
 | Universe | When fewer instruments than configured have prices, adds the most traded US stocks (Alpaca's screener) and downloads their history | Alpaca key |
+| ETFs | Keeps a fixed, editable list of ETFs (SPY, QQQ, IWM and others) in the universe as ETFs and downloads their history | Alpaca key |
 | Prices | Brings daily prices up to date once a day | Alpaca key |
 | Crypto | Adds the configured crypto pairs (BTC/USD, ETH/USD and others, quoted in USD) and refreshes their daily history from Alpaca's crypto data; the still-forming bar of the current day is never stored | - |
 | Candidates | Keeps the most traded instruments above the price and traded-value floors that the account can trade, plus anything with a live feed | - |
@@ -161,6 +162,28 @@ and for installations saved before the option existed. With 1,000 EUR and at mos
 without fractions, any stock above that price could never be bought. At Alpaca, fractional quantities are sent as market orders for
 the day; a protective stop for a fractional position is not left resting at the broker (the platform watches it and closes at the
 bar that crosses it), and orders worth less than 1 USD are refused.
+
+## Exits the broker cannot hold
+
+Some exits cannot rest at Alpaca: a stop for a fractional quantity, a plain stop for crypto, and a take-profit next to a stop on the same
+shares (Alpaca reserves the shares for the first resting sell order). The platform watches these itself: on every live minute, and on
+every stored bar, a position whose price is through its stop or target is closed at market. A closing order already on its way is never
+sent twice. This only works while prices arrive, so:
+
+- every minute the platform asks for live prices for any such position that has none;
+- if no live source covers the instrument, a critical notification says that the position has no working stop.
+
+At approval, the quantity is reduced (never increased) if the price has moved so that the proposed quantity no longer fits the exposure
+room or the risk budget; if nothing tradable fits, the proposal is cancelled.
+
+## Before real money
+
+Live trading is switched off and nothing in this document changes that. The Alpaca adapter and the WebSocket stream have been tested
+against emulations, not against Alpaca itself. Before any real money, on the Alpaca **paper** account, check at least: the account
+connects and shows the broker's equity; an approved order appears at Alpaca with the right quantity; its fill is booked here and the
+books reconcile; a whole-share position gets its resting stop at Alpaca; a fractional position is closed by the platform when its
+stop is crossed; an order approved after hours behaves as expected; a restart keeps positions, stops and the virtual capital;
+Emergency Stop blocks new orders. Then several weeks of paper results compared with simply holding an index ETF.
 
 ## Exposure counts orders on their way
 

@@ -237,6 +237,9 @@ class AlpacaAdapter(BrokerAdapter):
             reasons.append(f"{inst.symbol} cannot be sold short at Alpaca")
         if crypto and order.type is OrderType.STOP:
             reasons.append("Alpaca does not accept plain stop orders for crypto")
+        if order.reduce_only and order.type is OrderType.LIMIT:
+            # Alpaca reserves the shares for the first resting sell order, so a target cannot rest next to the stop.
+            reasons.append("a take-profit cannot rest at Alpaca next to the stop on the same shares; the platform watches the target itself")
         if not crypto and abs(order.qty - round(order.qty)) > 1e-9 and (order.type is not OrderType.MARKET or not asset.get("fractionable", False)):
             reasons.append("fractional share quantities are accepted only for market orders in fractionable stocks")
         price = order.limit_price or order.stop_price

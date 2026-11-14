@@ -135,6 +135,8 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
               ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
               .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
           </div>
+          <div className="mt-3"><Field label="ETFs always kept in the universe (US tickers, comma separated)">
+            <input className="w-full" value={(cfg.etfs ?? []).join(", ")} onChange={(e) => set("etfs", e.target.value.split(",").map((x: string) => x.trim().toUpperCase()).filter(Boolean))} /></Field></div>
           <div className="mt-3"><Field label="Crypto pairs followed (quoted in USD, comma separated; empty = no crypto). Their prices come from Alpaca's crypto data and need no key.">
             <input className="w-full" value={(cfg.crypto_pairs ?? []).join(", ")} onChange={(e) => set("crypto_pairs", e.target.value.split(",").map((x: string) => x.trim().toUpperCase()).filter(Boolean))} /></Field></div>
           <div className="mt-3 text-xs text-dim">Timeframes: {TFS.map((t) => <label key={t} className="ml-2 inline-flex items-center gap-1"><input type="checkbox" className="!w-auto" checked={cfg.timeframes.includes(t)}

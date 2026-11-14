@@ -69,6 +69,7 @@ class Autopilot:
         self.wait_seconds = 900.0  # how long a cycle waits for a download or a metrics job
         self._lock = threading.Lock()
         self.activity: deque = deque(maxlen=80)
+        self._warned: set[str] = set()
         self.state: dict = {"running": False, "last_cycle": None, "last_result": None, "last_seed": None, "last_price_update": None, "cycles": 0}
 
     # ---- helpers
@@ -131,12 +132,32 @@ class Autopilot:
                     rt.persist()
         except Exception as exc:
             self._note("housekeeping", f"{type(exc).__name__}: {exc}", "warning")
+        try:
+            self._watch_positions()
+        except Exception as exc:
+            self._note("housekeeping", f"{type(exc).__name__}: {exc}", "warning")
         if not self.cfg.enabled:
             return None
         last = self.state["last_cycle"]
         if last is not None and rt.clock() - datetime.fromisoformat(last) < timedelta(minutes=self.cfg.cycle_minutes):
             return None
         return self.run_cycle()
+
+    def _watch_positions(self) -> None:
+        """A position whose stop is watched by the platform (not resting at the broker) needs live prices. Ask for them,
+        and say so loudly when there is no source: until prices arrive, that position has no working stop."""
+        rt = self.rt
+        need = sorted({key[1] for key in rt.engine.unwatched_positions()} - set(rt.live.subscribed))
+        if not need:
+            self._warned &= {key[1] for key in rt.engine.unwatched_positions()}
+            return
+        got = rt.live_subscribe(need, ACTOR)
+        for iid in sorted(set(got["unavailable"]) - self._warned):
+            self._warned.add(iid)
+            rt.notifier.notify(rt.clock(), "risk", "critical", f"No working stop on {iid}",
+                               "Its stop is watched by the platform, and no live price source covers this instrument: the stop is only "
+                               "checked when new daily prices are downloaded. Close the position or connect a live source.")
+            self._note("positions", f"{iid}: stop watched by the platform but no live prices available", "warning")
 
     def run_cycle(self) -> dict:
         if not self._lock.acquire(blocking=False):
@@ -167,26 +188,33 @@ class Autopilot:
 
     def _seed(self, _: dict) -> dict:
         cfg, creds, now = self.cfg, self._alpaca(), self.rt.clock()
-        if not cfg.seed_most_active:
-            return {"skipped": "switched off"}
         if creds is None:
             return {"skipped": "no Alpaca key: the universe is not extended automatically"}
+        out: dict = {}
         priced = self._priced()
-        have = [i for i in self._us_equities() if i.id in priced]
+        # ETFs first: a fixed, user-editable list that is always kept in the universe.
+        etfs = [e.strip().upper() for e in cfg.etfs if e.strip()]
+        wanted_etfs = self.rt.add_instruments(etfs, "US", "etf", ACTOR) if etfs else {"created": [], "existing": []}
+        missing = [i for i in wanted_etfs["created"] + wanted_etfs["existing"] if i not in priced]
+        out["etfs"] = len(etfs)
         last = self.state["last_seed"]
-        if len(have) >= cfg.max_instruments or (last and now - datetime.fromisoformat(last) < timedelta(hours=24)):
-            return {"skipped": f"{len(have)} US instruments already have prices"}
-        fetch = self.most_active or (lambda k, s, n: alpaca_most_active(k, s, n, self.rt.settings.alpaca_base_url))
-        symbols = fetch(creds["api_key"], creds["api_secret"], cfg.max_instruments)
-        self.state["last_seed"] = now.isoformat()
-        added = self.rt.add_instruments(symbols, "US", "stock", ACTOR)
-        missing = [i for i in added["created"] + added["existing"] if i not in priced]
-        downloaded = 0
-        if missing:
-            self.rt.start_download("alpaca", ACTOR, instrument_ids=missing, mode="full")
-            downloaded = self._wait_download().get("stored", 0)
-        self._note("universe", f"{len(added['created'])} of the most traded US stocks added, {len(missing)} histories requested")
-        return {"added": added["created"], "histories_requested": len(missing), "bars_stored": downloaded}
+        have = [i for i in self._us_equities() if i.id in priced]
+        added: list[str] = []
+        if cfg.seed_most_active and len(have) < cfg.max_instruments and not (last and now - datetime.fromisoformat(last) < timedelta(hours=24)):
+            fetch = self.most_active or (lambda k, s, n: alpaca_most_active(k, s, n, self.rt.settings.alpaca_base_url))
+            symbols = [s for s in fetch(creds["api_key"], creds["api_secret"], cfg.max_instruments) if s.upper() not in etfs]  # an ETF is never added twice as a stock
+            self.state["last_seed"] = now.isoformat()
+            result = self.rt.add_instruments(symbols, "US", "stock", ACTOR)
+            added = result["created"]
+            missing += [i for i in result["created"] + result["existing"] if i not in priced]
+        if not missing:
+            out["skipped"] = f"{len(have)} US instruments already have prices"
+            return out
+        self.rt.start_download("alpaca", ACTOR, instrument_ids=missing, mode="full")
+        stored = self._wait_download().get("stored", 0)
+        self._note("universe", f"{len(added)} of the most traded US stocks added; {len(missing)} histories requested (ETFs included)")
+        out.update(added=added, histories_requested=len(missing), bars_stored=stored)
+        return out
 
     def _fx(self, _: dict) -> dict:
         """The European Central Bank's daily reference rates (public, official), so that positions in other
