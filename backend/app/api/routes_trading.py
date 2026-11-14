@@ -193,6 +193,11 @@ def approvals(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtim
                 for a in rt.engine.approvals.values()]
 
 
+@router.get("/proposals")
+def proposals(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> list[dict]:
+    return rt.proposals()
+
+
 class ApprovalDecision(BaseModel):
     approve: bool
 

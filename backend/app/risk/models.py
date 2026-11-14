@@ -53,6 +53,9 @@ class OrderIntent:
     price: float  # reference price in quote currency
     fx_rate: float  # quote currency -> base currency
     stop_distance: float | None  # price distance to the protective stop, quote currency
+    cost_per_unit: float = 0.0  # estimated round-trip costs per unit (spread, slippage, commissions, FX), quote currency
+    data_age_seconds: float | None = None  # age of the live price the order was sized on; None when not a live price
+    spread_bps: float | None = None  # live bid/ask spread, when known
 
     @property
     def signed_notional(self) -> float:
@@ -62,7 +65,7 @@ class OrderIntent:
     def loss_at_stop(self) -> float | None:
         if not self.stop_distance or self.stop_distance <= 0:
             return None
-        return self.order.qty * self.stop_distance * self.instrument.contract_multiplier * self.fx_rate
+        return self.order.qty * (self.stop_distance + self.cost_per_unit) * self.instrument.contract_multiplier * self.fx_rate
 
 
 class EmergencyAction(StrEnum):

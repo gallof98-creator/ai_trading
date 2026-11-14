@@ -86,7 +86,9 @@ def propose(rt, session: Session, spec: StrategySpec, broker_id: str, actor: str
                 entry["reasons"].append(f"no exchange rate to value it: {exc}")
                 continue
             wanted_value = row["weight"] * equity
-            caps = {"target weight": wanted_value, "risk per trade at the stop": limits.risk_per_trade * equity / spec.stop_pct,
+            cost = rt.cost_per_unit(inst, price)
+            # Loss at the stop including estimated costs must fit the risk-per-trade budget.
+            caps = {"target weight": wanted_value, "risk per trade at the stop": limits.risk_per_trade * equity * price / (price * spec.stop_pct + cost),
                     "exposure limits": rt.risk.headroom(broker_id, inst, name, state)}
             binding = min(caps, key=caps.get)
             qty = inst.round_qty(caps[binding] / (price * inst.contract_multiplier * fx))
@@ -94,7 +96,7 @@ def propose(rt, session: Session, spec: StrategySpec, broker_id: str, actor: str
                 entry["reasons"].append(f"the size allowed by {binding} is below one tradable unit")
                 continue
             order = Order(broker_id=broker_id, instrument_id=iid, side=Side.BUY, qty=qty, strategy=name, reason="rebalance", created_at=ts, updated_at=ts)
-            intent = OrderIntent(order, inst, price, fx, price * spec.stop_pct)
+            intent = OrderIntent(order, inst, price, fx, price * spec.stop_pct, cost_per_unit=cost)
             decision = rt.risk.evaluate(intent, state)
             entry.update(qty=qty, approved=decision.approved, value_base=intent.signed_notional, actual_weight=intent.signed_notional / equity if equity > 0 else None,
                          reasons=list(decision.reasons) + ([f"size reduced by {binding}"] if binding != "target weight" else []))
@@ -142,7 +144,7 @@ def execute(rt, session: Session, proposal_id: str, actor: str) -> dict:
             order = Order(id=rt.engine._new_id(), client_order_id=f"rebal:{row.id}:{inst.id}", broker_id=p["broker_id"], instrument_id=inst.id,
                           side=Side.BUY if buy else Side.SELL, qty=o["qty"], strategy=p["strategy"], reduce_only=not buy, reason="rebalance",
                           created_at=ts, updated_at=ts)
-            intent = OrderIntent(order, inst, price, fx, price * spec.stop_pct if buy else None)
+            intent = OrderIntent(order, inst, price, fx, price * spec.stop_pct if buy else None, cost_per_unit=rt.cost_per_unit(inst, price) if buy else 0.0)
             sent = rt.engine._route(order, intent, (price * spec.stop_pct, None, None) if buy else None, TradingMode.AUTO, ts)
             results.append({"instrument_id": inst.id, "side": o["side"], "qty": o["qty"], "status": sent.status.value, "reason": sent.reason, "order_id": sent.id})
         p["results"], p["executed_at"] = results, ts.isoformat()

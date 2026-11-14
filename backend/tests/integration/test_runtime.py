@@ -35,7 +35,7 @@ def make_db(capital=50_000.0, mode="auto", **risk):
     db = Database("sqlite://")
     db.create_all()
     with db.session() as s:
-        settings = UserSettings(initial_paper_capital=capital, trading_mode=mode)
+        settings = UserSettings(initial_paper_capital=capital, trading_mode=mode, safety_limits_confirmed=True)
         save_settings(s, settings.model_copy(update={"risk": settings.risk.model_copy(update=risk)}))
     return db
 
@@ -219,8 +219,14 @@ def test_semi_auto_approval_flow_through_runtime():
     rt.replay_synthetic(BTC, "1h", 200, seed=3, actor="admin", fx_assumptions={"USD": 0.92})
     assert rt.engine.approvals and not rt.portfolio.slices and not rt.portfolio.trades
     approval_id = next(iter(rt.engine.approvals))
-    order = rt.resolve_approval(approval_id, True, "trader@example.com")
-    assert order.status.value in ("submitted", "rejected")
+    # The proposal was made many bars ago and the price has since moved by more than a quarter of its stop distance:
+    # approving it now sends nothing, cancels it and asks for a new evaluation.
+    with pytest.raises(RuntimeError_, match="Proposal cancelled, nothing was sent"):
+        rt.resolve_approval(approval_id, True, "trader@example.com")
+    assert approval_id not in rt.engine.approvals and not rt.portfolio.slices
+    assert not [o for o in rt.engine.orders.values() if o.status.value == "submitted"]
+    with rt.db.session() as s:
+        assert "order.proposal_void" in [a.action for a in s.scalars(select(AuditEntry))]
     with pytest.raises(RuntimeError_):
         rt.resolve_approval("missing", True, "x")
 

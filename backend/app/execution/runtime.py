@@ -113,7 +113,8 @@ class TradingRuntime:
         self.risk = RiskEngine(lambda: self.user_settings.risk, self.journal.risk_event)
         self.engine = TradingEngine(self.registry, self.brokers, self.portfolio, self.risk, self.fx, lambda: self.user_settings.risk,
                                     lambda: TradingMode(self.user_settings.trading_mode), self.journal, self.user_settings.base_currency,
-                                    realized_vol=self._realized_vol, approval_required=self._needs_approval)
+                                    realized_vol=self._realized_vol, approval_required=self._needs_approval, cost_per_unit=self.cost_per_unit,
+                                    proposal_ttl=lambda: timedelta(minutes=self.user_settings.proposal_ttl_minutes), wall_clock=clock)
         self.signals = SignalEngine()
         self.store = BarStore()
         self.broker_monitor = BrokerMonitor(self.brokers, self.journal.alert)
@@ -138,6 +139,15 @@ class TradingRuntime:
         self.download_options: dict = {}
         self.auto_metrics = True  # recompute scanner metrics after each price download
         self.started = False
+
+    def cost_per_unit(self, inst: Instrument, price: float, spread: float | None = None) -> float:
+        """Estimated round-trip cost of one unit, in quote currency: spread (the live one when known), slippage and
+        commission on both sides, plus currency conversion both ways when the instrument is not in the base currency."""
+        r = self.user_settings.risk
+        bps = 2 * r.est_slippage_bps + 2 * r.est_commission_bps + (0.0 if spread is not None else r.est_spread_bps)
+        if inst.quote_currency != self.portfolio.base:
+            bps += 2 * self.user_settings.fx_conversion_cost_bps
+        return price * bps / 10_000 + (spread or 0.0)
 
     def _needs_approval(self, order: Order) -> bool:
         """Real-money orders wait for a human unless the user explicitly switched that off."""
@@ -205,6 +215,8 @@ class TradingRuntime:
             for adapter in self.brokers.all():
                 if isinstance(adapter, SimulatedBroker):
                     values[f"paper:{adapter.broker_id}"] = adapter.to_state()
+                elif hasattr(adapter, "to_state") and adapter.to_state():
+                    values[f"broker_state:{adapter.broker_id}"] = adapter.to_state()
             for key, value in values.items():
                 row = session.get(AppSetting, key)
                 if row is None:
@@ -300,7 +312,7 @@ class TradingRuntime:
                 audit.record(session, actor, "paper.account_reset", account_id=account_id, capital=capital)
             self.persist()
 
-    def connect_broker(self, account_id: str, actor: str, exchange_factory: Callable | None = None, ib=None) -> dict:
+    def connect_broker(self, account_id: str, actor: str, exchange_factory: Callable | None = None, ib=None, http_client=None) -> dict:
         """Connect a CCXT or IBKR account. Without live authorization: testnet / paper gateway only."""
         from ..brokers.ccxt_adapter import CcxtAdapter
         from ..brokers.ibkr_adapter import IbkrAdapter
@@ -337,6 +349,19 @@ class TradingRuntime:
                            "options": {"defaultType": row.config.get("market_type", "spot")}}
                 exchange = (exchange_factory or getattr(ccxt, exchange_id))({k: v for k, v in options.items() if v})
                 adapter: BrokerAdapter = CcxtAdapter(account_id, self.registry, exchange, row.currency, authorization)
+            elif row.adapter == "alpaca":
+                from ..brokers.alpaca_adapter import AlpacaAdapter
+
+                saved = session.get(AppSetting, f"broker_state:{account_id}")
+                capital = row.config.get("virtual_capital", self.user_settings.initial_paper_capital)
+                capital_fx = None
+                if capital and not saved:
+                    try:  # the rate at which the virtual capital is converted into the account currency, recorded once
+                        capital_fx = self.fx.quote(self.portfolio.base, row.currency, self.clock()).rate
+                    except FxRateUnavailable as exc:
+                        raise RuntimeError_(f"An exchange rate {self.portfolio.base}->{row.currency} is needed to set up the virtual capital: {exc}") from None
+                adapter = AlpacaAdapter(account_id, self.registry, creds.get("api_key", ""), creds.get("api_secret", ""), virtual_capital=capital,
+                                        capital_fx=capital_fx, authorization=authorization, client=http_client, state=saved.value if saved else None)
             else:
                 adapter = IbkrAdapter(account_id, self.registry, ib=ib, host=row.config.get("host", "127.0.0.1"), port=int(row.config.get("port", 7497)),
                                       client_id=int(row.config.get("client_id", 1)), account_currency=row.currency, authorization=authorization)
@@ -385,8 +410,15 @@ class TradingRuntime:
             out = []
             for adapter in self.brokers.all():
                 caps = adapter.capabilities
-                out.append({"id": adapter.broker_id, "connected": connected[adapter.broker_id], "is_simulated": caps.is_simulated,
-                            "capabilities": caps.to_dict()})
+                entry = {"id": adapter.broker_id, "connected": connected[adapter.broker_id], "is_simulated": caps.is_simulated,
+                         "capabilities": caps.to_dict(), "environment": getattr(adapter, "environment", "paper" if caps.is_simulated else "external")}
+                if hasattr(adapter, "broker_account") and connected[adapter.broker_id]:
+                    try:  # the broker's own figures, kept apart from the virtual capital the platform trades
+                        entry["broker_account"] = adapter.broker_account()
+                        entry["virtual"] = {k: adapter.state.get(k) for k in ("virtual_capital_base", "capital_fx", "virtual_start", "linked_at")} if adapter.state else None
+                    except BrokerError as exc:
+                        entry["broker_account_error"] = str(exc)
+                out.append(entry)
             if self.data_adapter is not None:
                 out.append({"id": self.data_adapter.broker_id, "connected": self.data_adapter.is_connected(), "is_simulated": False,
                             "capabilities": self.data_adapter.capabilities.to_dict() if self.data_adapter.is_connected() else None, "data_only": True})
@@ -844,7 +876,12 @@ class TradingRuntime:
             ts = self.clock()
             key = (broker_id, instrument_id, MANUAL_STRATEGY)
             held = self.portfolio.qty(key)
-            price = self.reference_price(instrument_id)["price"]
+            ref = self.reference_price(instrument_id)
+            price = ref["price"]
+            cost = self.cost_per_unit(inst, price, ref["spread"])
+            live = instrument_id in self.live.subscribed
+            extra = {"cost_per_unit": cost, "data_age_seconds": ref["age_seconds"] if live else None,
+                     "spread_bps": ref["spread"] / price * 10_000 if ref["spread"] else None}
             try:
                 fx = self.engine._fx(inst.quote_currency, ts)
             except FxRateUnavailable as exc:
@@ -864,7 +901,7 @@ class TradingRuntime:
                     raise RuntimeError_("Quantity is below the minimum tradable size")
                 order = Order(id=oid, client_order_id=f"chart:{oid}", broker_id=broker_id, instrument_id=instrument_id, side=Side.BUY, qty=size,
                               strategy=MANUAL_STRATEGY, reason="manual", created_at=ts, updated_at=ts)
-                intent, protection = OrderIntent(order, inst, price, fx, price * stop_pct), (price * stop_pct, None, None)
+                intent, protection = OrderIntent(order, inst, price, fx, price * stop_pct, **extra), (price * stop_pct, None, None)
             else:
                 raise RuntimeError_("action must be buy or close")
             sent = self.engine._route(order, intent, protection, TradingMode.AUTO, ts)
@@ -962,6 +999,10 @@ class TradingRuntime:
         source = f"live:{provider}"
         exec_tf = self._exec_tf(instrument_id)
         self.ingest(instrument_id, "1m", Dataset(frame, DataKind.REALTIME, source), trade=exec_tf in (None, "1m"), drive_without_deployment=True)
+        with self.lock:  # orders working at an external broker are followed up on every live minute
+            if any(o.is_open and not o.is_simulated_venue for o in self.engine.orders.values()):
+                self.engine.poll_orders(self.clock())
+                self.persist()
         if exec_tf in (None, "1m") or tf_delta(exec_tf) >= pd.Timedelta(days=1):
             return
         delta = tf_delta(exec_tf)
@@ -1066,6 +1107,9 @@ class TradingRuntime:
                 if self.kinds.get(iid) == DataKind.SIMULATED.value:
                     self.feed_status[iid] = "simulated replay (no live feed)"
                     continue
+                if iid in self.live.subscribed:
+                    self.feed_status[iid] = f"live stream ({self.live.subscribed[iid]})"
+                    continue
                 feed = self._feed_for(iid)
                 if feed is None:
                     self.feed_status[iid] = "no market data feed connected"
@@ -1157,15 +1201,78 @@ class TradingRuntime:
 
     def resolve_approval(self, approval_id: str, approve: bool, actor: str) -> Order:
         with self.lock:
-            try:
-                order = self.engine.resolve_approval(approval_id, approve, actor, self.clock())
-            except KeyError:
-                raise RuntimeError_(f"No pending approval {approval_id}") from None
+            ts = self.clock()
+            approval = self.engine.approvals.get(approval_id)
+            if approval is None:
+                raise RuntimeError_(f"No pending approval {approval_id}")
+            void = None
+            if approve and not approval.order.reduce_only:
+                void = self._recheck(approval, ts)
+            order = self.engine.resolve_approval(approval_id, approve and void is None, f"system: {void}" if void else actor, ts)
+            if void:
+                with self.db.session() as session:
+                    audit.record(session, actor, "order.proposal_void", approval_id=approval_id, order_id=order.id, reason=void)
+                self.persist()
+                raise RuntimeError_(f"Proposal cancelled, nothing was sent: {void}. A new evaluation is needed.")
             with self.db.session() as session:
                 audit.record(session, actor, "order.approved" if approve else "order.declined", approval_id=approval_id, order_id=order.id,
                              result=order.status.value)
             self.persist()
             return order
+
+    def _recheck(self, approval, ts: datetime) -> str | None:
+        """Conditions at the moment of approval. Returns why the proposal is void, or None when it still stands.
+        On success the proposal's reference price is refreshed, so the risk engine judges the order on current numbers."""
+        from dataclasses import replace
+
+        if approval.expires_at is not None and ts > approval.expires_at:
+            return "the proposal expired"
+        iid, intent = approval.order.instrument_id, approval.intent
+        live = iid in self.live.subscribed
+        if live:
+            try:
+                ref = self.reference_price(iid)
+            except RuntimeError_ as exc:
+                return str(exc)
+            price, age, spread = ref["price"], ref["age_seconds"], ref["spread"]
+        else:
+            price, age, spread = self.portfolio.prices.get(iid, intent.price), None, None
+        if intent.stop_distance and abs(price - intent.price) > self.user_settings.max_entry_drift * intent.stop_distance:
+            return (f"the price moved from {intent.price:g} to {price:g}, more than {self.user_settings.max_entry_drift:.0%} of the stop distance")
+        approval.intent = replace(intent, price=price, data_age_seconds=age, spread_bps=(spread / price * 10_000) if spread and price else None,
+                                  cost_per_unit=self.cost_per_unit(intent.instrument, price, spread))
+        return None
+
+    def proposals(self) -> list[dict]:
+        """Orders waiting for a human decision, with everything needed to judge them."""
+        with self.lock:
+            ts = self.clock()
+            for o in self.engine.expire_approvals(ts):
+                self.notifier.notify(ts, "approval", "info", f"Proposal expired: {o.side.value} {o.qty:g} {o.instrument_id}", "nothing was sent")
+            out = []
+            for a in self.engine.approvals.values():
+                o, i, inst = a.order, a.intent, a.intent.instrument
+                sign = o.side.sign
+                stop, target, _ = a.protection or (None, None, None)
+                risk_base = i.loss_at_stop
+                quote = self.live_hub.quote(inst.id)
+                out.append({
+                    "id": a.id, "created_at": a.created_at.isoformat(), "expires_at": a.expires_at.isoformat() if a.expires_at else None,
+                    "seconds_left": max(0.0, (a.expires_at - ts).total_seconds()) if a.expires_at else None,
+                    "instrument_id": inst.id, "symbol": inst.symbol, "exchange": inst.exchange or market_of(inst) or inst.asset_class.value,
+                    "asset_class": inst.asset_class.value, "currency": inst.quote_currency, "side": o.side.value.upper(), "qty": o.qty, "reduce_only": o.reduce_only,
+                    "broker_id": o.broker_id, "is_simulated": self.brokers.get(o.broker_id).capabilities.is_simulated,
+                    "strategy": o.strategy, "timeframe": a.rationale.get("timeframe"), "entry_price": i.price,
+                    "stop_price": inst.round_price(i.price - sign * stop) if stop else None,
+                    "take_profit_price": inst.round_price(i.price + sign * target) if target else None,
+                    "notional_base": abs(i.signed_notional), "base_currency": self.portfolio.base, "fx_rate": i.fx_rate,
+                    "risk_base": risk_base, "risk_fraction": risk_base / self.portfolio.equity(ts) if risk_base and self.portfolio.equity(ts) > 0 else None,
+                    "estimated_costs_base": o.qty * i.cost_per_unit * inst.contract_multiplier * i.fx_rate,
+                    "reward_risk": (target / stop) if stop and target else None, "rationale": a.rationale,
+                    "live": {"price": quote["price"], "fresh": quote["fresh"], "age_seconds": quote["age_seconds"], "status": quote["status"]} if quote else None,
+                    "checks": ["Approved by the risk engine when proposed; it is judged again, on the current price, when you approve."],
+                })
+            return out
 
     # ------------------------------------------------------------------ views
     def overview(self) -> dict:

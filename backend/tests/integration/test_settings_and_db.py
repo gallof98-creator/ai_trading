@@ -10,10 +10,17 @@ from app.database.settings_store import UserSettings
 from tests.conftest import login
 
 
-def test_settings_defaults_require_capital_to_be_configured(client):
-    s = client.get("/api/settings", headers=login(client)).json()
-    assert s["base_currency"] == "EUR" and s["initial_paper_capital"] is None
-    assert s["trading_mode"] == "manual" and s["risk"]["emergency_policy"] == "block_new_risk"
+def test_a_new_installation_starts_with_the_documented_initial_profile(client):
+    admin = login(client)
+    s = client.get("/api/settings", headers=admin).json()
+    assert s["base_currency"] == "EUR" and s["initial_paper_capital"] == 1000 and s["trading_mode"] == "semi_auto"
+    assert s["risk"]["risk_per_trade"] == 0.02 and s["risk"]["emergency_policy"] == "block_new_risk" and s["safety_limits_confirmed"] is False
+    # 1,000 EUR at 2% is a 20 EUR risk budget per trade; both numbers are ordinary settings, not constants.
+    assert s["initial_paper_capital"] * s["risk"]["risk_per_trade"] == 20
+    # Automatic mode is refused until the safety limits have been reviewed and confirmed.
+    assert client.put("/api/settings", headers=admin, json={**s, "trading_mode": "auto"}).status_code == 422
+    assert client.put("/api/settings", headers=admin, json={**s, "trading_mode": "auto", "safety_limits_confirmed": True}).status_code == 200
+    assert UserSettings().trading_mode == "manual" and UserSettings().initial_paper_capital is None  # code defaults stay conservative
 
 
 def test_settings_update_is_validated_persisted_and_audited(client):

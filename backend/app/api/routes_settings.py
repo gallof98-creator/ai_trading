@@ -37,7 +37,7 @@ def put_settings(body: UserSettings, admin: User = Depends(require_role(Role.ADM
 
 class BrokerAccountIn(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{1,62}$")
-    adapter: str = Field(pattern=r"^(ccxt|ibkr)$")  # paper accounts are created via /api/paper/accounts
+    adapter: str = Field(pattern=r"^(ccxt|ibkr|alpaca)$")  # paper accounts are created via /api/paper/accounts
     label: str = Field(min_length=1, max_length=128)
     currency: str = Field(pattern=r"^[A-Z]{3,5}$")
     is_live: bool = False

@@ -107,6 +107,10 @@ class RiskEngine:
             reasons.append(f"kill switch engaged: {self.kill_switch_reason}")
         for name in self.breakers:
             reasons.append(f"circuit breaker tripped: {name}")
+        if intent.data_age_seconds is not None and intent.data_age_seconds > limits.max_data_age_seconds:
+            reasons.append(f"price data is {intent.data_age_seconds:.0f}s old (limit {limits.max_data_age_seconds:.0f}s)")
+        if intent.spread_bps is not None and intent.spread_bps > limits.max_spread_bps:
+            reasons.append(f"bid/ask spread {intent.spread_bps:.0f} bps exceeds limit {limits.max_spread_bps:.0f} bps")
         if eq <= 0:
             reasons.append("account equity is not positive")
         else:

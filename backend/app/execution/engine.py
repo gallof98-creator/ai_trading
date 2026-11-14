@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 
 import pandas as pd
 
 from ..brokers.base import BrokerError, BrokerManager, OrderRejected, RetryableBrokerError, UnsupportedOperation
 from ..database.settings_store import RiskLimits
-from ..domain.models import Fill, Order, OrderStatus, OrderType, Side, Signal, TradingMode
+from ..domain.models import Fill, Instrument, Order, OrderStatus, OrderType, Side, Signal, TradingMode
 from ..instruments.registry import InstrumentRegistry
 from ..market_data.fx import FxRateProvider
 from ..portfolio.engine import Key, PortfolioEngine
@@ -60,6 +60,8 @@ class PendingApproval:
     intent: OrderIntent
     protection: tuple | None
     created_at: datetime
+    expires_at: datetime | None = None
+    rationale: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -100,7 +102,8 @@ class TradingEngine:
                  fx: FxRateProvider, limits: Callable[[], RiskLimits], mode: Callable[[], TradingMode], journal: Journal | None = None,
                  base_currency: str = "EUR", retry: RetryPolicy | None = None, sleep: Callable[[float], None] = time.sleep,
                  realized_vol: Callable[[str], float | None] | None = None,
-                 approval_required: Callable[[Order], bool] | None = None) -> None:
+                 approval_required: Callable[[Order], bool] | None = None, cost_per_unit: Callable[[Instrument, float], float] | None = None,
+                 proposal_ttl: Callable[[], timedelta | None] | None = None, wall_clock: Callable[[], datetime] | None = None) -> None:
         self.registry, self.brokers, self.portfolio, self.risk, self.fx = registry, brokers, portfolio, risk, fx
         self._limits, self._mode = limits, mode
         self.journal = journal or Journal()
@@ -108,6 +111,10 @@ class TradingEngine:
         self.retry, self._sleep = retry or RetryPolicy(), sleep
         self._realized_vol = realized_vol or (lambda instrument_id: None)
         self._approval_required = approval_required or (lambda order: False)
+        self._cost_per_unit = cost_per_unit or (lambda instrument, price: 0.0)
+        self._proposal_ttl = proposal_ttl or (lambda: None)
+        self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
+        self._rationale: dict = {}  # set while a signal is being turned into orders
         self.orders: dict[str, Order] = {}
         self._client_ids: dict[str, str] = {}  # client order id -> order id (duplicate-order guard)
         self._entry_protection: dict[str, tuple[Key, tuple]] = {}
@@ -340,9 +347,10 @@ class TradingEngine:
                 state.exposures = [e for e in state.exposures if (e.broker_id, e.instrument_id, e.strategy) != key]
             limits = self._limits()
             fx_rate = self._fx(inst.quote_currency, ts)
+            cost = self._cost_per_unit(inst, signal.price)
             qty = position_size(state.equity, limits.risk_per_trade, signal.stop_distance or 0.0, signal.price, inst, fx_rate,
                                 max_notional=self.risk.headroom(dep.broker_id, inst, dep.strategy.name, state),
-                                realized_vol=self._realized_vol(inst.id), target_vol=limits.target_volatility)
+                                realized_vol=self._realized_vol(inst.id), target_vol=limits.target_volatility, cost_per_unit=cost)
             if qty <= 0:
                 self.journal.alert(ts, "sizing", "info", f"No position taken in {inst.id}",
                                    "the size allowed by the risk budget and exposure limits is below the minimum tradable quantity")
@@ -351,8 +359,12 @@ class TradingEngine:
             entry = Order(id=oid, client_order_id=f"{dep.id}|{bar_tag}|open", broker_id=dep.broker_id, instrument_id=inst.id,
                           side=Side.BUY if target > 0 else Side.SELL, qty=qty, strategy=dep.strategy.name, signal_id=signal.id,
                           reason="signal", created_at=ts, updated_at=ts)
-            intent = OrderIntent(entry, inst, signal.price, fx_rate, signal.stop_distance)
+            intent = OrderIntent(entry, inst, signal.price, fx_rate, signal.stop_distance, cost_per_unit=cost)
             protection = (signal.stop_distance, signal.take_profit_distance, signal.trailing_distance)
+            self._rationale = {"strategy": dep.strategy.name, "strategy_version": dep.strategy.version, "category": dep.strategy.category,
+                               "description": dep.strategy.description, "params": dep.strategy.params.model_dump(), "timeframe": dep.timeframe,
+                               "signal_time": signal.ts.isoformat(), "signal_price": signal.price, "regime": signal.regime, "confidence": signal.confidence,
+                               "deployment": dep.id, **{k: v for k, v in signal.meta.items() if k in ("opportunity", "validation", "data")}}
             created.append(self._route(entry, intent, protection, mode, ts, pending_close=direction != 0))
         return created
 
@@ -372,7 +384,10 @@ class TradingEngine:
         if mode is TradingMode.SEMI_AUTO or self._approval_required(order):
             self._client_ids[order.client_order_id] = order.id
             pending = order.model_copy(update={"status": OrderStatus.PENDING_APPROVAL})
-            approval = PendingApproval(self._new_id("a"), pending, intent, protection, ts)
+            ttl = self._proposal_ttl()
+            approval = PendingApproval(self._new_id("a"), pending, intent, protection, ts,
+                                       (self._wall_clock() if self._wall_clock else ts) + ttl if ttl else None, dict(self._rationale))
+            self._rationale = {}
             self.approvals[approval.id] = approval
             self.journal.alert(ts, "approval", "info", f"Approval needed: {order.side.value} {order.qty:g} {order.instrument_id}", order.strategy or "")
             return self._record(pending)
@@ -385,17 +400,27 @@ class TradingEngine:
         if approval is None:
             raise KeyError(f"No pending approval {approval_id}")
         order = approval.order.model_copy(update={"status": OrderStatus.NEW, "created_at": ts, "updated_at": ts})
+        if approve and approval.expires_at is not None and ts > approval.expires_at:
+            return self._record(order.model_copy(update={"status": OrderStatus.CANCELLED, "reason": f"{order.reason} | proposal expired before it was approved"}))
         if not approve:
             return self._record(order.model_copy(update={"status": OrderStatus.CANCELLED, "reason": f"{order.reason} | declined by {actor}"}))
         # Conditions may have changed while the order waited: the risk engine decides again, now.
-        decision = self.risk.evaluate(OrderIntent(order, approval.intent.instrument, approval.intent.price, approval.intent.fx_rate,
-                                                  approval.intent.stop_distance), self.portfolio.state(ts))
+        decision = self.risk.evaluate(replace(approval.intent, order=order), self.portfolio.state(ts))
         if not decision.approved:
             return self._reject(order, "; ".join(decision.reasons), ts)
         if approval.protection:
             self._entry_protection[order.id] = ((order.broker_id, order.instrument_id, order.strategy), approval.protection)
         del self._client_ids[order.client_order_id]
         return self._submit(order, ts)
+
+    def expire_approvals(self, ts: datetime) -> list[Order]:
+        """Proposals nobody decided on in time lapse. Nothing is sent."""
+        out = []
+        for a in [a for a in self.approvals.values() if a.expires_at is not None and ts > a.expires_at]:
+            del self.approvals[a.id]
+            self._client_ids.pop(a.order.client_order_id, None)
+            out.append(self._record(a.order.model_copy(update={"status": OrderStatus.CANCELLED, "updated_at": ts, "reason": f"{a.order.reason} | proposal expired"})))
+        return out
 
     # ------------------------------------------------------------------ submission
     def _submit(self, order: Order, ts: datetime) -> Order:
@@ -458,7 +483,8 @@ class TradingEngine:
                              p.stop_order.id if p.stop_order else None, p.target_order.id if p.target_order else None, p.soft_stop]
                             for key, p in self.protections.items()],
             "approvals": [[a.id, a.order.model_dump(mode="json"), a.intent.price, a.intent.fx_rate, a.intent.stop_distance,
-                           list(a.protection) if a.protection else None, a.created_at.isoformat()] for a in self.approvals.values()],
+                           list(a.protection) if a.protection else None, a.created_at.isoformat(),
+                           a.expires_at.isoformat() if a.expires_at else None, a.rationale, a.intent.cost_per_unit] for a in self.approvals.values()],
         }
 
     def load_state(self, state: dict) -> None:
@@ -471,10 +497,12 @@ class TradingEngine:
             self.protections[tuple(key)] = Protection(direction, stop, target, trailing, stop_price, self.orders.get(stop_id),
                                                       self.orders.get(target_id), soft)
         self.approvals = {}
-        for aid, order, price, fx_rate, stop_distance, protection, created in state["approvals"]:
+        for aid, order, price, fx_rate, stop_distance, protection, created, *more in state["approvals"]:
+            expires, rationale, cost = (more + [None, {}, 0.0])[:3] if more else (None, {}, 0.0)
             o = Order.model_validate(order)
-            intent = OrderIntent(o, self.registry.get(o.instrument_id), price, fx_rate, stop_distance)
-            self.approvals[aid] = PendingApproval(aid, o, intent, tuple(protection) if protection else None, datetime.fromisoformat(created))
+            intent = OrderIntent(o, self.registry.get(o.instrument_id), price, fx_rate, stop_distance, cost_per_unit=cost or 0.0)
+            self.approvals[aid] = PendingApproval(aid, o, intent, tuple(protection) if protection else None, datetime.fromisoformat(created),
+                                                  datetime.fromisoformat(expires) if expires else None, rationale or {})
 
     # ------------------------------------------------------------------ emergency handling
     def engage_kill_switch(self, reason: str, actor: str, ts: datetime) -> None:

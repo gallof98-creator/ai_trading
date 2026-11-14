@@ -12,7 +12,7 @@ FX = {"USD": 0.92}
 def api(client, tmp_path):
     client.app.state.container.settings.model_dir = str(tmp_path / "models")
     admin = login(client)
-    body = UserSettings(initial_paper_capital=50_000, trading_mode="auto").model_dump()
+    body = UserSettings(initial_paper_capital=50_000, trading_mode="auto", safety_limits_confirmed=True).model_dump()
     assert client.put("/api/settings", headers=admin, json=body).status_code == 200
     return client, admin
 

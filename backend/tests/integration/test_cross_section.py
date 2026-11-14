@@ -212,8 +212,10 @@ def test_rebalance_is_sized_and_gated_by_the_risk_engine_and_fills_on_the_next_s
     buys = prop["orders"]
     assert [o["symbol"] for o in buys] == ["HHH", "GGG", "FFF"] and all(o["side"] == "BUY" and o["approved"] for o in buys)
     for o in buys:
-        # Target weight is 20%, but the 1% risk-per-trade limit with a 20% stop allows 5% of equity per position.
-        assert o["qty"] == np.floor(5_000 / o["price"]) and "size reduced by risk per trade at the stop" in o["reasons"]
+        # Target weight is 20%, but 1% risk per trade with a 20% stop allows about 5% of equity per position: the loss at
+        # the stop INCLUDING estimated costs (35 bps round trip: spread 5, slippage 2x5, commission 2x10) must stay within 1,000.
+        assert o["qty"] == np.floor(1_000 / (o["price"] * (0.20 + 0.0035))) and "size reduced by risk per trade at the stop" in o["reasons"]
+        assert o["qty"] * o["price"] * 0.2035 <= 1_000
         assert o["stop_price"] == pytest.approx(o["price"] * 0.8, abs=0.01)
     assert not rt.engine.orders  # a proposal places nothing
 
