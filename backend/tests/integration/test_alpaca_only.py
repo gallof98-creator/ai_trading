@@ -101,3 +101,89 @@ def test_one_alpaca_key_serves_listing_history_and_live_data(rt):
     with rt.db.session() as s:
         rows = {r.ticker: r for r in s.query(Security)}
     assert set(rows) == {"AAPL", "SPY", "BAC.PRL", "XYZW", "BABA"} and rows["SPY"].security_type == "etf" and rows["AAPL"].sources["alpaca"]["symbol"] == "AAPL"
+
+
+# ---------------------------------------------------------------- Alpaca as the price and listing provider
+from datetime import date  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from app.market_data.providers import AlpacaProvider, ProviderError  # noqa: E402
+
+CRYPTO_ASSETS = [{"symbol": "BTC/USD", "name": "Bitcoin", "tradable": True}, {"symbol": "ETH/USD", "name": "Ethereum", "tradable": True},
+                 {"symbol": "BTC/USDT", "name": "Bitcoin / Tether", "tradable": True}, {"symbol": "XRP/USD", "name": "Ripple", "tradable": False}]
+
+
+def alpaca_http(calls):
+    def bars(symbols, n=400, crypto=False):
+        idx = pd.date_range(end=pd.Timestamp.now(tz="UTC").normalize(), periods=n, freq="1D") if crypto else pd.bdate_range(end=pd.Timestamp.now(tz="UTC").normalize() - pd.Timedelta(days=1), periods=n)
+        return {s: [{"t": (t if crypto else t.tz_convert("America/New_York").normalize() if t.tzinfo else t).isoformat().replace("+00:00", "Z"),
+                     "o": 100 + k * 0.1, "h": 101 + k * 0.1, "l": 99 + k * 0.1, "c": 100.5 + k * 0.1, "v": 1000 + k} for k, t in enumerate(idx)] for s in symbols}
+
+    def get(url, params=None, timeout=None, headers=None):
+        calls.append((url, dict(params or {})))
+        if headers.get("APCA-API-KEY-ID") != "PK":
+            return SimpleNamespace(status_code=401, json=lambda: {"message": "unauthorized"})
+        if url.endswith("/v2/assets"):
+            body = CRYPTO_ASSETS if params["asset_class"] == "crypto" else ASSETS
+        elif "/crypto/us/bars" in url:
+            body = {"bars": bars(params["symbols"].split(","), crypto=True), "next_page_token": None}
+        elif url.endswith("/v2/stocks/bars"):
+            body = {"bars": bars([s for s in params["symbols"].split(",") if s != "XYZW"]), "next_page_token": None}
+        else:
+            return SimpleNamespace(status_code=404, json=lambda: {})
+        return SimpleNamespace(status_code=200, json=lambda: body)
+
+    return get
+
+
+import pandas as pd  # noqa: E402
+
+
+def test_alpaca_lists_stocks_etfs_and_crypto_and_states_that_it_has_no_forex():
+    calls = []
+    p = AlpacaProvider("PK", "SK", http_get=alpaca_http(calls))
+    us = p.list_symbols("US")
+    assert [(r["ticker"], r["type"]) for r in us] == [("AAPL", "stock"), ("SPY", "etf"), ("BABA", "stock")]   # preferred shares, warrants, OTC and untradable assets are left out
+    assert [r["ticker"] for r in p.list_symbols("CRYPTO")] == ["BTC/USD", "ETH/USD"]                          # USD pairs that can be traded
+    assert calls[0] == ("https://paper-api.alpaca.markets/v2/assets", {"status": "active", "asset_class": "us_equity"})
+    assert p.markets == p.listing_markets == {"US", "CRYPTO"} and "No forex" in p.pricing
+    with pytest.raises(ProviderError, match="no symbol list"):
+        p.list_symbols("FX")
+    with pytest.raises(Exception, match="rejected the keys"):
+        AlpacaProvider("WRONG", "SK", http_get=alpaca_http(calls)).list_symbols("US")
+
+
+def test_importing_and_downloading_from_alpaca_covers_stocks_etfs_and_crypto(rt):
+    calls = []
+    rt.set_provider_key("alpaca", "PK", "admin", "SK")
+    rt.provider_factory = lambda name, key: AlpacaProvider(key, "SK", http_get=alpaca_http(calls))
+    rt.download_options = {"sleep": lambda s: None, "min_interval": 0}
+    rt.auto_metrics = False
+    status = rt.provider_status()[0]
+    assert status["markets"] == ["CRYPTO", "US"] and status["listing_markets"] == ["CRYPTO", "US"]
+
+    stocks_only = rt.import_symbols("alpaca", "US", ["stock"], "admin")
+    assert stocks_only["created"] == 1 and "ETF:SPY" in {i.id for i in rt.registry.all()}  # AAPL and SPY ship with the platform; BABA is new
+    both = rt.import_symbols("alpaca", "US", ["stock", "etf"], "admin")
+    assert both["listed"] == 3 and both["existing"] == 3
+    crypto = rt.import_symbols("alpaca", "CRYPTO", ["stock"], "admin")
+    assert crypto["created"] == 2 and {"CRYPTO:BTC/USD", "CRYPTO:ETH/USD"} <= {i.id for i in rt.registry.all()}
+
+    rt.start_download("alpaca", "admin")            # every market Alpaca covers, in one go
+    assert rt.download.completed.wait(60)
+    snap = rt.download.snapshot()
+    assert snap["status"] == "finished" and snap["failed_count"] == 0, snap
+    with rt.db.session() as s:
+        covered = {c["instrument_id"]: c for c in rt.store.coverage(s) if c["timeframe"] == "1d"}
+        today = pd.Timestamp.now(tz="UTC").normalize()
+        assert {"STOCK:AAPL", "STOCK:BABA", "ETF:SPY", "CRYPTO:BTC/USD", "CRYPTO:ETH/USD"} <= set(covered)
+        assert "FOREX:EUR/USD" not in covered and "CRYPTO:BTC/USDT" not in covered   # Alpaca serves neither: not downloaded, not invented
+        btc = rt.store.load(s, "CRYPTO:BTC/USD", "1d")
+        assert btc.source == "alpaca-crypto" and btc.bars.index[-1] < today             # the forming day is left out
+        assert rt.store.load(s, "ETF:SPY", "1d").source == "alpaca"
+    assert any("/v1beta3/crypto/us/bars" in u and p["symbols"] in ("BTC/USD,ETH/USD", "ETH/USD,BTC/USD") for u, p in calls)
+
+    rt.start_download("alpaca", "admin", market="CRYPTO", only_missing=False)   # one market only
+    assert rt.download.completed.wait(60) and rt.download.snapshot()["total"] == 2
+    with pytest.raises(RuntimeError_, match="does not cover"):
+        rt.start_download("alpaca", "admin", instrument_ids=["FOREX:EUR/USD"])

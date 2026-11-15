@@ -621,6 +621,8 @@ class TradingRuntime:
             return self.provider_factory(name, creds["api_key"])
         cls = PROVIDER_CLASSES[name]
         try:
+            if name == "alpaca":
+                return cls(creds["api_key"], creds.get("api_secret", ""), base_url=self.settings.alpaca_base_url, trading_url=self.settings.alpaca_trading_url)
             if cls.needs_secret:
                 return cls(creds["api_key"], creds.get("api_secret", ""), base_url=getattr(self.settings, f"{name}_base_url"))
             return cls(creds["api_key"], base_url=getattr(self.settings, f"{name}_base_url"))
@@ -655,13 +657,15 @@ class TradingRuntime:
         except ProviderError as exc:
             raise RuntimeError_(str(exc)) from None
         out = {"listed": len(listed), "created": 0, "existing": 0, "invalid": 0}
-        for kind in ("stock", "etf"):
-            if kind not in kinds:
+        for kind in ("stock", "etf", "crypto"):
+            if kind not in kinds and not (kind == "crypto" and market == "CRYPTO"):
                 continue
             tickers = [r["ticker"] for r in listed if r["type"] == kind]
             if limit:
                 tickers = tickers[:limit]
-            result = self.add_instruments(tickers, market, kind, actor)
+            if not tickers:
+                continue
+            result = self.add_instruments(tickers, "" if kind == "crypto" else market, kind, actor)
             for key in ("created", "existing", "invalid"):
                 out[key] += len(result[key])
         return out
@@ -700,8 +704,8 @@ class TradingRuntime:
         mode "update": bring instruments that already have data up to date, appending recent bars."""
         from datetime import date
 
-        from ..instruments.registry import market_of
         from ..market_data.providers import DownloadJob
+        from ..market_data.providers import provider_market as market_of  # stock market code, or "CRYPTO" for pairs in USD
 
         if mode not in ("full", "update"):
             raise RuntimeError_("mode must be 'full' or 'update'")

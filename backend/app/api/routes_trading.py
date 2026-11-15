@@ -107,7 +107,8 @@ def instrument_stats(_: User = Depends(viewer), rt: TradingRuntime = Depends(get
     with rt.lock:
         everything = rt.registry.all()
     for i in everything:
-        m = by_market.setdefault(market_of(i) or i.asset_class.value, {"instruments": 0, "with_data": 0})
+        code = market_of(i) or ("CRYPTO" if i.asset_class.value == "crypto" and i.quote_currency == "USD" else i.asset_class.value)
+        m = by_market.setdefault(code, {"instruments": 0, "with_data": 0})
         m["instruments"] += 1
         m["with_data"] += i.id in with_data
     return {"total": len(everything), "with_data": sum(1 for i in everything if i.id in with_data), "by_market": by_market}
@@ -117,7 +118,9 @@ def instrument_stats(_: User = Depends(viewer), rt: TradingRuntime = Depends(get
 def markets(_: User = Depends(viewer)) -> list[dict]:
     from ..instruments.registry import MARKETS
 
-    return [{"code": code, "label": m["label"], "currency": m["currency"], "suffix": m["suffix"]} for code, m in MARKETS.items()]
+    out = [{"code": code, "label": m["label"], "currency": m["currency"], "suffix": m["suffix"]} for code, m in MARKETS.items()]
+    # Not a stock market, but data providers file crypto pairs under it (symbol list and price downloads).
+    return out + [{"code": "CRYPTO", "label": "Crypto pairs (quoted in USD)", "currency": "USD", "suffix": ""}]
 
 
 class InstrumentsIn(BaseModel):

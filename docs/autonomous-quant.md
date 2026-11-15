@@ -61,6 +61,10 @@ A default installation uses Alpaca for everything: the instrument list (`/v2/ass
 One key and secret, entered once: the credentials of a linked Alpaca account are also used for market data.
 Charts are drawn with TradingView's open-source Lightweight Charts; TradingView is a charting component, not a data source.
 
+From the Markets page, Alpaca can import its symbol list (US stocks and ETFs, or crypto pairs quoted in USD) and download daily history for
+all of them; "all markets" in a download means every market Alpaca covers. Alpaca has no forex trading and no forex list: forex is not
+available from this source. Exchange rates used for valuation come from the European Central Bank.
+
 Consequences:
 
 - The universe is what Alpaca can trade: US stocks and ETFs on NYSE, Nasdaq, NYSE Arca, NYSE American and Cboe, plus crypto pairs.

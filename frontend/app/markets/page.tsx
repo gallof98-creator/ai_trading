@@ -146,7 +146,8 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
                     <div className="flex flex-wrap items-end gap-3">
                       <Field label="Market"><select aria-label="Listing market" value={p.listing_markets.includes(market) ? market : p.listing_markets[0]} onChange={(e) => setMarket(e.target.value)}>
                         {(markets.data ?? []).filter((x: { code: string }) => p.listing_markets.includes(x.code)).map((x: { code: string; label: string }) => <option key={x.code} value={x.code}>{x.label}</option>)}</select></Field>
-                      <label className="flex items-center gap-2 pb-2 text-xs text-dim"><input type="checkbox" className="!w-auto" checked={etfs} onChange={(e) => setEtfs(e.target.checked)} /> include ETFs</label>
+                      {(p.listing_markets.includes(market) ? market : p.listing_markets[0]) !== "CRYPTO" &&
+                        <label className="flex items-center gap-2 pb-2 text-xs text-dim"><input type="checkbox" className="!w-auto" checked={etfs} onChange={(e) => setEtfs(e.target.checked)} /> include ETFs</label>}
                       <Button kind="ghost" disabled={act.busy || importing} onClick={async () => {
                         setImporting(true);
                         try {
@@ -161,6 +162,7 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
                       }}>{importing ? "Importing…" : "Import symbol list"}</Button>
                     </div>
                   )}
+                  {name === "alpaca" && <p className="text-xs text-dim">Alpaca lists what it can trade: US stocks and ETFs, and crypto pairs quoted in USD (choose the market above). It has no forex. An ETF is recognised by its name, because Alpaca does not publish instrument types.</p>}
                   <p className="text-xs text-dim">Universe for {market}: {m ? `${m.instruments} instruments, ${m.with_data} with stored prices` : "none yet"}.</p>
                 </div>
                 <div className="space-y-3 rounded border border-line p-3">

@@ -166,7 +166,7 @@ def test_provider(name: str, _: User = Depends(trader), rt: TradingRuntime = Dep
 
 
 class SymbolImportIn(BaseModel):
-    market: str = Field(max_length=4)
+    market: str = Field(max_length=8)
     types: list[str] = Field(default_factory=lambda: ["stock"], max_length=2)
     limit: int | None = Field(None, ge=1, le=20000)
 
@@ -181,7 +181,7 @@ def import_symbols(name: str, body: SymbolImportIn, user: User = Depends(trader)
 class DownloadIn(BaseModel):
     provider: str = Field("eodhd", max_length=16)
     instrument_ids: list[str] | None = Field(None, max_length=20000)
-    market: str | None = Field(None, max_length=4)
+    market: str | None = Field(None, max_length=8)
     only_missing: bool = True
     years: int = Field(10, ge=1, le=40)
     mode: str = Field("full", pattern="^(full|update)$")

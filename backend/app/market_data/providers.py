@@ -370,37 +370,93 @@ class AlphaVantageProvider(PriceProvider):
         return out
 
 
-class AlpacaProvider(PriceProvider):
-    """Alpaca market data (free account): daily bars for US stocks and ETFs, many symbols per request,
-    adjusted for splits and dividends. The free plan serves full-market data older than 15 minutes,
-    so requests stop at yesterday.
+def provider_market(instrument: Instrument) -> str | None:
+    """The market a data provider files an instrument under: a stock market code, or "CRYPTO" for pairs quoted in USD."""
+    found = market_of(instrument)
+    if found is None and instrument.asset_class.value == "crypto" and instrument.quote_currency == "USD":
+        return "CRYPTO"
+    return found
 
-    VERIFICATION STATUS: written from the vendor's documentation; not yet exercised with real keys.
+
+class AlpacaProvider(PriceProvider):
+    """Alpaca: the list of what it can trade (US stocks, ETFs, crypto pairs), and daily bars for all of them.
+    Stock bars are adjusted for splits and dividends; the free plan serves full-market data older than 15 minutes,
+    so requests stop at yesterday. Alpaca has no forex trading and no forex instrument list.
+
+    VERIFICATION STATUS: crypto bars were checked against the real service; stock bars and the asset list were
+    written from the vendor's documentation and tested against emulated answers, not with real keys.
     """
 
     name = "alpaca"
     label = "Alpaca"
-    markets = frozenset({"US"})
-    pricing = "Free account (paper trading is enough): about 200 requests a minute, history from 2016. US stocks and ETFs only."
+    markets = frozenset({"US", "CRYPTO"})
+    listing_markets = frozenset({"US", "CRYPTO"})
+    pricing = ("Free account (paper trading is enough): about 200 requests a minute, stock history from 2016. "
+               "US stocks, ETFs and crypto pairs quoted in USD. No forex.")
     signup_url = "https://alpaca.markets"
     min_interval = 0.35
     needs_secret = True
     bulk_size = 50
     BASE = "https://data.alpaca.markets"
+    TRADING = "https://paper-api.alpaca.markets"
+    _VENUES = ("NYSE", "NASDAQ", "ARCA", "AMEX", "BATS")
 
-    def __init__(self, api_key: str, api_secret: str = "", http_get: Callable | None = None, timeout: float = 60.0, base_url: str | None = None) -> None:
+    def __init__(self, api_key: str, api_secret: str = "", http_get: Callable | None = None, timeout: float = 60.0, base_url: str | None = None,
+                 trading_url: str | None = None) -> None:
         if not api_key or not api_secret:
             raise ProviderAuthError("Alpaca needs both the API key id and the secret key")
         self._key, self._secret = api_key, api_secret
         self.BASE = (base_url or self.BASE).rstrip("/")
+        self.TRADING = (trading_url or self.TRADING).rstrip("/")
         if http_get is None:
             import httpx
 
             http_get = httpx.get
         self._get, self._timeout = http_get, timeout
 
+    def _json(self, url: str, params: dict):
+        try:
+            response = self._get(url, params=params, timeout=self._timeout, headers={"APCA-API-KEY-ID": self._key, "APCA-API-SECRET-KEY": self._secret})
+        except Exception as exc:
+            raise ProviderError(f"Alpaca could not be reached ({type(exc).__name__})") from None
+        code = response.status_code
+        if code in (401, 403):
+            raise ProviderAuthError("Alpaca rejected the keys, or the plan does not include this data")
+        if code == 429:
+            raise ProviderRateLimited("Alpaca: too many requests")
+        if code != 200:
+            raise ProviderError(f"Alpaca answered with HTTP {code}")
+        try:
+            return response.json()
+        except Exception:
+            raise ProviderError("Alpaca returned a response that is not JSON") from None
+
     def list_symbols(self, market: str) -> list[dict]:
-        raise ProviderError("Alpaca is used here for prices only; build the US list from the Global Markets catalog")
+        """What Alpaca can trade. US: stocks and ETFs on listed venues (Alpaca does not say which is which, so an ETF is
+        recognised by its name; preferred shares, warrants, units and rights are left out). CRYPTO: pairs quoted in USD."""
+        from ..global_markets.discovery import AlpacaDiscovery
+
+        if market not in self.listing_markets:
+            raise ProviderError(f"Alpaca has no symbol list for {market}")
+        rows = self._json(f"{self.TRADING}/v2/assets", {"status": "active", "asset_class": "crypto" if market == "CRYPTO" else "us_equity"})
+        if not isinstance(rows, list):
+            raise ProviderError("Alpaca returned an unexpected response")
+        out = []
+        for row in rows:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol or not row.get("tradable"):
+                continue
+            if market == "CRYPTO":
+                if symbol.endswith("/USD"):
+                    out.append({"ticker": symbol, "name": row.get("name") or "", "type": "crypto", "currency": "USD", "exchange": "CRYPTO"})
+                continue
+            if row.get("exchange") not in self._VENUES:
+                continue  # over-the-counter assets are not part of the listed universe
+            kind = AlpacaDiscovery.kind_from_name(row.get("name") or "")
+            if kind in ("common_stock", "adr", "etf"):
+                out.append({"ticker": symbol, "name": row.get("name") or "", "type": "etf" if kind == "etf" else "stock", "currency": "USD",
+                            "exchange": row.get("exchange")})
+        return out
 
     def daily_bars(self, instrument: Instrument, start: date | None = None, end: date | None = None) -> Dataset:
         out = self.daily_bars_bulk([instrument], start, end)
@@ -408,9 +464,48 @@ class AlpacaProvider(PriceProvider):
             raise SymbolNotFound("Alpaca has no data for this symbol")
         return out[instrument.id]
 
+    def _crypto_bars(self, instruments: list[Instrument], start: date | None) -> dict[str, Dataset]:
+        by_symbol = {i.symbol: i for i in instruments}
+        today = pd.Timestamp(datetime.now(timezone.utc)).normalize()
+        params: dict = {"symbols": ",".join(by_symbol), "timeframe": "1Day", "limit": 10000, "sort": "asc",
+                        "start": f"{(start or date(2016, 1, 1)).isoformat()}T00:00:00Z"}
+        collected: dict[str, list] = {}
+        for _ in range(500):
+            body = self._json(f"{self.BASE}/v1beta3/crypto/us/bars", params)
+            if not isinstance(body, dict) or not isinstance(body.get("bars"), dict):
+                raise ProviderError("Alpaca returned an unexpected response")
+            for symbol, bars in body["bars"].items():
+                collected.setdefault(symbol, []).extend(bars or [])
+            if not body.get("next_page_token"):
+                break
+            params = {**params, "page_token": body["next_page_token"]}
+        out: dict[str, Dataset] = {}
+        for symbol, bars in collected.items():
+            inst = by_symbol.get(symbol)
+            records = []
+            for b in bars:
+                try:
+                    ts = pd.Timestamp(b["t"])
+                    o, h, l, c = float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"])
+                    # Crypto trades round the clock: today's bar is still forming and is never stored.
+                    if inst is not None and min(o, h, l, c) > 0 and ts < today:
+                        records.append((ts, o, h, l, c, float(b.get("v") or 0)))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if records:
+                frame = pd.DataFrame(records, columns=["ts", *OHLCV]).set_index("ts").sort_index()
+                out[inst.id] = Dataset(frame[~frame.index.duplicated(keep="last")], DataKind.HISTORICAL, "alpaca-crypto")
+        return out
+
     def daily_bars_bulk(self, instruments: list[Instrument], start: date | None = None, end: date | None = None) -> dict[str, Dataset]:
         if len(instruments) > self.bulk_size:
             raise ValueError(f"At most {self.bulk_size} instruments per request")
+        crypto = [i for i in instruments if provider_market(i) == "CRYPTO"]
+        found = self._crypto_bars(crypto, start) if crypto else {}
+        found.update(self._stock_bars([i for i in instruments if market_of(i) == "US"], start, end))
+        return found
+
+    def _stock_bars(self, instruments: list[Instrument], start: date | None = None, end: date | None = None) -> dict[str, Dataset]:
         by_symbol = {i.symbol: i for i in instruments if market_of(i) == "US"}
         if not by_symbol:
             return {}
