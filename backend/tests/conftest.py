@@ -20,7 +20,7 @@ VIEWER = ("viewer@example.com", "viewer-password-123")
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(_env_file=None, database_url="sqlite://", jwt_secret="t" * 48, credential_key=CredentialVault.generate_key(),
-                    login_rate_limit_per_minute=5, data_lake_dir=str(tmp_path / "lake"))
+                    login_rate_limit_per_minute=5, data_lake_dir=str(tmp_path / "lake"), minute_refresh_offset_seconds=-1)
 
 
 @pytest.fixture

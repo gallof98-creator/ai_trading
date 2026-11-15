@@ -71,7 +71,7 @@ def test_validation_needs_several_unseen_periods_and_is_recorded(rt):
         good = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
         bad = opp.validate(s, rt, "rsi_reversion", CYC, "1d", "admin", allow_short=True)
         fake = opp.validate(s, rt, "ema_crossover", "CRYPTO:SIM/USD", "1d", "admin", allow_short=True)
-    assert good["status"] == "validated" and all(c["passed"] for c in good["checks"]) and len(good["checks"]) == 7
+    assert good["status"] == "validated" and all(c["passed"] for c in good["checks"]) and len(good["checks"]) == 11
     assert good["profitable_folds"] >= 3 and good["out_of_sample"]["number_of_trades"] >= 20 and good["family"] == "trend_following" and good["horizon"] == "swing"
     assert good["params"]["take_profit_atr"] == 4.0 and good["params"]["stop_atr"] in (1.5, 2.0, 2.5) and "does not mean it will be profitable" in good["caveat"]
     assert bad["status"] == "rejected" and any(not c["passed"] and "profitable in at least 3 of 4" in c["name"] for c in bad["checks"])

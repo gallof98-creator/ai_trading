@@ -55,7 +55,10 @@ class AutopilotSettings(BaseModel):
     enabled: bool = False
     broker_id: str = Field("", max_length=64)  # empty = the first account that can trade
     cycle_minutes: int = Field(15, ge=5, le=1440)
-    max_instruments: int = Field(30, ge=1, le=200)
+    # The most US stocks and ETFs followed. The universe grows towards it step by step (see `universe_step`), so the
+    # machine and the data provider are never asked for everything at once.
+    max_instruments: int = Field(200, ge=1, le=200)
+    universe_step: int = Field(40, ge=1, le=200)  # instruments added per day, and only while validation keeps up
     strategies: list[str] = Field(default_factory=lambda: ["ema_crossover", "macd", "donchian_breakout", "momentum_breakout", "rsi_reversion",
                                                            "volatility_expansion"], max_length=20)
     timeframes: list[Literal["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]] = Field(default_factory=lambda: ["1d"], max_length=4)
@@ -72,6 +75,16 @@ class AutopilotSettings(BaseModel):
     min_traded_value: float = Field(20_000_000.0, ge=0)  # 20-day average traded value, quote currency
     validations_per_cycle: int = Field(60, ge=1, le=500)
     validation_bars: int = Field(1500, ge=450, le=10_000)  # validate on the most recent bars (about six years of daily data)
+    # Intraday timeframes are validated on this many recent bars (20,000 five-minute bars are about a year of sessions).
+    intraday_validation_bars: int = Field(20_000, ge=2_000, le=30_000)
+    validation_workers: int = Field(0, ge=0, le=32)  # validations run side by side on this many processor cores; 0 = all but one
+    # Official intraday bars from Alpaca. The minute refresh keeps every followed instrument current; the history
+    # download fetches this many months for the intraday timeframes listed in `timeframes` (0 = never automatically).
+    minute_update: bool = True
+    intraday_history_months: int = Field(6, ge=0, le=24)
+    # Which stock history to validate on: "iex" is the same single-exchange feed the live prices come from (what is
+    # tested is what is traded); "sip" is the consolidated tape, 15 minutes delayed, with complete volume.
+    intraday_feed: Literal["iex", "sip"] = "iex"
     allow_short: bool = False          # strategies are validated and traded long-only unless this is on
     # Also propose "candidate" setups: profitable on most unseen periods but on too few trades to be validated.
     # Paper accounts only; each proposal says which level of evidence it rests on.

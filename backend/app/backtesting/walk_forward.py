@@ -7,7 +7,7 @@ of a strategy's apparent edge is overfitting.
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -16,7 +16,8 @@ from ..market_data.sources import Dataset
 from ..paper_trading.broker import ExecutionModel
 from ..strategies.registry import create_strategy
 from .engine import BacktestResult, BacktestSpec, DeploymentSpec, run_backtest
-from .metrics import DISCLAIMER, compute_metrics
+from .metrics import DISCLAIMER, compute_metrics, daily_returns
+from .stats import return_stats
 
 MAX_COMBINATIONS = 200  # every extra combination tried makes a lucky in-sample result more likely
 
@@ -39,6 +40,10 @@ class WalkForwardSpec:
     limits: RiskLimits = field(default_factory=RiskLimits)
     static_fx: dict[str, float] = field(default_factory=dict)
     instruments: list | None = None  # defaults to the built-in starter universe
+    # Extra out-of-sample runs that test how fragile the result is (used by strategy validation): every parameter
+    # combination on the unseen window, and the chosen one again with trading costs multiplied by `stress_costs`.
+    robustness: bool = False
+    stress_costs: float = 2.0
 
 
 def _grid(spec: WalkForwardSpec) -> list[dict]:
@@ -58,9 +63,17 @@ def _grid(spec: WalkForwardSpec) -> list[dict]:
     return combos
 
 
-def _run(spec: WalkForwardSpec, bars: pd.DataFrame, params: dict, trade_start: pd.Timestamp | None = None) -> BacktestResult:
+def stressed(execution: ExecutionModel, factor: float) -> ExecutionModel:
+    """The same execution model with spread, slippage and every commission multiplied by `factor`."""
+    return replace(execution, spread_bps=execution.spread_bps * factor, slippage_bps=execution.slippage_bps * factor,
+                   commissions={k: replace(c, rate=c.rate * factor, per_unit=c.per_unit * factor, minimum=c.minimum * factor)
+                                for k, c in execution.commissions.items()})
+
+
+def _run(spec: WalkForwardSpec, bars: pd.DataFrame, params: dict, trade_start: pd.Timestamp | None = None,
+         execution: ExecutionModel | None = None) -> BacktestResult:
     return run_backtest(BacktestSpec(
-        initial_capital=spec.initial_capital, base_currency=spec.base_currency, execution=spec.execution, limits=spec.limits,
+        initial_capital=spec.initial_capital, base_currency=spec.base_currency, execution=execution or spec.execution, limits=spec.limits,
         static_fx=spec.static_fx, trade_start=trade_start, instruments=spec.instruments,
         deployments=[DeploymentSpec(spec.strategy, spec.instrument_id, spec.timeframe, params)],
         data={(spec.instrument_id, spec.timeframe): Dataset(bars, spec.data.kind, spec.data.source)}))
@@ -81,6 +94,8 @@ def walk_forward(spec: WalkForwardSpec) -> dict:
         raise ValueError("Not enough data: each fold needs at least 200 training bars and 50 test bars")
     combos = _grid(spec)
     folds, oos_returns, oos_trades = [], [], []
+    stress_returns, grid_runs, grid_profitable = [], 0, 0
+    costly = stressed(spec.execution, spec.stress_costs) if spec.robustness else None
     for k in range(spec.n_folds):
         tr0, tr1 = k * test, k * test + train
         te1 = tr1 + test if k < spec.n_folds - 1 else n
@@ -100,6 +115,16 @@ def walk_forward(spec: WalkForwardSpec) -> dict:
                                      "score": oos.metrics.get(spec.metric)}
             oos_returns.append(eq.pct_change().dropna())
             oos_trades += oos.trades
+            if spec.robustness:
+                window, start = bars.iloc[tr0:te1], bars.index[tr1]
+                again = _run(spec, window, best_params, trade_start=start, execution=costly)
+                stress_returns.append(again.equity[again.equity.index >= start].pct_change().dropna())
+                # Would a neighbouring parameter choice also have made money on the unseen window? A result that
+                # only one setting produces is a fit to noise, however good it looks.
+                for params in combos:
+                    profit = oos.metrics["total_return"] if params == best_params else _run(spec, window, params, trade_start=start).metrics["total_return"]
+                    grid_runs += 1
+                    grid_profitable += profit > 0
         folds.append(fold)
 
     summary: dict = {"folds_with_parameters": sum(f["best_params"] is not None for f in folds)}
@@ -116,6 +141,17 @@ def walk_forward(spec: WalkForwardSpec) -> dict:
                             # < 0.5 (or negative) means most of the in-sample result did not survive on unseen data
                             "walk_forward_efficiency": mean_oos / mean_is if mean_is > 0 else None})
         summary["profitable_folds"] = sum(1 for f in folds if f["out_of_sample"] and f["out_of_sample"]["total_return"] > 0)
+        # Significance is judged on daily returns of the stitched unseen periods: one observation per day, whatever the bar size.
+        summary["out_of_sample_statistics"] = return_stats(daily_returns(stitched))
+        if spec.robustness:
+            pnls = sorted((t.pnl for t in oos_trades), reverse=True)
+            costly_equity = spec.initial_capital * (1 + pd.concat(stress_returns).sort_index()).cumprod()
+            summary["robustness"] = {
+                "cost_multiplier": spec.stress_costs, "return_with_stressed_costs": float(costly_equity.iloc[-1] / spec.initial_capital - 1),
+                "parameter_runs": grid_runs, "parameter_runs_profitable": int(grid_profitable),
+                "profitable_parameter_share": grid_profitable / grid_runs if grid_runs else None,
+                "net_profit": float(sum(pnls)), "best_trade": float(pnls[0]) if pnls else 0.0,
+                "net_profit_without_best_trade": float(sum(pnls[1:])) if pnls else 0.0}
     return {
         "strategy": spec.strategy, "instrument_id": spec.instrument_id, "timeframe": spec.timeframe, "metric": spec.metric,
         "combinations_tested": len(combos), "folds": folds, "summary": summary,

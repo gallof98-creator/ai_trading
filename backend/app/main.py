@@ -63,6 +63,20 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
                     log.error("autopilot_tick_failed", error=str(exc))
 
         autopilot_task = asyncio.create_task(autopilot_loop()) if settings.autopilot_tick_seconds > 0 else None
+
+        async def intraday_loop() -> None:
+            """Official bars, once a minute, a few seconds after the minute closes. Independent of the autopilot loop,
+            so a long validation cycle never delays the data."""
+            import time
+
+            while True:
+                await asyncio.sleep(60 - time.time() % 60 + settings.minute_refresh_offset_seconds)
+                try:
+                    await asyncio.to_thread(runtime.intraday.tick)
+                except Exception as exc:  # the next minute tries again and fetches what this one missed
+                    log.error("intraday_refresh_failed", error=type(exc).__name__)
+
+        intraday_task = asyncio.create_task(intraday_loop()) if settings.minute_refresh_offset_seconds >= 0 else None
         catalog_task = None
         if settings.catalog_sync_hours > 0:
             async def catalog_loop() -> None:
@@ -75,7 +89,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
 
             catalog_task = asyncio.create_task(catalog_loop())
         yield
-        for t in (task, catalog_task, autopilot_task):
+        for t in (task, catalog_task, autopilot_task, intraday_task):
             if t:
                 t.cancel()
 

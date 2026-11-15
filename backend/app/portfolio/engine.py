@@ -164,8 +164,13 @@ class PortfolioEngine:
         """Pairwise correlation of bar-to-bar returns over the recent window, on common timestamps."""
         if self._corr_cache[0] == self._marks:
             return self._corr_cache[1]
-        series = {iid: pd.Series({t: p for t, p in h}) for iid, h in self._history.items() if len(h) >= self._min_points}
         out: dict[tuple[str, str], float] = {}
+        if sum(len(h) >= self._min_points for h in self._history.values()) < 2:
+            # Fewer than two instruments with enough history: there is no pair to correlate. Same result as below,
+            # without building a series on every bar (this was most of the time of a single-instrument backtest).
+            self._corr_cache = (self._marks, out)
+            return out
+        series = {iid: pd.Series({t: p for t, p in h}) for iid, h in self._history.items() if len(h) >= self._min_points}
         ids = sorted(series)
         for i, a in enumerate(ids):
             for b in ids[i + 1:]:

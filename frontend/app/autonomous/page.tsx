@@ -129,9 +129,15 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
             <Field label="Minimum price"><input type="number" min="0" step="any" className="w-24" value={cfg.min_price} onChange={(e) => set("min_price", Number(e.target.value))} /></Field>
             <Field label="Minimum traded value / day"><input type="number" min="0" step="any" className="w-36" value={cfg.min_traded_value} onChange={(e) => set("min_traded_value", Number(e.target.value))} /></Field>
             <Field label="Validations per cycle"><input type="number" min="1" className="w-24" value={cfg.validations_per_cycle} onChange={(e) => set("validations_per_cycle", Number(e.target.value))} /></Field>
+            <Field label="Instruments added per day"><input type="number" min="1" max="200" className="w-24" value={cfg.universe_step ?? 40} onChange={(e) => set("universe_step", Number(e.target.value))} /></Field>
+            <Field label={`Processor cores for validation (0 = automatic, now ${st.validation_workers ?? 1})`}><input type="number" min="0" max="32" className="w-24" value={cfg.validation_workers ?? 0} onChange={(e) => set("validation_workers", Number(e.target.value))} /></Field>
+            <Field label="Intraday history (months, 0 = off)"><input type="number" min="0" max="24" className="w-24" value={cfg.intraday_history_months ?? 6} onChange={(e) => set("intraday_history_months", Number(e.target.value))} /></Field>
+            <Field label="Intraday stock history from"><select value={cfg.intraday_feed ?? "iex"} onChange={(e) => set("intraday_feed", e.target.value)}>
+              <option value="iex">IEX (same feed as live prices)</option><option value="sip">Consolidated tape (15 min delayed)</option></select></Field>
           </div>
           <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-dim">
             {[["seed_most_active", "Add the most traded US stocks when the universe is small"], ["daily_price_update", "Refresh daily prices"], ["live_subscribe", "Ask for live prices where a strategy is validated"],
+              ["minute_update", "Download official bars every minute for followed instruments"],
               ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
               .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
           </div>

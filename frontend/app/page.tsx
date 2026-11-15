@@ -4,6 +4,34 @@ import { EquityChart } from "@/components/charts/Charts";
 import { Shell } from "@/components/Shell";
 import { Badge, Button, money, Notice, num, Panel, pct, post, signed, SimBadge, Stat, Table, tone, useApi, when } from "@/components/ui";
 
+type Fresh = { instrument_id: string; symbol: string; group: string; feed: string; last_update: string | null; last_update_kind: string; age_seconds: number | null;
+  state: string; official_bars: boolean; followed_live: boolean; series: { timeframe: string; last_bar_close: string; source: string; feed: string; bars: number }[] };
+
+const age = (s: number | null) => (s === null ? "—" : s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`);
+const STATE: Record<string, "up" | "warn" | "down" | "dim"> = { current: "up", late: "warn", stale: "down", "market closed": "dim", "no data": "down" };
+
+/** When data last arrived for each monitored instrument, and from which feed. */
+function DataFreshness() {
+  const { data } = useApi("/api/live/freshness", 15_000);
+  if (!data || !data.instruments?.length) return null;
+  const groups = Object.entries(data.groups ?? {}) as [string, { state: string; last_success: string | null; last_error: string; feed: string }][];
+  return (
+    <Panel title="Market data: last update per instrument" right={<span className="text-xs text-dim">US market {data.us_market_open ? "open" : "closed"}</span>}>
+      <div className="mb-2 flex flex-wrap gap-2 text-xs">
+        {groups.map(([name, g]) => <span key={name} title={g.last_error || undefined}>
+          <Badge kind={g.state === "ok" ? "up" : g.state === "market closed" ? "dim" : "warn"}>{name}: {g.state}</Badge> <span className="text-dim">official bars, last refresh {when(g.last_success)}</span></span>)}
+      </div>
+      <Table max="max-h-72" head={["Instrument", "Status", "Last update", "Age", "Feed", "Newest bars stored"]}
+        rows={(data.instruments as Fresh[]).map((r) => [
+          r.symbol, <Badge key="s" kind={STATE[r.state] ?? "dim"}>{r.state}</Badge>,
+          <span key="t" className="font-mono text-xs" title={r.last_update_kind}>{when(r.last_update)}</span>, age(r.age_seconds),
+          <span key="f" className="text-xs">{r.feed}{r.official_bars ? "" : r.followed_live ? " (rebuilt from ticks right now)" : ""}</span>,
+          <span key="b" className="font-mono text-[11px] text-dim">{r.series.map((x) => `${x.timeframe} ${when(x.last_bar_close).slice(5)}`).join(" · ")}</span>])} />
+      <p className="mt-2 text-xs text-dim">IEX is one US exchange: prices are real time, volume is only what traded there. Consolidated-tape data is 15 minutes delayed on the free plan and is used for history only.</p>
+    </Panel>
+  );
+}
+
 function Overview() {
   const { data: ov, error } = useApi("/api/overview", 10_000);
   const { data: equity } = useApi<{ ts: string; equity: number }[]>("/api/portfolio/equity", 30_000);
@@ -58,6 +86,7 @@ function Overview() {
             p.instrument_id, p.strategy ?? "manual", <span key="b">{p.broker_id} <SimBadge simulated={ov.brokers.find((b: { broker_id: string }) => b.broker_id === p.broker_id)?.is_simulated} /></span>,
             num(p.qty, 5), num(p.avg_price, 4), num(p.last_price, 4), <span key="u" className={tone(p.unrealized_pnl)}>{signed(p.unrealized_pnl)} {ccy}</span>])} />
       </Panel>
+      <DataFreshness />
     </div>
   );
 }

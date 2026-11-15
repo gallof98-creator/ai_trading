@@ -19,17 +19,33 @@ from ..core.logging import get_logger
 from ..domain.models import AssetClass
 from ..instruments.registry import market_of
 from . import opportunities as opp
+from .parallel import ValidationPool, worker_count
 
 log = get_logger(__name__)
 ACTOR = "autopilot"
+STARTING_UNIVERSE = 30  # the universe starts at this size and grows from there
 
 
-def alpaca_most_active(key: str, secret: str, top: int, base_url: str = "https://data.alpaca.markets", client: httpx.Client | None = None) -> list[str]:
-    """Alpaca's official screener: the most traded US stocks of the latest session."""
-    r = (client or httpx.Client(timeout=20)).get(f"{base_url.rstrip('/')}/v1beta1/screener/stocks/most-actives", params={"by": "trades", "top": min(top, 100)},
+def alpaca_most_active(key: str, secret: str, top: int, base_url: str = "https://data.alpaca.markets", client: httpx.Client | None = None,
+                       by: str = "trades") -> list[str]:
+    """Alpaca's official screener: the most traded US stocks of the latest session, by number of trades or by volume.
+    It returns at most 100 names per list."""
+    r = (client or httpx.Client(timeout=20)).get(f"{base_url.rstrip('/')}/v1beta1/screener/stocks/most-actives", params={"by": by, "top": min(top, 100)},
                                                 headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret})
     r.raise_for_status()
     return [row["symbol"] for row in r.json().get("most_actives", []) if str(row.get("symbol", "")).isalpha()]
+
+
+def alpaca_liquid_universe(key: str, secret: str, top: int, base_url: str = "https://data.alpaca.markets") -> list[str]:
+    """Both screener lists merged (most trades first, then most volume): up to about 150 different names a day.
+    The lists change daily, so a universe larger than that fills up over several days."""
+    names = alpaca_most_active(key, secret, 100, base_url, by="trades")
+    if top > len(names):
+        try:
+            names += [s for s in alpaca_most_active(key, secret, 100, base_url, by="volume") if s not in names]
+        except httpx.HTTPError:
+            pass  # the first list is enough to carry on
+    return names
 
 
 def alpaca_crypto_daily(symbol: str, key: str = "", secret: str = "", years: int = 6, base_url: str = "https://data.alpaca.markets",
@@ -70,7 +86,9 @@ class Autopilot:
         self.fetch_fx: Callable[[], list] | None = None  # test hook: [(base, quote, timestamp, rate)]
         self.fetch_crypto: Callable[[str], pd.DataFrame] | None = None  # test hook: pair -> completed daily bars
         self.wait_seconds = 900.0  # how long a cycle waits for a download or a metrics job
+        self.validation_seconds = 3600.0  # how long one cycle may spend validating; what is not finished waits for the next
         self._lock = threading.Lock()
+        self.pool = ValidationPool()
         self.activity: deque = deque(maxlen=80)
         self._warned: set[str] = set()
         self.state: dict = {"running": False, "last_cycle": None, "last_result": None, "last_seed": None, "last_price_update": None, "cycles": 0}
@@ -120,6 +138,7 @@ class Autopilot:
             due = now.isoformat() if last is None else (datetime.fromisoformat(last) + timedelta(minutes=self.cfg.cycle_minutes)).isoformat()
         return {**self.state, "enabled": self.cfg.enabled, "next_cycle": due, "broker_id": self._broker(), "alpaca_key": self._alpaca() is not None,
                 "trading_mode": self.rt.user_settings.trading_mode, "settings": self.cfg.model_dump(), "activity": list(self.activity),
+                "validation_workers": worker_count(self.cfg.validation_workers),
                 "sends_orders_by_itself": self.rt.user_settings.trading_mode == "auto",
                 "note": "The autopilot prepares data, validates strategies and creates proposals. In semi-automatic mode every order still waits for your approval."}
 
@@ -169,7 +188,7 @@ class Autopilot:
         result: dict = {"started": self.rt.clock().isoformat()}
         try:
             for name, step in (("exchange_rates", self._fx), ("universe", self._seed), ("prices", self._update_prices), ("crypto", self._crypto), ("candidates", self._candidates),
-                               ("validation", self._validate), ("live", self._live), ("scan", self._scan)):
+                               ("intraday", self._intraday), ("validation", self._validate), ("live", self._live), ("scan", self._scan)):
                 try:
                     result[name] = step(result)
                 except Exception as exc:  # one failing step must not stop the others or the next cycle
@@ -203,9 +222,18 @@ class Autopilot:
         last = self.state["last_seed"]
         have = [i for i in self._us_equities() if i.id in priced]
         added: list[str] = []
-        if cfg.seed_most_active and len(have) < cfg.max_instruments and not (last and now - datetime.fromisoformat(last) < timedelta(hours=24)):
-            fetch = self.most_active or (lambda k, s, n: alpaca_most_active(k, s, n, self.rt.settings.alpaca_base_url))
-            symbols = [s for s in fetch(creds["api_key"], creds["api_secret"], cfg.max_instruments) if s.upper() not in etfs]  # an ETF is never added twice as a stock
+        # The universe grows in steps: `universe_step` instruments a day, and only while the last cycle finished its
+        # validations. A machine or a data plan that cannot keep up therefore stops the growth by itself.
+        backlog = ((self.state.get("last_result") or {}).get("validation") or {}).get("remaining", 0)
+        target = min(cfg.max_instruments, STARTING_UNIVERSE if len(have) < STARTING_UNIVERSE else len(have) + cfg.universe_step)
+        out["growth"] = {"instruments": len(have), "target_now": target, "limit": cfg.max_instruments, "paused": bool(backlog and len(have) >= STARTING_UNIVERSE)}
+        if backlog and len(have) >= STARTING_UNIVERSE:
+            target = len(have)
+        if cfg.seed_most_active and len(have) < target and not (last and now - datetime.fromisoformat(last) < timedelta(hours=24)):
+            fetch = self.most_active or (lambda k, s, n: alpaca_liquid_universe(k, s, n, self.rt.settings.alpaca_base_url))
+            known = {i.symbol.upper() for i in have}
+            listed = [s for s in fetch(creds["api_key"], creds["api_secret"], cfg.max_instruments) if s.upper() not in etfs]  # an ETF is never added twice as a stock
+            symbols = [s for s in listed if s.upper() not in known][: target - len(have)]
             self.state["last_seed"] = now.isoformat()
             result = self.rt.add_instruments(symbols, "US", "stock", ACTOR)
             added = result["created"]
@@ -320,31 +348,87 @@ class Autopilot:
         result["_candidates"] = chosen + crypto + live
         return {"count": len(chosen) + len(crypto) + len(live), "by_liquidity": len(chosen), "crypto": len(crypto), "live_only": len(live), "broker_id": broker}
 
+    def _intraday(self, result: dict) -> dict:
+        """Months of official intraday bars for the candidates, when an intraday timeframe is configured. The download
+        runs in the background over several cycles; a series is validated only once it is complete."""
+        from ..market_data.intraday import INTRADAY
+
+        cfg, data = self.cfg, self.rt.intraday
+        timeframes = [tf for tf in cfg.timeframes if tf in INTRADAY]
+        if not timeframes or cfg.intraday_history_months <= 0:
+            return {"skipped": "no intraday timeframe is configured" if not timeframes else "automatic history download is switched off"}
+        job = data.job
+        if job is not None and job["status"] == "running":
+            return {"downloading": f"{job['done']} of {job['series']} series", "bars": job["bars"]}
+        candidates = result.get("_candidates", [])
+        history, now = data._history(), self.rt.clock()
+        # A series is requested again after a day, so that it is extended when the configured months are increased.
+        todo = [i for i in candidates if any(
+            (rec := history.get(f"{i}|{tf}")) is None or rec.get("months", 0) < cfg.intraday_history_months for tf in timeframes)]
+        if not todo:
+            return {"skipped": f"history present for all {len(candidates)} candidates"}
+        try:
+            data.backfill(todo, timeframes, cfg.intraday_history_months, ACTOR, feed=cfg.intraday_feed)
+        except ValueError as exc:
+            return {"skipped": str(exc)}
+        self._note("intraday", f"intraday history requested for {len(todo)} instruments ({', '.join(timeframes)}, {cfg.intraday_history_months} months, "
+                               f"{cfg.intraday_feed.upper()} feed)")
+        return {"requested": len(todo), "timeframes": timeframes, "months": cfg.intraday_history_months, "feed": cfg.intraday_feed, "started": now.isoformat()}
+
     def _validate(self, result: dict) -> dict:
+        from ..market_data.timeframes import tf_delta
+
         cfg, now = self.cfg, self.rt.clock()
         candidates = result.get("_candidates", [])
+        downloading = self.rt.intraday.incomplete()
         with self.rt.db.session() as session:
             # A validation, passed or failed, is redone once it is older than its validity: the market it judged has moved on.
             known = {(v["strategy"], v["instrument_id"], v["timeframe"]): ("expired" if v["due_for_retest"] else v["status"])
                      for v in opp.validations(session, now)}
             stored = {(c["instrument_id"], c["timeframe"]) for c in self.rt.store.coverage(session) if c["kind"] != "simulated"}
         todo = [(s, i, tf) for i in candidates for tf in cfg.timeframes for s in cfg.strategies
-                if (i, tf) in stored and known.get((s, i, tf)) in (None, "expired")]
-        done = passed = failed = candidates = 0
-        for strategy, iid, tf in todo[: cfg.validations_per_cycle]:
-            try:
-                with self.rt.db.session() as session:
-                    out = opp.validate(session, self.rt, strategy, iid, tf, ACTOR, allow_short=cfg.allow_short, max_bars=cfg.validation_bars)
-                done += 1
-                passed += out["status"] == "validated"
-                candidates += out["status"] == "candidate"
-            except Exception as exc:  # e.g. too little history for this timeframe
+                if (i, tf) in stored and (i, tf) not in downloading and known.get((s, i, tf)) in (None, "expired")]
+        batch = todo[: cfg.validations_per_cycle]
+        done = passed = failed = promising = 0
+        # Read each series once, however many strategies are tested on it; then compute side by side; then record.
+        specs, labels, datasets = [], [], {}
+        with self.rt.db.session() as session:
+            for strategy, iid, tf in batch:
+                try:
+                    bars = cfg.validation_bars if tf_delta(tf) >= pd.Timedelta(days=1) else cfg.intraday_validation_bars
+                    if (iid, tf) not in datasets:
+                        datasets[(iid, tf)] = opp.bt.load_dataset(session, iid, tf, last=bars)
+                    specs.append(opp.prepare(session, self.rt, strategy, iid, tf, allow_short=cfg.allow_short, max_bars=bars, data=datasets[(iid, tf)]))
+                    labels.append((strategy, iid, tf))
+                except Exception as exc:  # e.g. an unknown strategy name
+                    failed += 1
+                    self._note("validation", f"{strategy} on {iid} {tf}: {str(exc)[:160]}", "warning")
+        datasets.clear()
+        unfinished = 0
+        for (strategy, iid, tf), spec, outcome in zip(labels, specs, self.pool.run(specs, cfg.validation_workers, timeout=self.validation_seconds)):
+            if outcome is None:
+                unfinished += 1  # out of time: it stays on the list for the next cycle
+            elif isinstance(outcome, Exception):  # e.g. too little history for this timeframe
                 failed += 1
-                self._note("validation", f"{strategy} on {iid} {tf}: {str(exc)[:160]}", "warning")
+                self._note("validation", f"{strategy} on {iid} {tf}: {str(outcome)[:160]}", "warning")
+            else:
+                tier, payload = opp.judge(spec, outcome, ACTOR, now)
+                with self.rt.db.session() as session:
+                    opp.record(session, tier, payload, now)
+                done += 1
+                passed += tier == "validated"
+                promising += tier == "candidate"
+        remaining = max(0, len(todo) - done - failed)
         if done or failed:
-            self._note("validation", f"{done} validations run: {passed} validated, {candidates} candidates, {done - passed - candidates} rejected; "
-                                     f"{max(0, len(todo) - done - failed)} still to do")
-        return {"run": done, "passed": passed, "candidates": candidates, "could_not_run": failed, "remaining": max(0, len(todo) - done - failed)}
+            speed = self.pool.last
+            self._note("validation", f"{done} validations run: {passed} validated, {promising} candidates, {done - passed - promising} rejected; "
+                                     f"{remaining} still to do" + (f" ({speed['seconds']}s on {speed['workers']} core(s))" if speed else ""))
+        out = {"run": done, "passed": passed, "candidates": promising, "could_not_run": failed, "remaining": remaining}
+        if specs:
+            out["speed"] = dict(self.pool.last)
+            with self.rt.db.session() as session:
+                out["multiple_testing"] = opp.multiple_testing(session, now)
+        return out
 
     def _live(self, _: dict) -> dict:
         cfg, now = self.cfg, self.rt.clock()

@@ -129,8 +129,10 @@ class TradingRuntime:
 
         self.live_hub = LiveHub(clock, on_bar=self._on_live_bar)
         self.live = LiveFeed(self.live_hub)
+        from ..market_data.intraday import IntradayData
         from ..quant_ai.autopilot import Autopilot
 
+        self.intraday = IntradayData(self)  # official intraday bars: refreshed every minute, history on request
         self.autopilot = Autopilot(self)
         self.live_source_factory = None  # test hook: callable(runtime) -> list[(LiveSource, route)]
         self.driven: dict[str, str] = {}  # instrument -> last stored daily bar fed to the engine for global (portfolio) strategies
@@ -1072,21 +1074,57 @@ class TradingRuntime:
 
         self.journal._write(write)
 
-    def _on_live_bar(self, instrument_id: str, frame: pd.DataFrame, provider: str) -> None:
-        """A one-minute bar built from live ticks has completed: store it, and hand the engine every bar of a
-        deployed timeframe that this minute completes."""
-        source = f"live:{provider}"
-        exec_tf = self._exec_tf(instrument_id)
-        self.ingest(instrument_id, "1m", Dataset(frame, DataKind.REALTIME, source), trade=exec_tf in (None, "1m"), drive_without_deployment=True)
+    def _live_minute_checks(self, instrument_id: str, price: float) -> None:
         with self.lock:
             # Exits the broker cannot hold for us are checked on every live minute, whatever timeframe the strategy runs on.
-            closed = self.engine.check_soft_exits(instrument_id, float(frame["close"].iloc[-1]), self.clock())
+            closed = self.engine.check_soft_exits(instrument_id, price, self.clock())
             if closed:
                 self.persist()
         with self.lock:  # orders working at an external broker are followed up on every live minute
             if any(o.is_open and not o.is_simulated_venue for o in self.engine.orders.values()):
                 self.engine.poll_orders(self.clock())
                 self.persist()
+
+    def ingest_official(self, instrument_id: str, timeframe: str, frame: pd.DataFrame, source: str) -> int:
+        """Bars published by the data provider for a followed instrument (see market_data.intraday). They take the place of
+        the bars rebuilt from live ticks: same path into the engine, same rules. Returns the number of new bars.
+
+        A bar that arrives late (after an interruption) is stored and warms the indicators but does not trade: a strategy
+        acts on the bar that has just closed, never on a backlog."""
+        now, delta = pd.Timestamp(self.clock()), tf_delta(timeframe)
+        cache = self.bars.get((instrument_id, timeframe))
+        if cache is not None and len(cache):
+            known = frame[frame.index <= cache.index[-1]]
+            if len(known):  # a minute already stored from rebuilt ticks: the published bar replaces it in the store
+                self.journal._write(lambda session: self.store.save(session, instrument_id, timeframe, Dataset(known, DataKind.REALTIME, source)))
+            frame = frame[frame.index > cache.index[-1]]
+        if frame.empty:
+            return 0
+        late = frame[frame.index + delta < now - pd.Timedelta(minutes=3)]
+        fresh = frame[frame.index + delta >= now - pd.Timedelta(minutes=3)]
+        exec_tf = self._exec_tf(instrument_id)
+        done = 0
+        if len(late):
+            done += self.ingest(instrument_id, timeframe, Dataset(late, DataKind.REALTIME, source), trade=False)
+        if len(fresh):
+            if timeframe == "1m":
+                done += self.ingest(instrument_id, "1m", Dataset(fresh, DataKind.REALTIME, source), trade=exec_tf in (None, "1m"), drive_without_deployment=True)
+                self._live_minute_checks(instrument_id, float(fresh["close"].iloc[-1]))
+            else:
+                done += self.ingest(instrument_id, timeframe, Dataset(fresh, DataKind.REALTIME, source), trade=timeframe == exec_tf)
+        return done
+
+    def _on_live_bar(self, instrument_id: str, frame: pd.DataFrame, provider: str) -> None:
+        """A one-minute bar built from live ticks has completed. Where the provider's own bars are arriving for the
+        instrument, this one is only a price check (stops, working orders); otherwise it is stored, and the engine is
+        handed every bar of a deployed timeframe that this minute completes."""
+        if self.intraday.official(instrument_id):
+            self._live_minute_checks(instrument_id, float(frame["close"].iloc[-1]))
+            return
+        source = f"live:{provider}"
+        exec_tf = self._exec_tf(instrument_id)
+        self.ingest(instrument_id, "1m", Dataset(frame, DataKind.REALTIME, source), trade=exec_tf in (None, "1m"), drive_without_deployment=True)
+        self._live_minute_checks(instrument_id, float(frame["close"].iloc[-1]))
         if exec_tf in (None, "1m") or tf_delta(exec_tf) >= pd.Timedelta(days=1):
             return
         delta = tf_delta(exec_tf)

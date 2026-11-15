@@ -87,8 +87,39 @@ Every tick records provider, the provider's timestamp, the time it was received 
 seconds is STALE: it is shown as such and nothing is sized or approved on it. The browser receives ticks over server-sent events
 (`GET /api/live/stream`); the chart's last candle moves without polling.
 
-One-minute bars are built from ticks, stored (`realtime`), and drive deployed strategies, paper fills and stops. Higher timeframes are
-aggregated from them when the bucket completes.
+### Official bars
+
+One-minute bars are no longer rebuilt from ticks where Alpaca publishes them. A few seconds after every minute closes, the bars of
+all monitored instruments are downloaded in one request per hundred symbols (`market_data/intraday.py`) and take the same path as
+before: stored, then deployed strategies, paper fills and stops. The bar of a deployed intraday timeframe is downloaded too, not
+aggregated. A bar rebuilt from ticks is stored only for minutes in which Alpaca could not be reached, and is replaced by the
+published one afterwards. Stops and working orders are still checked on every live tick-minute.
+
+Monitored: instruments with a live subscription or a deployment, and every instrument with a stored intraday history.
+
+| `source` on a bar | Feed | Used for |
+|---|---|---|
+| `alpaca:iex` | IEX exchange only; real time on the free plan; volume is IEX's share only | The minute refresh; intraday history by default |
+| `alpaca:sip-delayed` | Consolidated tape; the free plan may read only data older than 15 minutes | Intraday history when chosen (setting "Intraday stock history from") |
+| `alpaca:crypto` | Alpaca's crypto venue; real time | Crypto, refresh and history |
+| `live:alpaca-stocks`, `live:alpaca-crypto` | Rebuilt here from live ticks | Fallback minutes only |
+
+Stock bars are split-adjusted and limited to the regular session (09:30-16:00 New York). History defaults to IEX so that a strategy
+is validated on the same feed its live signals come from; with the consolidated history, the newest bars of a series are IEX until
+the next history run replaces them.
+
+Restart: each request starts from the newest stored bar of the series, so minutes missed while the application was off are fetched
+by the first refresh (up to seven days back). A late bar is stored and warms the indicators but never trades. The intraday history
+(6 months by default for the intraday timeframes chosen in the Autopilot, or `POST /api/live/intraday/backfill`) is downloaded
+backwards from the present, so an interrupted download leaves one contiguous block and is continued, not restarted. Rate limits
+(HTTP 429) and server errors are retried with a pause; the API key is sent in headers only and never logged.
+
+The dashboard shows, per instrument, when data last arrived, from which feed, and the newest bar of each timeframe
+(`GET /api/live/freshness`).
+
+Not exercised against Alpaca from the development environment: the request parameters are those of the endpoints the platform
+already uses for daily bars; whether the consolidated history is readable on a given plan is detected at run time (a refusal falls
+back to IEX and says so).
 
 ## Strategy modules
 
@@ -98,10 +129,29 @@ distances applied to the same signal families; it is not separate signal logic.
 
 ## Validation
 
-A scan proposes a strategy for an instrument and timeframe only if a walk-forward validation on that series passed all of:
-market (not simulated) prices; parameters found in all 4 periods; profitable in at least 3 of 4 unseen periods; at least 20 trades on
-unseen data; positive out-of-sample return; out-of-sample drawdown at most 25%; at least 30% of the in-sample result survived.
-A validation is valid for 30 days. Passing is not a promise of profit.
+A scan proposes a strategy for an instrument and timeframe only if a walk-forward validation on that series passed every check
+below. A validation is valid for 30 days. Passing is not a promise of profit.
+
+| # | Check (criteria version 2) | What it guards against |
+|---|---|---|
+| 1 | Market prices, not simulated | Testing on invented data |
+| 2 | Parameters found in all 4 periods | Too little activity to judge |
+| 3 | Profitable in at least 3 of 4 unseen periods | One lucky period |
+| 4 | At least 20 trades on unseen data | Conclusions from a handful of trades |
+| 5 | Positive return on unseen data | - |
+| 6 | Drawdown on unseen data at most 25% | Profit bought with unacceptable losses |
+| 7 | At least 30% of the in-sample result survived | Overfitting to the training period |
+| 8 | Statistically significant: p-value at most 5% | Luck. The p-value is the chance that a strategy with no edge shows this Sharpe ratio on this many unseen days, allowing for skewed and fat-tailed returns (probabilistic Sharpe ratio) |
+| 9 | Still profitable with trading costs doubled (spread, slippage, commissions) | An edge that only exists at optimistic costs |
+| 10 | At least 60% of the parameter settings profitable on unseen data | A result that only one setting produces |
+| 11 | Still profitable without its single best trade | A result that is one trade |
+
+Then, across everything tested, **multiple testing**: with hundreds of strategy / instrument / timeframe combinations, some pass
+checks 1 to 11 by chance. Among all setups tested, only those that survive a false-discovery-rate control at 10% (Benjamini-Hochberg
+on the p-values) stay "validated"; one that passed on its own but not across the family is reported as a candidate, with that
+reason. The more setups are tested, the stronger a result has to be. The Autopilot also reports the Sharpe ratio the best of that
+many worthless strategies would be expected to show. A verdict recorded under the previous criteria (seven checks) is not trusted:
+it is due for a new test and is not traded meanwhile.
 
 Two levels of evidence, measured rather than assumed. On twelve years of real daily prices of four US stocks (AAPL, TSLA, VTI, AMZN)
 and all 17 strategies, no pair reached twenty out-of-sample trades in the three most recent years: a daily strategy trades one
@@ -109,14 +159,25 @@ instrument too rarely. Hence:
 
 | Level | Requirements | Where it may trade |
 |---|---|---|
-| validated | all seven checks above | any account |
-| candidate | market prices, profitable in 3 of 4 unseen periods, at least 8 unseen trades, positive return, drawdown at most 25% | paper accounts only |
+| validated | all eleven checks, and the multiple-testing control | any account |
+| candidate | market prices, profitable in 3 of 4 unseen periods, at least 8 unseen trades, positive return, drawdown at most 25%, still profitable with costs doubled and without its best trade | paper accounts only |
+
+The counts in the next paragraph were measured with the previous criteria; the stricter ones can only validate fewer.
 
 On that same data, long-only: 1 pair validated, 11 candidates, 52 rejected. Candidates are weaker evidence, and when many pairs are
 tested some reach the level by chance; every proposal says which level it rests on. Candidates can be switched off in the Autopilot settings.
 
 Strategies are validated and traded long-only by default: a small cash account cannot sell short, and a rule should be tested the way
-it will be traded. Validation uses the most recent 1,500 bars (about six years of daily data).
+it will be traded. Validation uses the most recent 1,500 bars (about six years of daily data); intraday timeframes use the most recent
+20,000 bars (about a year of five-minute bars). Significance is always judged on daily returns, so a short intraday history cannot
+pass on the number of bars alone.
+
+Validations run side by side on several processor cores (all but one by default, setting "Processor cores for validation"). The
+results are identical to running them one after the other; if worker processes cannot be started, that is what happens.
+
+The universe grows in steps: 30 instruments to start, then up to 40 more a day towards the limit (200 by default), and only while
+the previous cycle finished its validations. Alpaca's screener lists at most 100 names per ranking; both rankings together give
+about 150 different names a day, so the upper part of the universe fills over several days.
 
 The market regime is reported on every proposal but is not a gate by default: the validation tested the rule in every regime, so
 filtering on it would trade a different rule from the one tested. It can be made a requirement in the Autopilot settings.

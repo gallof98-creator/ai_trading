@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     enabled_providers: str = "alpaca"
     alpaca_trading_url: str = "https://paper-api.alpaca.markets"  # where the asset list is read from; paper keys work here
     autopilot_tick_seconds: int = Field(60, ge=0)  # how often the autopilot checks whether a cycle is due; 0 switches the loop off
+    minute_refresh_offset_seconds: float = 4.0  # official bars are requested this long after each minute closes; negative = off
     live_feed_autostart: bool = True  # reconnect the live subscriptions saved by the user when the API starts
 
     # Data platform (app.datahub): research datasets from free official APIs, in a local Parquet lake queried with DuckDB.

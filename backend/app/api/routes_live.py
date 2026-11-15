@@ -51,6 +51,45 @@ def reconnect(_: User = Depends(trader), rt: TradingRuntime = Depends(get_runtim
     return {"sources": rt.configure_live()}
 
 
+@router.get("/freshness")
+def freshness(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    """For every monitored instrument: when data last arrived, from which feed, and the age of the newest bar per timeframe."""
+    return rt.intraday.freshness()
+
+
+@router.get("/intraday")
+def intraday_status(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    """The minute refresh of official bars (per data set) and the intraday history download."""
+    return rt.intraday.status()
+
+
+class BackfillIn(BaseModel):
+    instrument_ids: list[str] = Field(min_length=1, max_length=400)
+    timeframes: list[str] = Field(default_factory=lambda: ["1m", "5m", "15m"], min_length=1, max_length=5)
+    months: int = Field(6, ge=1, le=24)
+    feed: str = Field("iex", pattern="^(iex|sip)$")
+
+
+@router.post("/intraday/backfill")
+def intraday_backfill(body: BackfillIn, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    """Download months of official intraday bars in the background. Continues an interrupted download; skips what is stored."""
+    try:
+        return rt.intraday.backfill(body.instrument_ids, body.timeframes, body.months, user.email, feed=body.feed)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+
+
+@router.post("/intraday/cancel", status_code=status.HTTP_204_NO_CONTENT)
+def intraday_cancel(_: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> None:
+    rt.intraday.cancel()
+
+
+@router.post("/intraday/refresh")
+def intraday_refresh(_: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    """Run the minute refresh now instead of waiting for the next minute."""
+    return rt.intraday.tick()
+
+
 @router.get("/stream")
 async def stream(request: Request, symbols: str = "", _: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> StreamingResponse:
     """Server-sent events: one `tick` event per price update of the requested instruments (all subscribed ones when empty)."""

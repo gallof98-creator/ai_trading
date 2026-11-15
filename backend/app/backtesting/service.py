@@ -25,8 +25,11 @@ class DataUnavailable(LookupError):
     pass
 
 
-def load_dataset(session: Session, instrument_id: str, timeframe: str, start: str | None = None, end: str | None = None) -> Dataset:
-    ds = _store.load(session, instrument_id, timeframe, pd.Timestamp(start, tz="UTC") if start else None, pd.Timestamp(end, tz="UTC") if end else None)
+def load_dataset(session: Session, instrument_id: str, timeframe: str, start: str | None = None, end: str | None = None,
+                 last: int | None = None) -> Dataset:
+    """`last` reads only the most recent N bars, so a long intraday history can be used without exceeding the limit."""
+    ds = _store.load(session, instrument_id, timeframe, pd.Timestamp(start, tz="UTC") if start else None, pd.Timestamp(end, tz="UTC") if end else None,
+                     last=min(last, MAX_BARS) if last else None)
     if ds is None:
         raise DataUnavailable(f"No stored bars for {instrument_id} {timeframe} in the requested period. Import or fetch data first.")
     if len(ds.bars) > MAX_BARS:

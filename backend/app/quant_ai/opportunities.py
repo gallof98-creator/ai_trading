@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..backtesting import service as bt
+from ..backtesting.stats import benjamini_hochberg, expected_max_sharpe
 from ..backtesting.walk_forward import WalkForwardSpec, walk_forward
 from ..database.models import ResearchItem, StrategyDeployment
 from ..domain.models import SignalAction, TradingMode
@@ -51,18 +52,28 @@ MODULES: dict[str, dict] = {
 }
 
 CRITERIA = {
+    "version": 2,
     "min_folds": 4,                      # independent out-of-sample periods
     "min_profitable_folds": 3,           # at least three of the four must have made money
     "min_out_of_sample_trades": 20,
     "min_out_of_sample_return": 0.0,
     "max_out_of_sample_drawdown": 0.25,
     "min_walk_forward_efficiency": 0.3,  # share of the in-sample result that survived on unseen data
+    # Statistical significance: the chance that a strategy with no edge shows this Sharpe ratio on this many unseen days.
+    "max_p_value": 0.05,
+    # Robustness: still profitable with trading costs doubled; most parameter settings profitable on unseen data, not
+    # just the chosen one; and still profitable without its single best trade.
+    "stress_cost_multiplier": 2.0,
+    "min_profitable_parameter_share": 0.6,
+    # Multiple testing: across every setup tested, the expected share of false discoveries among the validated ones.
+    "max_false_discovery_rate": 0.10,
     "valid_for_days": 30,
 }
 STOP_GRID = [1.5, 2.5]
 CANDIDATE = {"min_profitable_folds": 3, "min_out_of_sample_trades": 8}
 # How long after its signal bar an entry may still be proposed, and how far the price may have moved by then.
 SCAN = {"entry_window_bars": 3, "max_drift_stop_fraction": 0.5}
+SCAN_BARS = 6000  # bars read for a signal: every daily history fits; an intraday one is read from its recent end
 
 
 def horizon_of(timeframe: str) -> str:
@@ -97,26 +108,37 @@ def _static_fx(rt, instrument_id: str) -> dict[str, float]:
     return {inst.quote_currency: rt.engine._fx(inst.quote_currency, rt.clock())}
 
 
-def validate(session: Session, rt, strategy: str, instrument_id: str, timeframe: str, actor: str, allow_short: bool = False,
-             max_bars: int | None = None) -> dict:
-    """Walk-forward validation of one strategy on one stored series, judged against CRITERIA and recorded.
-    Long-only unless `allow_short`: a strategy is validated the way it will be traded, and a small cash account cannot sell short.
-    `max_bars` limits the history to the most recent bars (older markets say less about today, and the test runs faster)."""
-    data = bt.load_dataset(session, instrument_id, timeframe)
-    category = create_strategy(strategy, {}).category
-    exits = MODULES[horizon_of(timeframe)]["exits"]
-    fixed = {"take_profit_atr": exits["take_profit_atr"], "allow_short": bool(allow_short)}
+def prepare(session: Session, rt, strategy: str, instrument_id: str, timeframe: str, allow_short: bool = False, max_bars: int | None = None,
+            data=None) -> WalkForwardSpec:
+    """Everything a validation needs, read from the database and the runtime. The result is self-contained, so the
+    computation itself (`walk_forward`) can run in another process."""
+    if data is None:
+        data = bt.load_dataset(session, instrument_id, timeframe, last=max_bars or bt.MAX_BARS)
     if max_bars and len(data.bars) > max_bars:
         from ..market_data.sources import Dataset
 
         data = Dataset(data.bars.iloc[-max_bars:], data.kind, data.source)
+    create_strategy(strategy, {})  # an unknown strategy fails here, before any work is queued
+    exits = MODULES[horizon_of(timeframe)]["exits"]
+    fixed = {"take_profit_atr": exits["take_profit_atr"], "allow_short": bool(allow_short)}
     capital = rt.user_settings.initial_paper_capital or 1000.0
-    result = walk_forward(WalkForwardSpec(
+    return WalkForwardSpec(
         strategy=strategy, instrument_id=instrument_id, timeframe=timeframe, data=data, param_grid={"stop_atr": sorted({exits["stop_atr"], *STOP_GRID})},
         initial_capital=capital, n_folds=CRITERIA["min_folds"], fixed_params=fixed, base_currency=rt.portfolio.base, limits=rt.user_settings.risk,
-        static_fx=_static_fx(rt, instrument_id), instruments=rt.registry.all(), min_trades=3))
+        static_fx=_static_fx(rt, instrument_id), instruments=rt.registry.all(), min_trades=3, robustness=True,
+        stress_costs=CRITERIA["stress_cost_multiplier"])
+
+
+def judge(spec: WalkForwardSpec, result: dict, actor: str, now: datetime) -> tuple[str, dict]:
+    """(level, record) for a finished walk-forward: validated, candidate or rejected, with every check and its value."""
+    data, strategy, instrument_id, timeframe = spec.data, spec.strategy, spec.instrument_id, spec.timeframe
+    category = create_strategy(strategy, {}).category
     s = result["summary"]
     oos = s.get("out_of_sample_metrics") or {}
+    stats = s.get("out_of_sample_statistics") or {}
+    robust = s.get("robustness") or {}
+    p = stats.get("p_value")
+    costly, share, without_best = robust.get("return_with_stressed_costs"), robust.get("profitable_parameter_share"), robust.get("net_profit_without_best_trade")
     checks = [
         ("market data, not simulated", data.kind is not DataKind.SIMULATED, data.kind.value),
         (f"parameters found in all {CRITERIA['min_folds']} periods", s["folds_with_parameters"] >= CRITERIA["min_folds"], s["folds_with_parameters"]),
@@ -129,11 +151,17 @@ def validate(session: Session, rt, strategy: str, instrument_id: str, timeframe:
          oos.get("max_drawdown") is not None and oos["max_drawdown"] <= CRITERIA["max_out_of_sample_drawdown"], oos.get("max_drawdown")),
         (f"at least {CRITERIA['min_walk_forward_efficiency']:.0%} of the in-sample result survived",
          (s.get("walk_forward_efficiency") or 0) >= CRITERIA["min_walk_forward_efficiency"], s.get("walk_forward_efficiency")),
+        (f"statistically significant: at most {CRITERIA['max_p_value']:.0%} chance of this result without any edge",
+         p is not None and p <= CRITERIA["max_p_value"], p),
+        (f"still profitable with trading costs multiplied by {CRITERIA['stress_cost_multiplier']:g}", costly is not None and costly > 0, costly),
+        (f"at least {CRITERIA['min_profitable_parameter_share']:.0%} of the parameter settings profitable on unseen data",
+         share is not None and share >= CRITERIA["min_profitable_parameter_share"], share),
+        ("still profitable without its best trade", without_best is not None and without_best > 0, without_best),
     ]
     passed = all(ok for _, ok, _ in checks)
-    # A second, weaker level. Daily strategies trade a handful of times a year on one instrument, so twenty unseen trades are
-    # rarely available; "candidate" keeps the requirements that do not depend on sample size and is allowed on paper accounts
-    # only, where trading it is itself the next stage of evidence.
+    # A second, weaker level. Daily strategies trade a handful of times a year on one instrument, so twenty unseen trades and
+    # statistical significance are rarely available; "candidate" keeps the requirements that do not depend on sample size
+    # and is allowed on paper accounts only, where trading it is itself the next stage of evidence.
     candidate_checks = [
         ("market data, not simulated", data.kind is not DataKind.SIMULATED),
         (f"profitable in at least {CANDIDATE['min_profitable_folds']} of {CRITERIA['min_folds']} unseen periods", s.get("profitable_folds", 0) >= CANDIDATE["min_profitable_folds"]),
@@ -141,41 +169,87 @@ def validate(session: Session, rt, strategy: str, instrument_id: str, timeframe:
         ("positive return on unseen data", (oos.get("total_return") or -1) > 0),
         (f"drawdown on unseen data at most {CRITERIA['max_out_of_sample_drawdown']:.0%}",
          oos.get("max_drawdown") is not None and oos["max_drawdown"] <= CRITERIA["max_out_of_sample_drawdown"]),
+        (f"still profitable with trading costs multiplied by {CRITERIA['stress_cost_multiplier']:g}", costly is not None and costly > 0),
+        ("still profitable without its best trade", without_best is not None and without_best > 0),
     ]
     tier = "validated" if passed else "candidate" if all(ok for _, ok in candidate_checks) else "rejected"
     last = next((f for f in reversed(result["folds"]) if f["best_params"]), None)
     payload = {
+        "criteria_version": CRITERIA["version"],
         "strategy": strategy, "category": category, "family": family_of(category), "horizon": horizon_of(timeframe), "instrument_id": instrument_id,
-        "timeframe": timeframe, "params": last["best_params"] if last else None, "data_kind": data.kind.value, "bars": int(len(data.bars)),
-        "data_from": data.bars.index[0].isoformat(), "data_to": data.bars.index[-1].isoformat(), "long_only": not allow_short,
+        "timeframe": timeframe, "params": last["best_params"] if last else None, "data_kind": data.kind.value, "data_source": data.source,
+        "bars": int(len(data.bars)),
+        "data_from": data.bars.index[0].isoformat(), "data_to": data.bars.index[-1].isoformat(), "long_only": not spec.fixed_params.get("allow_short"),
         "checks": [{"name": n, "passed": bool(ok), "value": v} for n, ok, v in checks],
         "candidate_checks": [{"name": n, "passed": bool(ok)} for n, ok in candidate_checks],
         "out_of_sample": {k: oos.get(k) for k in ("total_return", "max_drawdown", "sharpe_ratio", "sortino_ratio", "number_of_trades")},
+        "statistics": stats, "robustness": robust,
         "profitable_folds": s.get("profitable_folds", 0), "folds": CRITERIA["min_folds"], "walk_forward_efficiency": s.get("walk_forward_efficiency"),
         "combinations_tested": result["combinations_tested"], "tested_by": actor,
-        "valid_until": (rt.clock() + timedelta(days=CRITERIA["valid_for_days"])).isoformat(),
-        "caveat": ("Passing means the rule held up on several unseen periods of this history after costs. It does not mean it will be profitable."
+        "valid_until": (now + timedelta(days=CRITERIA["valid_for_days"])).isoformat(),
+        "caveat": ("Passing means the rule held up on several unseen periods of this history after costs, with a result unlikely to be "
+                   "luck. It does not mean it will be profitable."
                    if tier != "candidate" else
-                   "Candidate: profitable on most unseen periods, but on too few trades to count as validated. When many strategy/instrument "
+                   "Candidate: profitable on most unseen periods, but without enough evidence to count as validated. When many strategy/instrument "
                    "pairs are tested, some reach this level by chance. Paper accounts only."),
     }
-    row = ResearchItem(id=uuid.uuid4().hex, kind="validation", status=tier, title=_key(strategy, instrument_id, timeframe),
-                       created_at=rt.clock(), payload=payload)
+    return tier, payload
+
+
+def record(session: Session, tier: str, payload: dict, now: datetime) -> dict:
+    row = ResearchItem(id=uuid.uuid4().hex, kind="validation", status=tier, title=_key(payload["strategy"], payload["instrument_id"], payload["timeframe"]),
+                       created_at=now, payload=payload)
     session.add(row)
     return {"id": row.id, "status": row.status, "tested_at": row.created_at.isoformat(), **payload}
 
 
+def validate(session: Session, rt, strategy: str, instrument_id: str, timeframe: str, actor: str, allow_short: bool = False,
+             max_bars: int | None = None) -> dict:
+    """Walk-forward validation of one strategy on one stored series, judged against CRITERIA and recorded.
+    Long-only unless `allow_short`: a strategy is validated the way it will be traded, and a small cash account cannot sell short.
+    `max_bars` limits the history to the most recent bars (older markets say less about today, and the test runs faster)."""
+    spec = prepare(session, rt, strategy, instrument_id, timeframe, allow_short, max_bars)
+    tier, payload = judge(spec, walk_forward(spec), actor, rt.clock())
+    return record(session, tier, payload, rt.clock())
+
+
 def validations(session: Session, now: datetime | None = None) -> list[dict]:
-    """The latest validation of every (strategy, instrument, timeframe), newest first."""
+    """The latest validation of every (strategy, instrument, timeframe), newest first.
+
+    Two rules are applied here, on the whole set, because they depend on the other tests:
+      * a result recorded under older, weaker criteria is due for a new test and is not traded meanwhile;
+      * multiple testing: among all the setups tested, only those that survive the false-discovery-rate control stay
+        "validated". One that passed on its own but not across the family is reported as a candidate, with the reason."""
     seen, out = set(), []
     for r in session.scalars(select(ResearchItem).where(ResearchItem.kind == "validation").order_by(ResearchItem.created_at.desc())):
         if r.title in seen:
             continue
         seen.add(r.title)
         expired = now is not None and datetime.fromisoformat(r.payload["valid_until"]) < now
-        out.append({"id": r.id, "status": "expired" if expired and r.status == "validated" else r.status, "tested_at": r.created_at.isoformat(),
-                    "due_for_retest": bool(expired), **r.payload})
+        outdated = r.payload.get("criteria_version") != CRITERIA["version"] and r.status != "rejected"
+        out.append({"id": r.id, "status": "expired" if (expired and r.status == "validated") or outdated else r.status, "tested_at": r.created_at.isoformat(),
+                    "due_for_retest": bool(expired or outdated), **r.payload})
+    family = {v["id"]: (v.get("statistics") or {}).get("p_value") for v in out if v.get("criteria_version") == CRITERIA["version"] and not v["due_for_retest"]}
+    accepted = benjamini_hochberg(family, CRITERIA["max_false_discovery_rate"])
+    for v in out:
+        if v["status"] == "validated" and v["id"] not in accepted:
+            v["status"] = "candidate"
+            v["caveat"] = (f"Passed every check on its own, but not after correcting for the {len(family)} setups tested: with that many tests "
+                           "some pass by chance. Treated as a candidate (paper accounts only) until the evidence is stronger.")
     return out
+
+
+def multiple_testing(session: Session, now: datetime | None = None) -> dict:
+    """How many setups were tested and what the best of that many worthless ones would be expected to show."""
+    tested = [v for v in validations(session, now) if v.get("criteria_version") == CRITERIA["version"] and not v["due_for_retest"]]
+    sharpes = [s for s in ((v.get("statistics") or {}).get("sharpe_per_period") for v in tested) if s is not None]
+    spread = float(pd.Series(sharpes).std(ddof=1)) if len(sharpes) > 1 else 0.0
+    chance = expected_max_sharpe(len(sharpes), spread)
+    return {"setups_tested": len(tested), "validated": sum(v["status"] == "validated" for v in tested),
+            "candidates": sum(v["status"] == "candidate" for v in tested), "false_discovery_rate": CRITERIA["max_false_discovery_rate"],
+            "best_daily_sharpe_expected_by_chance": chance, "best_annual_sharpe_expected_by_chance": chance * 252 ** 0.5,
+            "meaning": "With this many setups tested, the best of them would be expected to reach this Sharpe ratio on unseen data even if "
+                       "none had an edge. A validated setup has to be unlikely as a fluke among all of them, not just on its own."}
 
 
 def _recent(last_bar_close: pd.Timestamp, timeframe: str, now: datetime) -> bool:
@@ -234,7 +308,7 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
             skip("tradable", f"not tradable at {broker_id}")
             continue
         try:
-            data = bt.load_dataset(session, iid, tf)
+            data = bt.load_dataset(session, iid, tf, last=SCAN_BARS)
         except bt.DataUnavailable as exc:
             skip("data", str(exc))
             continue

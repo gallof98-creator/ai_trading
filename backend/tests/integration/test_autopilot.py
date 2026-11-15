@@ -91,7 +91,9 @@ def test_a_cycle_goes_from_an_empty_universe_to_a_proposal_without_a_click(rt):
     out = rt.autopilot.tick()
     assert out["universe"]["added"] == ["STOCK:AAA", "STOCK:BBB", "STOCK:CCC", "STOCK:NOPE"] and out["universe"]["histories_requested"] == 4
     assert out["candidates"] == {"count": 2, "by_liquidity": 2, "crypto": 0, "live_only": 0, "broker_id": "paper-main"}  # the penny stock and the one without data are left out
-    assert out["validation"] == {"run": 4, "passed": 2, "candidates": 0, "could_not_run": 0, "remaining": 0}  # the trend rule passes, the mean-reversion rule does not
+    counts = {k: out["validation"][k] for k in ("run", "passed", "candidates", "could_not_run", "remaining")}
+    assert counts == {"run": 4, "passed": 2, "candidates": 0, "could_not_run": 0, "remaining": 0}  # the trend rule passes, the mean-reversion rule does not
+    assert out["validation"]["multiple_testing"]["setups_tested"] == 4 and out["validation"]["speed"]["validations"] == 4
     assert out["live"] == {"subscribed": 2, "no_live_source": 0} and set(rt.live.subscribed) == {"STOCK:AAA", "STOCK:BBB"}
     assert out["scan"]["validated_setups"] == 2 and out["scan"]["proposed"] == 1
     assert any("rsi_reversion AAA 1d: did not pass validation" == r for r in out["scan"]["reasons"])
@@ -143,7 +145,7 @@ def test_prices_are_refreshed_daily_and_expired_validations_are_redone(rt):
 def test_autopilot_respects_the_kill_switch_missing_key_and_one_failing_step(rt):
     configure(rt, seed_most_active=False)
     out = rt.autopilot.tick()
-    assert out["universe"] == {"etfs": 0, "skipped": "0 US instruments already have prices"} and out["candidates"]["count"] == 0
+    assert out["universe"]["skipped"] == "0 US instruments already have prices" and out["universe"]["etfs"] == 0 and out["candidates"]["count"] == 0
     configure(rt)
     rt.set_provider_key("alpaca", None, "admin")
     out = rt.autopilot.run_cycle()

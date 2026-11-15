@@ -30,9 +30,53 @@ class BarStore:
         self._refresh_summary(session, instrument_id, timeframe)
         return len(bars)
 
+    def append(self, session: Session, instrument_id: str, timeframe: str, dataset: Dataset) -> int:
+        """Add bars that are all newer than the stored series, updating its summary without recounting it (the minute
+        refresh does this for hundreds of series). Anything else is handed to `save`."""
+        bars = dataset.bars
+        if bars.empty:
+            return 0
+        row = session.get(BarSeries, (instrument_id, timeframe))
+        ts_ms = epoch_ns(bars.index) // 1_000_000
+        if row is None or int(ts_ms[0]) <= row.last_ms or not bars.index.is_monotonic_increasing or bars.index.has_duplicates:
+            return self.save(session, instrument_id, timeframe, dataset)
+        values = bars[OHLCV].to_numpy()
+        session.bulk_insert_mappings(BarRow, [
+            {"instrument_id": instrument_id, "timeframe": timeframe, "ts_ms": int(t), "open": r[0], "high": r[1], "low": r[2],
+             "close": r[3], "volume": r[4], "kind": dataset.kind.value, "source": dataset.source}
+            for t, r in zip(ts_ms, values)
+        ])
+        row.bars, row.last_ms = row.bars + len(bars), int(ts_ms[-1])
+        sources = sorted(set(row.source.split("+")) | {dataset.source})
+        if row.kind != dataset.kind.value and row.kind != "simulated":
+            row.kind = "simulated" if dataset.kind.value == "simulated" else "historical"
+        row.source = "+".join(sources)[:64]
+        session.flush()
+        return len(bars)
+
+    def span(self, session: Session, instrument_id: str, timeframe: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+        """Open time of the first and of the last stored bar."""
+        row = session.get(BarSeries, (instrument_id, timeframe))
+        if row is None:
+            return None
+        return pd.Timestamp(row.first_ms, unit="ms", tz="UTC"), pd.Timestamp(row.last_ms, unit="ms", tz="UTC")
+
+    def last_with_source(self, session: Session, instrument_id: str, timeframe: str, source: str) -> pd.Timestamp | None:
+        """Open time of the newest stored bar that came from `source`."""
+        ms = session.scalar(select(func.max(BarRow.ts_ms)).where(BarRow.instrument_id == instrument_id, BarRow.timeframe == timeframe, BarRow.source == source))
+        return None if ms is None else pd.Timestamp(ms, unit="ms", tz="UTC")
+
     def load(self, session: Session, instrument_id: str, timeframe: str, start: pd.Timestamp | None = None,
-             end: pd.Timestamp | None = None) -> Dataset | None:
+             end: pd.Timestamp | None = None, last: int | None = None) -> Dataset | None:
+        """`last` keeps only the most recent N bars of the selection (found through the index, without reading the rest)."""
         q = select(BarRow).where(BarRow.instrument_id == instrument_id, BarRow.timeframe == timeframe)
+        if last:
+            newest = select(BarRow.ts_ms).where(BarRow.instrument_id == instrument_id, BarRow.timeframe == timeframe)
+            if end is not None:
+                newest = newest.where(BarRow.ts_ms <= int(end.as_unit("ns").value // 1_000_000))
+            first = session.scalar(newest.order_by(BarRow.ts_ms.desc()).offset(last - 1).limit(1))
+            if first is not None:
+                q = q.where(BarRow.ts_ms >= first)
         if start is not None:
             q = q.where(BarRow.ts_ms >= int(start.as_unit("ns").value // 1_000_000))
         if end is not None:
