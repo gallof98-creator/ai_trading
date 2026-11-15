@@ -30,6 +30,7 @@ class PortfolioState:
     # Pairwise return correlations keyed by sorted instrument-id pair. Missing pairs are treated as unknown (0).
     correlations: dict[tuple[str, str], float] = field(default_factory=dict)
     reconciled: bool = True  # False when internal books and broker-reported positions disagree
+    valuation_problems: dict = field(default_factory=dict)  # broker id -> why its figures could not be read just now
 
     @property
     def margin_used(self) -> float:

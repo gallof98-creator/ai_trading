@@ -45,6 +45,9 @@ def alpaca_crypto_daily(symbol: str, key: str = "", secret: str = "", years: int
     for _ in range(20):
         for attempt in range(4):  # without a key only a few requests a minute are allowed
             r = client.get(f"{base_url.rstrip('/')}/v1beta3/crypto/us/bars", params=params, headers=headers)
+            if r.status_code in (401, 403) and headers:
+                headers = {}  # crypto data needs no key: a refused (e.g. regenerated) key must not stop it
+                continue
             if r.status_code != 429:
                 break
             time.sleep(3.0 * (attempt + 1))

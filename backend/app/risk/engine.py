@@ -70,6 +70,10 @@ class RiskEngine:
             self.breakers.pop("daily_loss")
             self._emit(state.ts, "breaker_reset", "info", breaker="daily_loss", actor="system:new_day")
         tripped = False
+        if state.valuation_problems:
+            # Loss limits are judged on true figures only: an account that cannot be read would look like a loss.
+            # New risk is refused meanwhile (see evaluate), so nothing is opened on incomplete numbers.
+            return []
         if state.day_start_equity > 0:
             daily_loss = 1 - state.equity / state.day_start_equity
             if daily_loss >= limits.max_daily_loss - TOLERANCE and "daily_loss" not in self.breakers:
@@ -111,6 +115,8 @@ class RiskEngine:
             reasons.append(f"price data is {intent.data_age_seconds:.0f}s old (limit {limits.max_data_age_seconds:.0f}s)")
         if intent.spread_bps is not None and intent.spread_bps > limits.max_spread_bps:
             reasons.append(f"bid/ask spread {intent.spread_bps:.0f} bps exceeds limit {limits.max_spread_bps:.0f} bps")
+        for broker, problem in sorted(state.valuation_problems.items()):
+            reasons.append(f"account {broker} cannot be read right now ({problem[:120]}): no new risk until it answers")
         if eq <= 0:
             reasons.append("account equity is not positive")
         else:

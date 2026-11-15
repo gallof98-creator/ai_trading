@@ -186,6 +186,7 @@ function DataProvider({ user, onChange }: { user: User; onChange: () => void }) 
             <div className="space-y-2 rounded border border-line p-3">
               <Meter label={`${job.data.mode === "update" ? "Update" : "Download"} via ${job.data.provider}: ${job.data.status}${job.data.current ? ` · ${job.data.current}` : ""}`} value={job.data.done} limit={job.data.total} format={(v) => String(v)} />
               <p className="font-mono text-xs"><span className="text-up">{job.data.stored} stored</span> · {num(job.data.bars, 0)} bars{job.data.readjusted ? ` · ${job.data.readjusted} re-downloaded after a split or dividend` : ""} · <span className={job.data.failed_count ? "text-down" : "text-dim"}>{job.data.failed_count} failed</span>{job.data.message ? ` · ${job.data.message}` : ""}</p>
+              {(job.data.notes ?? []).map((n: string) => <p key={n} className="text-xs text-warn">{n}</p>)}
               {job.data.failed.length > 0 && <Table max="max-h-40" head={["Instrument", "Reason"]} rows={job.data.failed.map((f: { instrument_id: string; reason: string }) => [f.instrument_id, <span key="r" className="whitespace-normal text-dim">{f.reason}</span>])} />}
             </div>
           )}

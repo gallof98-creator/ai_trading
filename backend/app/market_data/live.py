@@ -339,6 +339,11 @@ class AlpacaLive(LiveSource):
                     self.hub.record_error(self.name, "rate limited by Alpaca; slowing down")
                     stop.wait(self.poll_seconds * 3)
                     continue
+                if r.status_code in (401, 403) and self.asset == "crypto" and headers:
+                    # Crypto data needs no key: carry on without the refused one, at the slower keyless rate.
+                    self.hub.record_error(self.name, f"Alpaca refused the key (HTTP {r.status_code}); continuing without it")
+                    headers, self.key, self.secret, self.allow_stream = {}, "", "", False
+                    continue
                 if r.status_code in (401, 403):
                     self.hub.set_state(self.name, "error", detail="Alpaca rejected the API key")
                     self.hub.record_error(self.name, f"HTTP {r.status_code}")

@@ -1,6 +1,7 @@
 """Application factory."""
 from __future__ import annotations
 
+from fastapi.responses import JSONResponse
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
@@ -88,6 +89,16 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
         runtime=runtime,
         datahub=DataHub(db, settings),
     )
+    @app.middleware("http")
+    async def errors_as_json(request, call_next):
+        """Registered before CORS so that it runs inside it: an unexpected error reaches the browser as a readable JSON
+        answer with CORS headers, instead of a dropped connection that browsers report only as "Load failed"."""
+        try:
+            return await call_next(request)
+        except Exception as exc:  # noqa: BLE001
+            log.error("unhandled_error", path=request.url.path, error=f"{type(exc).__name__}: {str(exc)[:300]}")
+            return JSONResponse({"detail": f"Server error ({type(exc).__name__}): {str(exc)[:300]}"}, status_code=500)
+
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True,
                        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type", "X-Requested-With"])
     api_limiter = RateLimiter(settings.api_rate_limit_per_minute)

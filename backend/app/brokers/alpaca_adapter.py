@@ -63,6 +63,11 @@ class AlpacaAdapter(BrokerAdapter):
         self.state: dict = dict(state or {})
         self.assets: dict[str, dict] = {}
         self._caps: BrokerCapabilities | None = None
+        # The account and its positions are read at most once per `snapshot_ttl` seconds: the platform values the
+        # portfolio many times a minute, and Alpaca allows about 200 requests a minute in total.
+        self.snapshot_ttl = 15.0
+        self._snapshot: dict | None = None  # {"at": monotonic time, "account": {...}, "positions": [...]}
+        self.last_error: str | None = None
         self.account_currency = "USD"
 
     @property
@@ -165,11 +170,44 @@ class AlpacaAdapter(BrokerAdapter):
         return self.assets.get(self._symbol(instrument_id), {})
 
     # ---- account
+    def _refresh(self, force: bool = False) -> dict:
+        """Account and positions in one go, cached. If Alpaca cannot be read, the last good snapshot is served and the
+        problem is recorded (callers that must not act on old figures check `stale`); with no snapshot at all, it raises."""
+        import time
+
+        now = time.monotonic()
+        if not force and self._snapshot is not None and now - self._snapshot["at"] < self.snapshot_ttl:
+            return self._snapshot
+        try:
+            account = self._trading("GET", "/v2/account")
+            positions = self._trading("GET", "/v2/positions") or []
+        except BrokerError as exc:
+            self.last_error = str(exc)
+            if self._snapshot is None:
+                raise
+            # Served as the last known figures, flagged stale; Alpaca is asked again only after the interval, not on every call.
+            self._snapshot = {**self._snapshot, "at": now, "stale": True, "error": str(exc)}
+            return self._snapshot
+        self.last_error = None
+        self._snapshot = {"at": now, "account": account, "positions": positions, "stale": False, "error": None}
+        return self._snapshot
+
+    def invalidate(self) -> None:
+        """Forget the cached account and positions (after an order changed them)."""
+        if self._snapshot is not None:
+            self._snapshot = {**self._snapshot, "at": float("-inf")}
+
+    @property
+    def stale(self) -> bool:
+        return bool(self._snapshot and self._snapshot.get("stale"))
+
     def broker_account(self) -> dict:
         """The broker's own figures, in the account currency. Not the user's capital when a virtual capital is set."""
-        a = self._trading("GET", "/v2/account")
+        snap = self._refresh()
+        a = snap["account"]
         return {"currency": a.get("currency", "USD"), "equity": float(a["equity"]), "cash": float(a["cash"]), "buying_power": float(a.get("buying_power", 0)),
-                "status": a.get("status"), "pattern_day_trader": a.get("pattern_day_trader"), "environment": self.environment}
+                "status": a.get("status"), "pattern_day_trader": a.get("pattern_day_trader"), "environment": self.environment,
+                "stale": snap.get("stale", False), "error": snap.get("error")}
 
     def get_account_balance(self) -> AccountBalance:
         a = self.broker_account()
@@ -197,7 +235,7 @@ class AlpacaAdapter(BrokerAdapter):
     def get_positions(self) -> list[Position]:
         reverse = {self.registry.to_broker(self.broker_id, i.id): i.id for i in self.registry.all() if self.registry.is_mapped(self.broker_id, i.id)}
         out = []
-        for p in self._trading("GET", "/v2/positions") or []:
+        for p in self._refresh()["positions"]:
             iid = reverse.get(p["symbol"]) or reverse.get(p["symbol"].replace("USD", "/USD") if "/" not in p["symbol"] else p["symbol"])
             if iid is None:
                 continue  # held at the broker but not an instrument the platform trades
@@ -270,6 +308,7 @@ class AlpacaAdapter(BrokerAdapter):
             "reason": base.reason if status is not OrderStatus.REJECTED else f"{base.reason or ''} | rejected by Alpaca".strip(" |")})
 
     def submit_order(self, order: Order) -> Order:
+        self.invalidate()
         inst = self.registry.get(order.instrument_id)
         crypto = inst.asset_class is AssetClass.CRYPTO
         body: dict = {"symbol": self._symbol(order.instrument_id), "qty": f"{order.qty:.9f}".rstrip("0").rstrip("."), "side": order.side.value.lower(),
@@ -283,6 +322,7 @@ class AlpacaAdapter(BrokerAdapter):
         return self._to_order(self._trading("POST", "/v2/orders", json=body), order)
 
     def cancel_order(self, order: Order) -> Order:
+        self.invalidate()
         if order.broker_order_id is None:
             raise BrokerError(f"Order {order.id} was never accepted by Alpaca")
         try:
@@ -293,6 +333,7 @@ class AlpacaAdapter(BrokerAdapter):
 
     def replace_order(self, order: Order, qty: float | None = None, limit_price: float | None = None, stop_price: float | None = None) -> Order:
         """Modify a working order. Alpaca replaces it with a new one; the platform's order keeps its identity."""
+        self.invalidate()
         if order.broker_order_id is None:
             raise BrokerError(f"Order {order.id} was never accepted by Alpaca")
         body = {k: str(v) for k, v in (("qty", qty), ("limit_price", limit_price), ("stop_price", stop_price)) if v is not None}
@@ -301,6 +342,7 @@ class AlpacaAdapter(BrokerAdapter):
         return self._to_order(raw, updated)
 
     def get_order_status(self, order: Order) -> Order:
+        self.invalidate()
         if order.broker_order_id is None:
             found = self.find_order(order.client_order_id, order.instrument_id)
             if found is None:

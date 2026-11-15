@@ -255,6 +255,8 @@ def test_alpaca_adapter_orders_account_and_errors():
     bal = a.get_account_balance()
     assert (bal.currency, bal.equity, bal.cash) == ("USD", pytest.approx(1080.0), pytest.approx(1080.0))
     fake.equity += 12.5
+    assert a.get_account_balance().equity == pytest.approx(1080.0)   # read at most once per interval
+    a.invalidate()
     assert a.get_account_balance().equity == pytest.approx(1092.5)
     assert a.broker_account()["equity"] == 100_012.5 and a.broker_account()["buying_power"] == 200_000  # the broker's figures stay separate
     entry = a.adjust_virtual_capital(500, 1.10, "deposit")
@@ -289,6 +291,7 @@ def test_alpaca_adapter_orders_account_and_errors():
 
     fake.positions = [{"symbol": "AAPL", "qty": "3", "side": "long", "avg_entry_price": "201.5", "current_price": "203"},
                       {"symbol": "TSLA", "qty": "1", "side": "long", "avg_entry_price": "1", "current_price": "1"}]
+    a.invalidate()
     [pos] = a.get_positions()
     assert (pos.instrument_id, pos.qty, pos.avg_price, pos.last_price) == ("STOCK:AAPL", 3, 201.5, 203)
 

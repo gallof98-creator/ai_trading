@@ -69,6 +69,8 @@ class PortfolioEngine:
         self._corr_cache: tuple[int, dict] = (-1, {})
         self._marks = 0
         self.reconciled = True
+        self.valuation_problems: dict[str, str] = {}  # broker id -> why its figures could not be read just now
+        self._last_balance: dict = {}
         self.discrepancies: list[str] = []
 
     # ------------------------------------------------------------------ fills and marks
@@ -119,14 +121,32 @@ class PortfolioEngine:
         return self.fx.quote(currency, self.base, ts).rate
 
     def broker_balances(self, ts: datetime) -> list[dict]:
+        """Every account's figures in base currency. An account that cannot be read right now is reported with its last
+        known figures and the problem (`valuation_problems`), instead of failing every page and every decision."""
         out = []
+        current = {a.broker_id for a in self.brokers.all()}
+        self.valuation_problems = {k: v for k, v in self.valuation_problems.items() if k in current}
         for adapter in self.brokers.all():
-            bal = adapter.get_account_balance()
+            try:
+                bal = adapter.get_account_balance()
+                stale = bool(getattr(adapter, "stale", False))
+                problem = getattr(adapter, "last_error", None) if stale else None
+            except Exception as exc:  # unreachable broker, rejected key, rate limit
+                bal, stale, problem = self._last_balance.get(adapter.broker_id), True, f"{type(exc).__name__}: {exc}"
+                if bal is None:
+                    self.valuation_problems[adapter.broker_id] = problem
+                    continue
+            if problem:
+                self.valuation_problems[adapter.broker_id] = problem
+            else:
+                self.valuation_problems.pop(adapter.broker_id, None)
+                self._last_balance[adapter.broker_id] = bal
             q = self.fx.quote(bal.currency, self.base, ts)
             out.append({"broker_id": adapter.broker_id, "currency": bal.currency, "cash": bal.cash, "equity": bal.equity,
                         "margin_used": bal.margin_used, "fx_rate": q.rate, "fx_ts": q.ts.isoformat(), "fx_source": q.source,
                         "equity_base": bal.equity * q.rate, "margin_base": bal.margin_used * q.rate,
-                        "is_simulated": adapter.capabilities.is_simulated})
+                        "is_simulated": adapter.capabilities.is_simulated if adapter.is_connected() else None,
+                        "stale": stale, "problem": problem})
         return out
 
     def equity(self, ts: datetime) -> float:
@@ -158,11 +178,16 @@ class PortfolioEngine:
     def state(self, ts: datetime) -> PortfolioState:
         equity = self.equity(ts)
         return PortfolioState(ts=ts, equity=equity, day_start_equity=self.day_start_equity or equity, peak_equity=self.peak_equity or equity,
-                              exposures=self.exposures(ts), correlations=self.correlations(), reconciled=self.reconciled)
+                              exposures=self.exposures(ts), correlations=self.correlations(), reconciled=self.reconciled,
+                              valuation_problems=dict(self.valuation_problems))
 
     def revalue(self, ts: datetime) -> PortfolioState:
         """Record an equity observation and roll the daily / peak reference levels."""
         equity = self.equity(ts)
+        if self.valuation_problems:
+            # An account could not be read: its figures are old or missing, so this is not a true observation. It is not
+            # recorded, and it does not move the daily or peak reference levels.
+            return self.state(ts)
         if self._day != ts.date():
             self._day = ts.date()
             self.day_start_equity = self.equity_curve[-1][1] if self.equity_curve else equity

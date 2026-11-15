@@ -8,11 +8,17 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
     ...init,
     credentials: "include",
     headers: { "Content-Type": "application/json", "X-Requested-With": "qat-dashboard", ...init.headers },
   });
+  } catch {
+    // Browsers report a refused or dropped connection with a bare "Load failed" / "Failed to fetch".
+    throw new ApiError(0, `The platform's API did not answer (${path.split("?")[0]}). It may be restarting: wait a few seconds and reload. If it persists, check that the "api" container is running.`);
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {

@@ -8,6 +8,8 @@ from app.database.models import BrokerAccount, Security
 from app.execution.runtime import RuntimeError_, TradingRuntime
 from app.global_markets.discovery import AlpacaDiscovery, ProviderAuthError
 from app.global_markets.exchanges import EXCHANGES, exchanges_for
+from app.domain.models import AssetClass, Instrument
+from app.instruments.registry import default_instruments
 from app.security.vault import CredentialVault
 
 ASSETS = [
@@ -149,7 +151,7 @@ def test_alpaca_lists_stocks_etfs_and_crypto_and_states_that_it_has_no_forex():
     assert p.markets == p.listing_markets == {"US", "CRYPTO"} and "No forex" in p.pricing
     with pytest.raises(ProviderError, match="no symbol list"):
         p.list_symbols("FX")
-    with pytest.raises(Exception, match="rejected the keys"):
+    with pytest.raises(Exception, match="refused the request"):
         AlpacaProvider("WRONG", "SK", http_get=alpaca_http(calls)).list_symbols("US")
 
 
@@ -187,3 +189,134 @@ def test_importing_and_downloading_from_alpaca_covers_stocks_etfs_and_crypto(rt)
     assert rt.download.completed.wait(60) and rt.download.snapshot()["total"] == 2
     with pytest.raises(RuntimeError_, match="does not cover"):
         rt.start_download("alpaca", "admin", instrument_ids=["FOREX:EUR/USD"])
+
+
+# ---------------------------------------------------------------- refused keys, rate limits and unreachable accounts
+def scripted(responses, calls):
+    """An HTTP stub answering from a list of (status, body), recording the key each request carried."""
+    def get(url, params=None, timeout=None, headers=None):
+        calls.append((url, dict(params or {}), (headers or {}).get("APCA-API-KEY-ID")))
+        status, body = responses.pop(0) if responses else (200, {"bars": {}, "next_page_token": None})
+        return SimpleNamespace(status_code=status, json=lambda: body)
+
+    return get
+
+
+def test_a_refused_key_is_replaced_by_another_stored_key_and_crypto_needs_none():
+    calls = []
+    bar = {"t": "2026-11-10T05:00:00Z", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 9}
+    ok_stock = (200, {"bars": {"AAPL": [bar]}, "next_page_token": None})
+    p = AlpacaProvider("OLD1", "S", http_get=scripted([(401, {"message": "unauthorized."}), ok_stock], calls), source="Markets data-provider key",
+                       alternatives=[("NEW2", "S2", "broker account alpaca-paper")])
+    aapl = next(i for i in default_instruments() if i.id == "STOCK:AAPL")
+    assert len(p.daily_bars(aapl).bars) == 1
+    assert [c[2] for c in calls] == ["OLD1", "NEW2"] and p.source == "broker account alpaca-paper"
+    assert "refused the key ...OLD1" in p.notes[0] and "...NEW2 (broker account alpaca-paper)" in p.notes[0]
+
+    calls.clear()
+    btc = Instrument(id="CRYPTO:BTC/USD", asset_class=AssetClass.CRYPTO, symbol="BTC/USD", base_currency="BTC", quote_currency="USD", calendar="24x7",
+                     tick_size=0.01, lot_size=0.00001, min_qty=0.00001)
+    crypto_ok = (200, {"bars": {"BTC/USD": [{"t": "2026-11-10T00:00:00Z", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 9}]}, "next_page_token": None})
+    p = AlpacaProvider("BAD", "S", http_get=scripted([(403, {"message": "forbidden."}), crypto_ok], calls))
+    assert len(p.daily_bars(btc).bars) == 1 and [c[2] for c in calls] == ["BAD", None]   # second request without any key
+    assert "without a key" in p.notes[0]
+
+    calls.clear()
+    p = AlpacaProvider("K", "S", http_get=scripted([(403, {"message": "subscription does not permit querying recent SIP data"}), ok_stock], calls))
+    ds = p.daily_bars(aapl)
+    assert [c[1]["feed"] for c in calls] == ["sip", "iex"] and ds.source == "alpaca-iex" and "IEX" in p.notes[0]
+
+    p = AlpacaProvider("ZZZZ", "S", http_get=scripted([(401, {"message": "unauthorized."})], []), source="broker account alpaca-paper")
+    with pytest.raises(ProviderAuthError) as err:
+        p.daily_bars(aapl)
+    text = str(err.value)
+    assert "HTTP 401: unauthorized." in text and "...ZZZZ (broker account alpaca-paper)" in text and "regenerated" in text
+
+
+def test_every_stored_alpaca_key_is_offered_newest_place_first_without_duplicates(rt):
+    from app.security.credentials import store_credentials
+
+    rt.set_provider_key("alpaca", "OLDKEY", "admin", "OLDSECRET")
+    with rt.db.session() as s:
+        for account, key in (("alpaca-paper", "NEWKEY"), ("alpaca-dup", "OLDKEY")):
+            s.add(BrokerAccount(id=account, adapter="alpaca", label=account, is_live=False, currency="USD", config={}))
+            s.flush()
+            store_credentials(s, CredentialVault(rt.vault_key), account, {"api_key": key, "api_secret": "x"}, ["trade"], "admin")
+    assert [(c["api_key"], src) for c, src in rt.alpaca_credentials()] == [("OLDKEY", "Markets data-provider key"), ("NEWKEY", "broker account alpaca-paper")]
+    provider = rt._provider("alpaca")
+    assert provider.source == "Markets data-provider key" and [a[0] for a in provider._alternatives] == ["NEWKEY"]
+
+
+def test_the_alpaca_account_is_read_once_per_interval_and_its_last_figures_survive_an_outage():
+    from tests.integration.test_semi_auto import FakeAlpaca, adapter
+
+    fake = FakeAlpaca()
+    a, _ = adapter(fake, virtual_capital=1000.0, capital_fx=1.08)
+    a.connect()
+    fake.requests.clear()
+    for _ in range(20):
+        a.get_account_balance()
+        a.get_positions()
+    assert sum(1 for m, u, _ in fake.requests if u.endswith("/v2/account")) == 1 and sum(1 for m, u, _ in fake.requests if u.endswith("/v2/positions")) == 1
+    a.invalidate()
+    fake.fail = 429  # rate limited
+    bal = a.get_account_balance()
+    assert bal.equity == pytest.approx(1080.0) and a.stale and "rate limit" in a.last_error   # last good figures, flagged
+    a.invalidate()
+    assert a.get_account_balance().equity == pytest.approx(1080.0) and not a.stale             # recovers by itself
+    fresh, _ = adapter(fake, virtual_capital=1000.0, capital_fx=1.08)
+    fake.fail = 500
+    with pytest.raises(Exception):
+        fresh.broker_account()   # nothing known yet: an outage is reported, not hidden
+
+
+def test_pages_stay_up_and_no_new_risk_is_taken_while_a_broker_cannot_be_read(client):
+    from datetime import datetime, timezone
+
+    from app.brokers.base import BrokerError
+    from app.domain.models import Order, Side
+    from app.risk.models import OrderIntent
+    from tests.conftest import login
+    from tests.execution.fakes import FakeCcxt
+    from app.brokers.ccxt_adapter import CcxtAdapter
+
+    admin = login(client)
+    rt = client.app.state.container.runtime
+    client.post("/api/paper/accounts", headers=admin, json={"id": "paper-main", "label": "Main"})
+    broken = CcxtAdapter("broken", rt.registry, FakeCcxt())
+    broken.connect()
+
+    def unreadable():
+        raise BrokerError("Alpaca rejected the API key for this endpoint")
+
+    broken.get_account_balance = unreadable
+    rt.brokers.register(broken)
+    peak_before = rt.portfolio.peak_equity
+    r = client.get("/api/overview", headers=admin)
+    assert r.status_code == 200, r.text
+    assert any(b["broker_id"] == "paper-main" for b in r.json()["brokers"]) and "broken" in rt.portfolio.valuation_problems
+    assert client.get("/api/quant/dashboard", headers=admin).status_code == 200
+    ts = datetime.now(timezone.utc)
+    state = rt.portfolio.revalue(ts)
+    assert rt.risk.monitor(state) == [] and not rt.risk.breakers and rt.portfolio.peak_equity == peak_before   # an unreadable account is not a loss
+    inst = rt.registry.get("STOCK:AAPL")
+    decision = rt.risk.evaluate(OrderIntent(Order(broker_id="paper-main", instrument_id=inst.id, side=Side.BUY, qty=1), inst, 100.0, 1.0, 5.0), state)
+    assert not decision.approved and "cannot be read right now" in decision.reasons[0]
+    rt.brokers.remove("broken")
+    rt.portfolio.equity(ts)
+    assert rt.portfolio.valuation_problems == {}
+
+
+def test_an_unexpected_server_error_reaches_the_browser_as_readable_json_with_cors(client):
+    from tests.conftest import login
+
+    admin = login(client)
+    rt = client.app.state.container.runtime
+
+    def boom():
+        raise ValueError("something unexpected")
+
+    rt.overview = boom
+    r = client.get("/api/overview", headers={**admin, "Origin": "http://localhost:3000"})
+    assert r.status_code == 500 and r.json()["detail"] == "Server error (ValueError): something unexpected"
+    assert r.headers.get("access-control-allow-origin") == "http://localhost:3000"

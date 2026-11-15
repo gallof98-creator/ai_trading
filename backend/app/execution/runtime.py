@@ -521,6 +521,32 @@ class TradingRuntime:
             return None
         return {"api_key": env_key, "api_secret": getattr(self.settings, f"{name}_api_secret", "")}, "environment"
 
+    def alpaca_credentials(self) -> list[tuple[dict, str]]:
+        """Every Alpaca key stored on this installation, with where it is stored: the data-provider key first, then the keys
+        of linked Alpaca accounts (paper before live)."""
+        from ..security.credentials import load_credentials
+        from ..security.vault import CredentialVault
+
+        out: list[tuple[dict, str]] = []
+        vault = CredentialVault(self.settings.credential_key)
+        with self.db.session() as session:
+            row = session.get(AppSetting, "provider:alpaca")
+            if row is not None:
+                out.append((vault.decrypt(row.value["ciphertext"]), "Markets data-provider key"))
+            for account in session.scalars(select(BrokerAccount).where(BrokerAccount.adapter == "alpaca").order_by(BrokerAccount.is_live)):
+                try:
+                    creds = load_credentials(session, vault, account.id)
+                except LookupError:
+                    continue
+                if creds.get("api_key") and creds.get("api_secret"):
+                    out.append(({"api_key": creds["api_key"], "api_secret": creds["api_secret"]}, f"broker account {account.id}"))
+        seen, unique = set(), []
+        for creds, src in out:
+            if creds["api_key"] not in seen:
+                seen.add(creds["api_key"])
+                unique.append((creds, src))
+        return unique
+
     def _provider_key(self, name: str) -> tuple[str, str] | None:
         found = self._provider_credentials(name)
         return (found[0]["api_key"], found[1]) if found else None
@@ -622,7 +648,9 @@ class TradingRuntime:
         cls = PROVIDER_CLASSES[name]
         try:
             if name == "alpaca":
-                return cls(creds["api_key"], creds.get("api_secret", ""), base_url=self.settings.alpaca_base_url, trading_url=self.settings.alpaca_trading_url)
+                others = [(c["api_key"], c["api_secret"], src) for c, src in self.alpaca_credentials() if c["api_key"] != creds["api_key"]]
+                return cls(creds["api_key"], creds.get("api_secret", ""), base_url=self.settings.alpaca_base_url, trading_url=self.settings.alpaca_trading_url,
+                           source="Markets data-provider key" if found[1] == "stored" else found[1], alternatives=others)
             if cls.needs_secret:
                 return cls(creds["api_key"], creds.get("api_secret", ""), base_url=getattr(self.settings, f"{name}_base_url"))
             return cls(creds["api_key"], base_url=getattr(self.settings, f"{name}_base_url"))
@@ -642,7 +670,19 @@ class TradingRuntime:
             return {"ok": False, "message": str(exc)}
         clean, report = validate_bars(ds.bars, "1d", get_calendar("XNYS"))
         last = clean.iloc[-1]
-        return {"ok": True, "message": f"Received {len(clean)} daily bars for AAPL; latest {clean.index[-1].date()} close {last.close:.2f}.",
+        message = f"Stocks: {len(clean)} daily bars for AAPL, latest {clean.index[-1].date()} close {last.close:.2f}."
+        if "CRYPTO" in provider.markets:
+            from ..domain.models import AssetClass
+
+            btc = Instrument(id="CRYPTO:BTC/USD", asset_class=AssetClass.CRYPTO, symbol="BTC/USD", base_currency="BTC", quote_currency="USD",
+                             calendar="24x7", tick_size=0.01, lot_size=0.00001, min_qty=0.00001)
+            try:
+                c = provider.daily_bars(btc, date.today() - timedelta(days=10), date.today()).bars
+                message += f" Crypto: {len(c)} daily bars for BTC/USD, latest {c.index[-1].date()} close {c['close'].iloc[-1]:.2f}."
+            except ProviderError as exc:
+                message += f" Crypto: {exc}"
+        notes = list(getattr(provider, "notes", []))
+        return {"ok": True, "message": " ".join([message, *notes]), "notes": notes,
                 "bars": len(clean), "last_date": clean.index[-1].date().isoformat(), "last_close": float(last.close)}
 
     def import_symbols(self, name: str, market: str, kinds: list[str], actor: str, limit: int | None = None) -> dict:

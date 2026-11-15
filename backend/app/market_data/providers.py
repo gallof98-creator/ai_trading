@@ -402,10 +402,15 @@ class AlpacaProvider(PriceProvider):
     _VENUES = ("NYSE", "NASDAQ", "ARCA", "AMEX", "BATS")
 
     def __init__(self, api_key: str, api_secret: str = "", http_get: Callable | None = None, timeout: float = 60.0, base_url: str | None = None,
-                 trading_url: str | None = None) -> None:
+                 trading_url: str | None = None, source: str = "", alternatives: list[tuple[str, str, str]] | None = None) -> None:
+        """`alternatives` are other stored Alpaca keys (key, secret, where it is stored) tried in turn when Alpaca refuses one:
+        regenerating keys at Alpaca invalidates the old pair, which may still be stored in one place or another."""
         if not api_key or not api_secret:
             raise ProviderAuthError("Alpaca needs both the API key id and the secret key")
-        self._key, self._secret = api_key, api_secret
+        self._key, self._secret, self.source = api_key, api_secret, source or "stored key"
+        self._alternatives = list(alternatives or [])
+        self.feed = "sip"
+        self.notes: list[str] = []  # what had to be worked around, shown to the user
         self.BASE = (base_url or self.BASE).rstrip("/")
         self.TRADING = (trading_url or self.TRADING).rstrip("/")
         if http_get is None:
@@ -414,14 +419,46 @@ class AlpacaProvider(PriceProvider):
             http_get = httpx.get
         self._get, self._timeout = http_get, timeout
 
-    def _json(self, url: str, params: dict):
+    @staticmethod
+    def _message(response) -> str:
         try:
-            response = self._get(url, params=params, timeout=self._timeout, headers={"APCA-API-KEY-ID": self._key, "APCA-API-SECRET-KEY": self._secret})
-        except Exception as exc:
-            raise ProviderError(f"Alpaca could not be reached ({type(exc).__name__})") from None
-        code = response.status_code
-        if code in (401, 403):
-            raise ProviderAuthError("Alpaca rejected the keys, or the plan does not include this data")
+            body = response.json()
+        except Exception:
+            return ""
+        text = (body.get("message") or body.get("msg") or "") if isinstance(body, dict) else ""
+        return str(text)[:160]
+
+    def _json(self, url: str, params: dict, keyless_ok: bool = False):
+        """GET with the current key. On a refusal: try the other stored keys; for data that needs no key (crypto), try
+        without one; for stock data on a plan without the consolidated (SIP) feed, use the IEX feed."""
+        keyless = False
+        while True:
+            headers = {} if keyless else {"APCA-API-KEY-ID": self._key, "APCA-API-SECRET-KEY": self._secret}
+            try:
+                response = self._get(url, params=params, timeout=self._timeout, headers=headers)
+            except Exception as exc:
+                raise ProviderError(f"Alpaca could not be reached ({type(exc).__name__})") from None
+            code = response.status_code
+            if code not in (401, 403):
+                break
+            message = self._message(response)
+            if code == 403 and params.get("feed") == "sip" and "subscription" in message.lower():
+                params["feed"] = self.feed = "iex"
+                self.notes.append("This Alpaca plan has no consolidated (SIP) stock data: the IEX feed was used instead.")
+                continue
+            if not keyless and self._alternatives:
+                key, secret, source = self._alternatives.pop(0)
+                self.notes.append(f"Alpaca refused the key ...{self._key[-4:]} ({self.source}); the key ...{key[-4:]} ({source}) was used instead.")
+                self._key, self._secret, self.source = key, secret, source
+                continue
+            if keyless_ok and not keyless:
+                keyless = True
+                self.notes.append(f"Alpaca refused the key ...{self._key[-4:]} ({self.source}); crypto data was fetched without a key, at a slower rate.")
+                continue
+            raise ProviderAuthError(
+                f"Alpaca refused the request (HTTP {code}{': ' + message if message else ''}). Key used: ...{self._key[-4:]} ({self.source}). "
+                "If you regenerated your keys at Alpaca the old ones stop working: store the new key and secret (Markets > Data providers, "
+                "or Settings > the Alpaca account), and use paper keys for a paper account.")
         if code == 429:
             raise ProviderRateLimited("Alpaca: too many requests")
         if code != 200:
@@ -471,7 +508,7 @@ class AlpacaProvider(PriceProvider):
                         "start": f"{(start or date(2016, 1, 1)).isoformat()}T00:00:00Z"}
         collected: dict[str, list] = {}
         for _ in range(500):
-            body = self._json(f"{self.BASE}/v1beta3/crypto/us/bars", params)
+            body = self._json(f"{self.BASE}/v1beta3/crypto/us/bars", params, keyless_ok=True)
             if not isinstance(body, dict) or not isinstance(body.get("bars"), dict):
                 raise ProviderError("Alpaca returned an unexpected response")
             for symbol, bars in body["bars"].items():
@@ -514,22 +551,7 @@ class AlpacaProvider(PriceProvider):
                   "start": (start or date(2016, 1, 1)).isoformat(), "end": min(end or yesterday, yesterday).isoformat()}
         collected: dict[str, list] = {}
         for _ in range(500):  # pages; bounded so a faulty token cannot loop forever
-            try:
-                response = self._get(f"{self.BASE}/v2/stocks/bars", params=params, timeout=self._timeout,
-                                     headers={"APCA-API-KEY-ID": self._key, "APCA-API-SECRET-KEY": self._secret})
-            except Exception as exc:
-                raise ProviderError(f"Alpaca could not be reached ({type(exc).__name__})") from None
-            code = response.status_code
-            if code in (401, 403):
-                raise ProviderAuthError("Alpaca rejected the keys, or the plan does not include this data")
-            if code == 429:
-                raise ProviderRateLimited("Alpaca: too many requests")
-            if code != 200:
-                raise ProviderError(f"Alpaca answered with HTTP {code}")
-            try:
-                body = response.json()
-            except Exception:
-                raise ProviderError("Alpaca returned a response that is not JSON") from None
+            body = self._json(f"{self.BASE}/v2/stocks/bars", params)
             if not isinstance(body, dict) or not isinstance(body.get("bars"), dict):
                 raise ProviderError("Alpaca returned an unexpected response")
             for symbol, bars in body["bars"].items():
@@ -557,7 +579,7 @@ class AlpacaProvider(PriceProvider):
                     continue
             if records:
                 frame = pd.DataFrame(records, columns=["ts", *OHLCV]).set_index("ts").sort_index()
-                out[inst.id] = Dataset(frame[~frame.index.duplicated(keep="last")], DataKind.HISTORICAL, "alpaca")
+                out[inst.id] = Dataset(frame[~frame.index.duplicated(keep="last")], DataKind.HISTORICAL, "alpaca" if self.feed == "sip" else "alpaca-iex")
         return out
 
 
@@ -600,7 +622,7 @@ class DownloadJob:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {**self.state, "failed": list(self.state["failed"])}
+            return {**self.state, "failed": list(self.state["failed"]), "notes": list(getattr(self.provider, "notes", []))}
 
     def cancel(self) -> None:
         self._cancel.set()
