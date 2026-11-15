@@ -27,10 +27,11 @@ services:
     environment: &backend_env
       QAT_DATABASE_URL: postgresql+psycopg://qat:${POSTGRES_PASSWORD}@postgres:5432/qat
       QAT_REDIS_URL: redis://redis:6379/0
+      QAT_DATA_LAKE_DIR: /srv/lake
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
-    volumes: [models:/srv/models]
+    volumes: [models:/srv/models, lake:/srv/lake]
     ports: ["127.0.0.1:8000:8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,json,sys; sys.exit(json.load(urllib.request.urlopen('http://localhost:8000/health'))['status']!='ok')"]
@@ -44,7 +45,20 @@ services:
     build: ./backend
     env_file: .env
     environment: *backend_env
-    command: celery -A app.core.tasks.celery_app worker --loglevel=INFO --concurrency=2
+    # Research jobs only (queue "celery"). Data collection has its own worker below, so a long backtest never delays it.
+    command: celery -A app.core.tasks.celery_app worker --loglevel=INFO --concurrency=2 -Q celery
+    volumes: [models:/srv/models, lake:/srv/lake]
+    depends_on:
+      api: {condition: service_healthy}
+
+  # Data platform: collects market, macro and company data into the Parquet lake (queue "ingest") and runs the
+  # schedule. It does nothing until QAT_DATA_SCHEDULE_ENABLED=true; it holds no broker connection and cannot trade.
+  data-worker:
+    build: ./backend
+    env_file: .env
+    environment: *backend_env
+    command: celery -A app.core.tasks.celery_app worker --beat --schedule /tmp/celerybeat-schedule --loglevel=INFO --concurrency=1 -Q ingest
+    volumes: [lake:/srv/lake]
     depends_on:
       api: {condition: service_healthy}
 
@@ -60,3 +74,4 @@ services:
 volumes:
   pgdata:
   models:
+  lake:

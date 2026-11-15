@@ -83,6 +83,10 @@ imported from files. Websites such as TradingView, Yahoo Finance and Stooq are n
 official data API and forbid or block automated access. When a plan's allowance runs out a download stops;
 "Download missing" resumes it later. Check each vendor's current limits and terms before relying on them.
 
+Research data beyond prices (macro with publication history, SEC filings and reported figures, crypto venues with trades and
+order books, intraday history) is collected by the separate data platform: see [docs/data-platform.md](docs/data-platform.md).
+It is off until its sources are configured and never trades.
+
 After the first sign-in remove `QAT_ADMIN_EMAIL` and `QAT_ADMIN_PASSWORD` from `.env`.
 
 ## Development setup

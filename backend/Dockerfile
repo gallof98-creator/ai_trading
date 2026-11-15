@@ -4,8 +4,8 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN useradd --system --uid 10001 qat && mkdir -p /srv/models && chown -R qat /srv
-ENV QAT_MODEL_DIR=/srv/models
+RUN useradd --system --uid 10001 qat && mkdir -p /srv/models /srv/lake && chown -R qat /srv
+ENV QAT_MODEL_DIR=/srv/models QAT_DATA_LAKE_DIR=/srv/lake
 USER qat
 EXPOSE 8000
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app_factory --factory --host 0.0.0.0 --port 8000"]

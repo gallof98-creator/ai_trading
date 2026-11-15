@@ -494,7 +494,9 @@ class TradingRuntime:
 
     # ------------------------------------------------------------------ data providers
     PROVIDERS = ("alpaca", "tiingo", "alphavantage", "eodhd")
-    EXTRA_KEYS = ("finnhub", "openfigi")  # keys used by the global catalog only
+    # Keys stored here but used elsewhere: the global catalog (finnhub, openfigi) and the data platform
+    # (fred, fmp, coingecko; for "sec" the stored value is the User-Agent the SEC asks for).
+    EXTRA_KEYS = ("finnhub", "openfigi", "fred", "fmp", "coingecko", "sec")
 
     def _provider_credentials(self, name: str) -> tuple[dict, str] | None:
         """({api_key, api_secret?}, where it comes from) for a provider, or None. A stored key takes precedence over the environment."""

@@ -28,6 +28,11 @@ Status words mean exactly this: **Done** = implemented and covered by automated 
 
 ## Not verified or not built — read before relying on anything
 
+**Data platform** (`app.datahub`, see [data-platform.md](data-platform.md))
+- No data source has been exercised against the live service: tests use responses of the documented shapes. Run `python -m app.scripts.data_smoke` after configuring keys.
+- Not built: US equity bid/ask history, economic-surprise features (no free consensus data), historical order books (none exist for free), a frontend page for the data platform (API only).
+- The migration `0007` is tested on SQLite only; the `data-worker` service has not been run in a live stack.
+
 **Live trading**
 - No adapter has ever talked to a real exchange, testnet or IBKR gateway. `IbkrAdapter` in particular is written against the `ib_async` interface from its signatures and may need event-loop handling when run inside the API process.
 - On restart with a real broker, positions are reconciled against the broker (a mismatch trips a breaker), but open orders at the broker are not yet compared with the platform's records.

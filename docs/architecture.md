@@ -29,6 +29,7 @@ Next.js dashboard ── REST (cookie session) ── FastAPI: auth, roles, rate
 | `live_trading` | Authorization gate for real-money connections |
 | `backtesting` | Event-driven backtester, metrics, walk-forward, comparison, services |
 | `machine_learning` | Features, triple-barrier labels, purged validation, model zoo, training/calibration/drift |
+| `datahub` | Data platform: free-provider sources, Parquet lake with DuckDB, quality checks, versioned point-in-time features, ingestion service and tasks. Read-only with respect to trading; see [data-platform.md](data-platform.md) |
 | `quant_ai` | Regime detection, analyst (explanations, weaknesses, anomalies, proposals), services |
 | `notifications`, `monitoring` | Notifier and channels; audit trail, broker and strategy monitors |
 | `security`, `database`, `api`, `core` | Auth, vault, rate limits; schema and settings; routes; configuration and logging |

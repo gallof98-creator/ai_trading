@@ -37,14 +37,17 @@ class BarStore:
             q = q.where(BarRow.ts_ms >= int(start.as_unit("ns").value // 1_000_000))
         if end is not None:
             q = q.where(BarRow.ts_ms <= int(end.as_unit("ns").value // 1_000_000))
-        rows = session.scalars(q.order_by(BarRow.ts_ms)).all()
+        # Plain column tuples instead of one mapped object per bar: the same rows, several times faster on long series.
+        columns = (BarRow.ts_ms, BarRow.open, BarRow.high, BarRow.low, BarRow.close, BarRow.volume, BarRow.kind, BarRow.source)
+        rows = session.execute(q.with_only_columns(*columns).order_by(BarRow.ts_ms)).all()
         if not rows:
             return None
-        kinds, sources = {r.kind for r in rows}, {r.source for r in rows}
+        ts_ms, open_, high, low, close, volume, kind_column, source_column = zip(*rows)
+        kinds, sources = set(kind_column), set(source_column)
         # A range stitched from different provenances is reported as the weakest of them.
         kind = DataKind.SIMULATED if "simulated" in kinds else DataKind(sorted(kinds)[0]) if len(kinds) == 1 else DataKind.HISTORICAL
-        idx = pd.to_datetime([r.ts_ms for r in rows], unit="ms", utc=True).rename("ts")
-        bars = pd.DataFrame([[r.open, r.high, r.low, r.close, r.volume] for r in rows], index=idx, columns=OHLCV)
+        idx = pd.to_datetime(list(ts_ms), unit="ms", utc=True).rename("ts")
+        bars = pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": volume}, index=idx, columns=OHLCV)
         return Dataset(bars, kind, "+".join(sorted(sources)))
 
     def _refresh_summary(self, session: Session, instrument_id: str, timeframe: str) -> None:

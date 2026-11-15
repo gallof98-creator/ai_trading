@@ -99,20 +99,28 @@ def import_csv_series(session: Session, instrument, timeframe: str, csv_text: st
     """Validate and store one CSV series as market data. Never merges into an existing series silently."""
     import io
 
-    from ..market_data.calendars import get_calendar
-    from ..market_data.quality import validate_bars
     from ..market_data.sources import load_csv
 
     raw = load_csv(io.StringIO(csv_text), tz=tz)
-    clean, report = validate_bars(raw.bars, timeframe, get_calendar(instrument.calendar))
+    return import_bars_series(session, instrument, timeframe, raw.bars, "csv-import", replace, empty_message="The file contains no valid bars")
+
+
+def import_bars_series(session: Session, instrument, timeframe: str, bars: pd.DataFrame, source: str, replace: bool,
+                       kind: DataKind = DataKind.HISTORICAL, empty_message: str = "There are no valid bars to import") -> dict:
+    """Validate and store one bar series as market data for an instrument (CSV uploads, series copied from the data lake).
+    Never merges into an existing series silently: an existing one is refused, or replaced as a whole when asked."""
+    from ..market_data.calendars import get_calendar
+    from ..market_data.quality import validate_bars
+
+    clean, report = validate_bars(bars, timeframe, get_calendar(instrument.calendar))
     if clean.empty:
-        raise ValueError("The file contains no valid bars")
+        raise ValueError(empty_message)
     existing = _store.load(session, instrument.id, timeframe)
     if existing is not None:
         if not replace:
             raise ValueError(f"{instrument.id} {timeframe} already has {existing.kind.value} data; choose 'replace' to overwrite it")
         _store.delete_series(session, instrument.id, timeframe)
-    n = _store.save(session, instrument.id, timeframe, Dataset(clean, DataKind.HISTORICAL, "csv-import"))
+    n = _store.save(session, instrument.id, timeframe, Dataset(clean, kind, source))
     return {"bars_stored": n, "first": clean.index[0].isoformat(), "last": clean.index[-1].isoformat(), "quality": report.to_dict()}
 
 

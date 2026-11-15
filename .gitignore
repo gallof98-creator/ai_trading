@@ -13,3 +13,4 @@ mlruns/
 *.pem
 *.key
 quant-ai-trader.zip
+lake/

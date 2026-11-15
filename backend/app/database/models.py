@@ -309,3 +309,47 @@ class AuditEntry(Base):
     actor: Mapped[str] = mapped_column(String(320))  # user email, "system" or "ai"
     action: Mapped[str] = mapped_column(String(64), index=True)
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class DataSeries(Base):
+    """Catalog of the data platform: one row per series stored in the Parquet lake (app.datahub), kept up to date on
+    every write so coverage and freshness can be listed without opening a file. `timeframe` is empty where it does not apply."""
+
+    __tablename__ = "data_series"
+    dataset: Mapped[str] = mapped_column(String(32), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(24), primary_key=True)
+    key: Mapped[str] = mapped_column(String(96), primary_key=True)  # venue symbol, series id, CIK, coin id
+    timeframe: Mapped[str] = mapped_column(String(8), primary_key=True, default="")
+    rows: Mapped[int] = mapped_column(BigInteger, default=0)
+    bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    first_ts: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    last_ts: Mapped[datetime | None] = mapped_column(TS, nullable=True)  # newest event stored
+    cadence_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)  # expected spacing of events, for freshness
+    last_ingested_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    last_status: Mapped[str] = mapped_column(String(12), default="ok")
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class DataIngestionRun(Base):
+    """Append-only log of what was fetched from which provider: request counts, latency, rows written and the
+    data-quality report of the batch. Provider availability and ingestion speed are read from here."""
+
+    __tablename__ = "data_ingestion_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(24), index=True)
+    dataset: Mapped[str] = mapped_column(String(32), index=True)
+    key: Mapped[str] = mapped_column(String(96))
+    timeframe: Mapped[str] = mapped_column(String(8), default="")
+    started_at: Mapped[datetime] = mapped_column(TS, default=_now, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)
+    status: Mapped[str] = mapped_column(String(12))  # ok | empty | failed | limited | disabled
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    rate_limited: Mapped[int] = mapped_column(Integer, default=0)
+    fetch_ms: Mapped[int] = mapped_column(Integer, default=0)
+    write_ms: Mapped[int] = mapped_column(Integer, default=0)
+    rows_in: Mapped[int] = mapped_column(Integer, default=0)
+    rows_new: Mapped[int] = mapped_column(Integer, default=0)
+    rows_revised: Mapped[int] = mapped_column(Integer, default=0)
+    quality: Mapped[dict] = mapped_column(JSON, default=dict)
+    message: Mapped[str] = mapped_column(Text, default="")
+    actor: Mapped[str] = mapped_column(String(320), default="system")

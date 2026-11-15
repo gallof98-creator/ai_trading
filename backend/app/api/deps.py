@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ..core.config import Settings
 from ..database.base import Database
 from ..database.models import User
+from ..datahub.service import DataHub
 from ..execution.runtime import TradingRuntime
 from ..security.rate_limit import RateLimiter
 from ..security.roles import Role
@@ -29,6 +30,7 @@ class Container:
     vault: CredentialVault
     login_limiter: RateLimiter
     runtime: TradingRuntime
+    datahub: "DataHub | None" = None  # data platform (research datasets); independent of the trading runtime
 
 
 def get_container(request: Request) -> Container:
