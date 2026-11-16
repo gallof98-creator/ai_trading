@@ -328,3 +328,17 @@ def test_a_broker_paper_environment_counts_as_paper_and_follows_the_trading_mode
     assert not is_paper_account(SimpleNamespace(capabilities=caps, is_live=True))
     assert not is_paper_account(SimpleNamespace(capabilities=caps))  # an adapter that does not say counts as real money
     assert is_paper_account(SimpleNamespace(capabilities=SimpleNamespace(is_simulated=True)))
+
+
+def test_the_validation_chooses_the_take_profit_and_the_proposal_uses_it(rt):
+    assert opp.take_profit_grid("15m") == [1.5, 3.0, 4.5, None] and opp.take_profit_grid("5m") == [0.75, 1.5, 2.25, None]
+    with rt.db.session() as s:
+        spec = opp.prepare(s, rt, "ema_crossover", CYC, "1d")
+        v = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
+    assert "take_profit_atr" in spec.param_grid and "take_profit_atr" not in spec.fixed_params
+    assert v["params"]["take_profit_atr"] in opp.take_profit_grid("1d") and v["criteria_version"] == 3
+    with rt.db.session() as s:
+        opp.scan(s, rt, "paper-main", "admin")
+    [p] = rt.proposals()
+    tp = v["params"]["take_profit_atr"]
+    assert (p["take_profit_price"] is None) == (tp is None)

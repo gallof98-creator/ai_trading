@@ -189,6 +189,14 @@ The counts in the next paragraph were measured with the previous criteria; the s
 On that same data, long-only: 1 pair validated, 11 candidates, 52 rejected. Candidates are weaker evidence, and when many pairs are
 tested some reach the level by chance; every proposal says which level it rests on. Candidates can be switched off in the Autopilot settings.
 
+Exits are part of what the validation chooses (criteria version 3). In each walk-forward period it tries the stop at 1.5 and
+2.5 ATR (and the horizon's own), and the take profit at half, once and one and a half times the horizon's target, or none at all
+(the position then closes only on the strategy's exit or the stop). For 15m/30m/1h that is 1.5, 3, 4.5 ATR or none; for 5m
+0.75, 1.5, 2.25 or none. The values chosen in sample are judged on the unseen period that follows, and the proposal uses the
+ones the validation picked. The strategies' own parameters keep their defaults. More choices make a lucky in-sample fit more
+likely; the parameter-robustness and multiple-testing checks count every combination tried. Raising the criteria version
+sends every earlier validation back to be tested again.
+
 Strategies are validated and traded long-only by default: a small cash account cannot sell short, and a rule should be tested the way
 it will be traded. Validation uses the most recent 1,500 bars (about six years of daily data); intraday timeframes use the most recent
 20,000 bars (about a year of five-minute bars). Significance is always judged on daily returns, so a short intraday history cannot

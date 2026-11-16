@@ -53,7 +53,7 @@ MODULES: dict[str, dict] = {
 }
 
 CRITERIA = {
-    "version": 2,
+    "version": 3,  # 3: the take profit is chosen by the validation, among TAKE_PROFIT_GRID
     "min_folds": 4,                      # independent out-of-sample periods
     "min_profitable_folds": 3,           # at least three of the four must have made money
     "min_out_of_sample_trades": 20,
@@ -71,6 +71,14 @@ CRITERIA = {
     "valid_for_days": 30,
 }
 STOP_GRID = [1.5, 2.5]
+# The take profit is chosen by the validation, like the stop: a nearer and a farther target around the horizon's own,
+# and none at all (the position is closed only by the strategy's exit or the stop). Multiples of the horizon's target.
+TAKE_PROFIT_GRID = [0.5, 1.0, 1.5, None]
+
+
+def take_profit_grid(timeframe: str) -> list[float | None]:
+    base = MODULES[horizon_of(timeframe)]["exits"]["take_profit_atr"]
+    return [round(base * m, 2) if m is not None else None for m in TAKE_PROFIT_GRID]
 CANDIDATE = {"min_profitable_folds": 3, "min_out_of_sample_trades": 8}
 # The third, weakest level: setups that failed validation but did not lose on unseen data. Traded only when the user
 # switches exploration on, only on paper accounts, to measure them in real time; never evidence of an edge.
@@ -97,7 +105,7 @@ def describe_modules() -> dict:
         if m["kind"] == "signal":
             entry["strategies"] = [{"name": s["name"], "description": s.get("description", "")} for s in strategies if s["category"] in m["categories"]]
         out.append(entry)
-    return {"modules": out, "criteria": CRITERIA,
+    return {"modules": out, "criteria": CRITERIA, "take_profit_grid": {h: take_profit_grid(MODULES[h]["timeframes"][0]) for h, m in MODULES.items() if m["kind"] == "horizon"},
             "note": "Scalping, intraday, swing and position are horizons: the same signal families run on their timeframes with their own "
                     "stop and target distances. A strategy is proposed only for an instrument and timeframe on which it passed validation."}
 
@@ -125,10 +133,11 @@ def prepare(session: Session, rt, strategy: str, instrument_id: str, timeframe: 
         data = Dataset(data.bars.iloc[-max_bars:], data.kind, data.source)
     create_strategy(strategy, {})  # an unknown strategy fails here, before any work is queued
     exits = MODULES[horizon_of(timeframe)]["exits"]
-    fixed = {"take_profit_atr": exits["take_profit_atr"], "allow_short": bool(allow_short)}
+    fixed = {"allow_short": bool(allow_short)}
     capital = rt.user_settings.initial_paper_capital or 1000.0
     return WalkForwardSpec(
-        strategy=strategy, instrument_id=instrument_id, timeframe=timeframe, data=data, param_grid={"stop_atr": sorted({exits["stop_atr"], *STOP_GRID})},
+        strategy=strategy, instrument_id=instrument_id, timeframe=timeframe, data=data, param_grid={"stop_atr": sorted({exits["stop_atr"], *STOP_GRID}),
+                                                                                                 "take_profit_atr": take_profit_grid(timeframe)},
         initial_capital=capital, n_folds=CRITERIA["min_folds"], fixed_params=fixed, base_currency=rt.portfolio.base, limits=rt.user_settings.risk,
         static_fx=_static_fx(rt, instrument_id), instruments=rt.registry.all(), min_trades=3, robustness=True,
         stress_costs=CRITERIA["stress_cost_multiplier"])
