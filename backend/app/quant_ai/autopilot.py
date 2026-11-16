@@ -555,4 +555,6 @@ class Autopilot:
             blockers[key] = blockers.get(key, 0) + 1
         return {"validated_setups": out["validated"], "candidate_setups": out["candidates"], "explorable_setups": out["explorable"], "proposed": len(out["proposed"]), "sent": len(out["sent"]), "not_proposed": len(out["skipped"]),
                 "funnel": out["funnel"], "blockers": sorted(([k, n] for k, n in blockers.items()), key=lambda x: -x[1])[:8],
-                "reasons": [f"{s['strategy']} {s['instrument_id'].split(':')[1]} {s['timeframe']}: {s['reason']}" for s in out["skipped"][:40]]}
+                # Tradable levels first (validated, candidate, exploration), each marked, so the setups that could have traded are on top.
+                "reasons": [(f"[{s['level']}] " if s.get("level") else "") + f"{s['strategy']} {s['instrument_id'].split(':')[1]} {s['timeframe']}: {s['reason']}"
+                            for s in sorted(out["skipped"], key=lambda s: {"validated": 0, "candidate": 1, "exploration": 2}.get(s.get("level") or "", 3))[:60]]}

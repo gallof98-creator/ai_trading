@@ -66,7 +66,7 @@ function Proposal({ p, canTrade, onDone }: { p: Json; canTrade: boolean; onDone:
 }
 
 const FUNNEL: [string, string][] = [["validation", "not validated"], ["tradable", "not tradable"], ["data", "prices stale or missing"], ["liquidity", "too illiquid"],
-  ["regime", "regime does not fit"], ["signal", "no entry now"], ["already", "already proposed or held"], ["risk", "refused by risk engine"]];
+  ["regime", "regime does not fit"], ["signal", "no entry now"], ["events", "results / news / fundamentals filter"], ["already", "already proposed or held"], ["risk", "refused by risk engine"]];
 
 function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade: boolean; isAdmin: boolean; strategies: Json[]; accounts: string[] }) {
   const ap = useApi("/api/quant/autopilot", 5_000);

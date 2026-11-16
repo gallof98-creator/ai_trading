@@ -95,7 +95,7 @@ def test_scan_proposes_only_validated_strategies_and_explains_itself(rt):
     with rt.db.session() as s:
         out = opp.scan(s, rt, "paper-main", "admin")
     assert [(p["strategy"], p["instrument_id"]) for p in out["proposed"]] == [("ema_crossover", CYC)]
-    assert {"strategy": "rsi_reversion", "instrument_id": CYC, "timeframe": "1d", "stage": "validation", "reason": "did not pass validation"} in out["skipped"]
+    assert {"strategy": "rsi_reversion", "instrument_id": CYC, "timeframe": "1d", "level": None, "stage": "validation", "reason": "did not pass validation"} in out["skipped"]
     assert out["funnel"] == {"setups": 2, "validation": 1, "proposed": 1} and out["sent"] == []
     assert not [o for o in rt.engine.orders.values() if o.status is OrderStatus.SUBMITTED]  # a scan sends nothing
     [p] = rt.proposals()

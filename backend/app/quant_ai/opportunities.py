@@ -353,7 +353,7 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         label = {"strategy": strategy, "instrument_id": iid, "timeframe": tf}
 
         def skip(stage: str, reason: str) -> None:
-            skipped.append({**label, "stage": stage, "reason": reason})
+            skipped.append({**label, "level": level_of(v), "stage": stage, "reason": reason})
             funnel[stage] = funnel.get(stage, 0) + 1
 
         funnel["setups"] += 1
