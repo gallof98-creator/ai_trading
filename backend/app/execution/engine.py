@@ -420,7 +420,7 @@ class TradingEngine:
             self._rationale = {"strategy": dep.strategy.name, "strategy_version": dep.strategy.version, "category": dep.strategy.category,
                                "description": dep.strategy.description, "params": dep.strategy.params.model_dump(), "timeframe": dep.timeframe,
                                "signal_time": signal.ts.isoformat(), "signal_price": signal.price, "regime": signal.regime, "confidence": signal.confidence,
-                               "deployment": dep.id, **{k: v for k, v in signal.meta.items() if k in ("opportunity", "validation", "data")}}
+                               "deployment": dep.id, **{k: v for k, v in signal.meta.items() if k in ("opportunity", "validation", "data", "fundamentals", "filters")}}
             created.append(self._route(entry, intent, protection, mode, ts, pending_close=direction != 0))
         return created
 

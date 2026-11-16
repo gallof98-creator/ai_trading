@@ -135,7 +135,10 @@ def prepare(session: Session, rt, strategy: str, instrument_id: str, timeframe: 
     exits = MODULES[horizon_of(timeframe)]["exits"]
     fixed = {"allow_short": bool(allow_short)}
     capital = rt.user_settings.initial_paper_capital or 1000.0
+    company = getattr(rt, "company", None)
+    blocked_any, blocked_long, filters = company.masks(instrument_id, timeframe, data.bars.index) if company else (None, None, {})
     return WalkForwardSpec(
+        blocked_any=blocked_any, blocked_long=blocked_long, filters=filters,
         strategy=strategy, instrument_id=instrument_id, timeframe=timeframe, data=data, param_grid={"stop_atr": sorted({exits["stop_atr"], *STOP_GRID}),
                                                                                                  "take_profit_atr": take_profit_grid(timeframe)},
         initial_capital=capital, n_folds=CRITERIA["min_folds"], fixed_params=fixed, base_currency=rt.portfolio.base, limits=rt.user_settings.risk,
@@ -191,7 +194,7 @@ def judge(spec: WalkForwardSpec, result: dict, actor: str, now: datetime) -> tup
     payload = {
         "criteria_version": CRITERIA["version"],
         "strategy": strategy, "category": category, "family": family_of(category), "horizon": horizon_of(timeframe), "instrument_id": instrument_id,
-        "timeframe": timeframe, "params": last["best_params"] if last else None, "data_kind": data.kind.value, "data_source": data.source,
+        "timeframe": timeframe, "params": last["best_params"] if last else None, "filters": dict(getattr(spec, "filters", {}) or {}), "data_kind": data.kind.value, "data_source": data.source,
         "bars": int(len(data.bars)),
         "data_from": data.bars.index[0].isoformat(), "data_to": data.bars.index[-1].isoformat(), "long_only": not spec.fixed_params.get("allow_short"),
         "checks": [{"name": n, "passed": bool(ok), "value": v} for n, ok, v in checks],
@@ -331,7 +334,18 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
     # Strongest evidence first: validated setups, then candidates, then exploration, each by out-of-sample return. With
     # one proposal per instrument, this decides which strategy gets it.
     rank = {"validated": 0, "candidate": 1, "exploration": 2}
-    ordered = sorted(validations(session, now), key=lambda v: (rank.get(level_of(v) or "", 3), -(v["out_of_sample"].get("total_return") or -1e9)))
+    company = getattr(rt, "company", None)
+    scores: dict[str, float | None] = {}
+
+    def score(iid: str) -> float | None:
+        if iid not in scores:
+            snap = company.fundamentals_now(iid, now) if company else None
+            scores[iid] = snap.score() if snap else None
+        return scores[iid]
+
+    # Within a level, companies with stronger reported fundamentals first (instruments without any, after them).
+    ordered = sorted(validations(session, now), key=lambda v: (rank.get(level_of(v) or "", 3), -(score(v["instrument_id"]) if score(v["instrument_id"]) is not None else -9),
+                                                               -(v["out_of_sample"].get("total_return") or -1e9)))
     for v in ordered:
         iid, tf, strategy = v["instrument_id"], v["timeframe"], v["strategy"]
         if instrument_ids and iid not in instrument_ids:
@@ -405,6 +419,13 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
             skip("regime", f"current regime {regime.replace('_', ' ')} does not suit {MODULES[v['family']]['label'].lower()}")
             continue
         frame = instance.generate(bars)
+        if company:
+            # The same point-in-time filters the validation applied: an entry it would have refused is not proposed now.
+            blocked_any, blocked_long, _ = company.masks(iid, tf, bars.index)
+            if blocked_any is not None or blocked_long is not None:
+                from .filters import apply_entry_block
+
+                frame = apply_entry_block(frame, blocked_any, blocked_long)
         last = frame.iloc[-1]
         target = int(last["target"])
         if target == 0:
@@ -429,6 +450,9 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         signal.meta["signal_age_bars"] = age
         if signal.target < 0 and not (inst.shortable and adapter.capabilities.supports_short):
             skip("signal", "the signal is a short sale, which this account does not allow for the instrument")
+            continue
+        if company and (why := company.live_block(iid, now, signal.target > 0, tf)):
+            skip("events", why)
             continue
         slice_key = (broker_id, iid, strategy)
         if any((a.order.broker_id, a.order.instrument_id, a.order.strategy) == slice_key for a in rt.engine.approvals.values()):
@@ -467,7 +491,9 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
                            "caveat": v["caveat"] if level != "exploration" else (
                                "Exploration: this setup FAILED validation; it is traded on paper only because it did not lose on unseen data, "
                                "to measure it in real time. There is no evidence of an edge.")},
-            "data": {"kind": data.kind.value, "source": data.source, "last_bar_close": close_time.isoformat(), "bars": int(len(bars))}})
+            "data": {"kind": data.kind.value, "source": data.source, "last_bar_close": close_time.isoformat(), "bars": int(len(bars))},
+            "fundamentals": (company.fundamentals_now(iid, now).to_dict() if company and company.fundamentals_now(iid, now) else None),
+            "filters": {**(v.get("filters") or {}), "news_checked": bool(company and company.settings().news)}})
         before = set(rt.engine.approvals)
         # Recorded before the order is created: the engine refuses weaker evidence on a real-money account, and results
         # are reported per level.

@@ -44,6 +44,10 @@ class WalkForwardSpec:
     # combination on the unseen window, and the chosen one again with trading costs multiplied by `stress_costs`.
     robustness: bool = False
     stress_costs: float = 2.0
+    # Entry filters applied as in live trading (see quant_ai/filters.py), and which ones they are.
+    blocked_any: pd.Series | None = None
+    blocked_long: pd.Series | None = None
+    filters: dict = field(default_factory=dict)
 
 
 def _grid(spec: WalkForwardSpec) -> list[dict]:
@@ -75,7 +79,7 @@ def _run(spec: WalkForwardSpec, bars: pd.DataFrame, params: dict, trade_start: p
     return run_backtest(BacktestSpec(
         initial_capital=spec.initial_capital, base_currency=spec.base_currency, execution=execution or spec.execution, limits=spec.limits,
         static_fx=spec.static_fx, trade_start=trade_start, instruments=spec.instruments,
-        deployments=[DeploymentSpec(spec.strategy, spec.instrument_id, spec.timeframe, params)],
+        deployments=[DeploymentSpec(spec.strategy, spec.instrument_id, spec.timeframe, params, blocked_any=spec.blocked_any, blocked_long=spec.blocked_long)],
         data={(spec.instrument_id, spec.timeframe): Dataset(bars, spec.data.kind, spec.data.source)}))
 
 

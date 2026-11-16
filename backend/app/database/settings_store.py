@@ -48,6 +48,19 @@ class NotificationSettings(BaseModel):
     muted_categories: list[str] = Field(default_factory=list, max_length=50)
 
 
+class FilterSettings(BaseModel):
+    earnings: bool = True
+    earnings_days_before: int = Field(2, ge=0, le=20)    # before the expected release (unknown date: an estimate)
+    earnings_hours_after: int = Field(24, ge=0, le=240)  # after an actual release
+    fundamentals: bool = True                            # long entries in US stocks, daily and weekly strategies
+    min_revenue_growth: float = Field(-0.10, ge=-1, le=1)
+    max_liabilities_to_equity: float = Field(10.0, gt=0, le=100)  # lenient: banks and insurers carry high liabilities by design
+    news: bool = True                                    # live only
+    news_pause_minutes: int = Field(60, ge=0, le=1440)
+    news_max_symbols: int = Field(3, ge=1, le=50)        # an item tagged with more instruments is market news, not about this one
+    # (Filter rules: see quant_ai/filters.py. Defined here so that settings never import trading or AI code.)
+
+
 class AutopilotSettings(BaseModel):
     """What the platform does by itself. It never sends an order on its own in semi-automatic mode: it prepares
     data, validates strategies and creates proposals; a person still approves each order."""
@@ -99,6 +112,11 @@ class AutopilotSettings(BaseModel):
     # Exploration: also trade setups that FAILED validation but did not lose on unseen data, to measure them in real time.
     # Paper accounts only (the internal one or a broker's paper environment), never real money; off unless switched on.
     exploration: bool = False
+    # Entry filters from company events and fundamentals (see quant_ai/filters.py). The earnings and fundamentals filters
+    # are part of the validation; the news pause applies in live trading only.
+    filters: FilterSettings = Field(default_factory=FilterSettings)
+    # Who the SEC is told is asking (it requires a name and a contact e-mail). QAT_SEC_USER_AGENT, if set, takes precedence.
+    sec_contact: str = Field("QUANT AI TRADER admin@example.com", max_length=200)
 
 
 class UserSettings(BaseModel):

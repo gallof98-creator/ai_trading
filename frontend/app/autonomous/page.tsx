@@ -51,6 +51,8 @@ function Proposal({ p, canTrade, onDone }: { p: Json; canTrade: boolean; onDone:
           <p>Signal at {when(r.signal_time)} on price {num(r.signal_price)}; market regime {nice(r.regime)}{r.opportunity ? `, which suits ${nice(r.opportunity.family)} (${r.opportunity.regime_fits.map(nice).join(", ")})` : ""}.</p>
           {r.validation && <p>Validation {when(r.validation.tested_at)}: out-of-sample return {pct(r.validation.total_return)}, drawdown {pct(r.validation.max_drawdown)}, {pct(r.validation.walk_forward_efficiency, 0)} of the in-sample result survived. {r.validation.caveat}</p>}
           {r.data && <p>Data: {r.data.kind} from {r.data.source}, last bar closed {when(r.data.last_bar_close)}, {r.data.bars} bars.</p>}
+          {r.fundamentals && <p>Fundamentals (latest annual report published by {when(r.fundamentals.asof)}): net income {num(r.fundamentals.net_income, 0)}, revenue {num(r.fundamentals.revenue, 0)}{r.fundamentals.revenue_growth != null ? ` (${pct(r.fundamentals.revenue_growth)} on the year)` : ""}, margin {pct(r.fundamentals.margin)}, return on equity {pct(r.fundamentals.roe)}, liabilities {r.fundamentals.liabilities_to_equity != null ? `${num(r.fundamentals.liabilities_to_equity, 1)}× equity` : "—"}.</p>}
+          {r.filters && <p>Entry filters in the validation: results dates {r.filters.earnings ? "applied" : "not available"}, fundamentals {r.filters.fundamentals ? "applied" : "not applied"}; recent news {r.filters.news_checked ? "checked now (not part of the validation)" : "not checked"}.</p>}
           <p>No probability of success is shown because none was measured. On approval the price, its age and the risk limits are checked again; if anything changed the proposal is cancelled and nothing is sent.</p>
         </div>)}
       {canTrade && (
@@ -103,12 +105,12 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
         <div className="space-y-1 font-mono text-xs">
           {st.current && <div className="rounded border border-accent/40 px-2 py-1 text-accent">
             Now: {({ exchange_rates: "exchange rates", universe: "adding instruments and downloading their history", prices: "updating daily prices", crypto: "crypto histories",
-              candidates: "choosing candidates", intraday: "requesting intraday history", validation: "validating strategies", live: "live prices", scan: "scanning for opportunities" } as Record<string, string>)[st.current.step] ?? st.current.step}
+              candidates: "choosing candidates", company: "results dates, fundamentals and news", intraday: "requesting intraday history", validation: "validating strategies", live: "live prices", scan: "scanning for opportunities" } as Record<string, string>)[st.current.step] ?? st.current.step}
             {" "}for {st.current.minutes} min{st.current.detail ? ` · ${st.current.detail}` : ""}
             <div className="text-[11px] text-dim">The first cycle downloads histories and validates many strategy/instrument pairs: with many instruments, all strategies and minute timeframes it can take an hour or more. Each step has a time limit.</div>
           </div>}
           <div className="text-dim">Last cycle {when(st.last_cycle)} · next {st.enabled ? when(st.next_cycle) : "—"} · {st.cycles} cycles since start</div>
-          {[["exchange_rates", "Exchange rates"], ["universe", "Universe"], ["prices", "Prices"], ["crypto", "Crypto"], ["candidates", "Candidates"], ["validation", "Validation"], ["live", "Live prices"], ["scan", "Scan"]].map(([k, l]) => line(k, l))}
+          {[["exchange_rates", "Exchange rates"], ["universe", "Universe"], ["prices", "Prices"], ["crypto", "Crypto"], ["candidates", "Candidates"], ["company", "Results, fundamentals, news"], ["validation", "Validation"], ["live", "Live prices"], ["scan", "Scan"]].map(([k, l]) => line(k, l))}
           {r.scan?.funnel && <div className="mt-2 rounded border border-line p-2">
             <div className="text-dim">Where the {r.scan.funnel.setups} strategy/instrument pairs ended up</div>
             <div className="mt-1 flex flex-wrap gap-1.5">
@@ -148,6 +150,19 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
               ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"],
               ["exploration", "Exploration: also trade setups that failed validation but did not lose on unseen data (many more trades; paper accounts only, internal or Alpaca paper; results shown apart)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
               .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
+          </div>
+          <div className="mt-3 border-t border-line pt-3 text-xs text-dim">
+            <p className="mb-2">Entry filters. Results dates and fundamentals come from the SEC and are part of the validation; the news pause (Alpaca news) applies live only. They only ever remove entries, never exits.</p>
+            <div className="flex flex-wrap items-end gap-3">
+              {[["earnings", "No entries around quarterly results"], ["fundamentals", "Long daily entries only in companies passing the fundamentals checks"], ["news", "Pause entries after news about the instrument"]]
+                .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg.filters?.[k] ?? true} onChange={(e) => set("filters", { ...cfg.filters, [k]: e.target.checked })} />{l}</label>)}
+            </div>
+            <div className="mt-2 flex flex-wrap items-end gap-3">
+              {[["earnings_days_before", "Days before expected results", 1], ["earnings_hours_after", "Hours after results", 1], ["news_pause_minutes", "News pause (minutes)", 1],
+                ["min_revenue_growth", "Minimum revenue growth (−0.10 = −10%)", 0.01], ["max_liabilities_to_equity", "Maximum liabilities / equity", 0.5]]
+                .map(([k, l, step]) => <Field key={k as string} label={l as string}><input type="number" step={step as number} className="w-24" value={cfg.filters?.[k as string] ?? ""} onChange={(e) => set("filters", { ...cfg.filters, [k as string]: Number(e.target.value) })} /></Field>)}
+              <Field label="Contact given to the SEC (name and e-mail, required by the SEC)"><input className="w-72" value={cfg.sec_contact ?? ""} onChange={(e) => set("sec_contact", e.target.value)} /></Field>
+            </div>
           </div>
           <div className="mt-3"><Field label="ETFs always kept in the universe (US tickers, comma separated)">
             <input className="w-full" value={(cfg.etfs ?? []).join(", ")} onChange={(e) => set("etfs", e.target.value.split(",").map((x: string) => x.trim().toUpperCase()).filter(Boolean))} /></Field></div>

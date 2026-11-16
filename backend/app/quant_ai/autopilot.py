@@ -202,7 +202,7 @@ class Autopilot:
         result: dict = {"started": self.rt.clock().isoformat()}
         try:
             for name, step in (("exchange_rates", self._fx), ("universe", self._seed), ("prices", self._update_prices), ("crypto", self._crypto), ("candidates", self._candidates),
-                               ("intraday", self._intraday), ("validation", self._validate), ("live", self._live), ("scan", self._scan)):
+                               ("company", self._company), ("intraday", self._intraday), ("validation", self._validate), ("live", self._live), ("scan", self._scan)):
                 self.state.update(step=name, step_started=self.rt.clock().isoformat(), step_progress=None)
                 try:
                     result[name] = step(result)
@@ -399,7 +399,11 @@ class Autopilot:
         downloading = self.rt.intraday.incomplete()
         with self.rt.db.session() as session:
             # A validation, passed or failed, is redone once it is older than its validity: the market it judged has moved on.
-            known = {(v["strategy"], v["instrument_id"], v["timeframe"]): ("expired" if v["due_for_retest"] else v["status"])
+            # ... and when the entry filters it was tested with changed (results dates or reported figures became available,
+            # or a filter was switched on or off): what is traded must be what was tested.
+            none = {"earnings": False, "fundamentals": False}
+            known = {(v["strategy"], v["instrument_id"], v["timeframe"]):
+                     ("expired" if v["due_for_retest"] or (v.get("filters") or none) != self.rt.company.signature(v["instrument_id"], v["timeframe"]) else v["status"])
                      for v in opp.validations(session, now)}
             stored = {(c["instrument_id"], c["timeframe"]) for c in self.rt.store.coverage(session) if c["kind"] != "simulated"}
         todo = [(s, i, tf) for i in candidates for tf in cfg.timeframes for s in cfg.strategies
@@ -456,6 +460,22 @@ class Autopilot:
             with self.rt.db.session() as session:
                 out["multiple_testing"] = opp.multiple_testing(session, now)
         return out
+
+    def _company(self, result: dict) -> dict:
+        """Results dates and reported figures from the SEC for the followed US stocks, and recent news from Alpaca for
+        every followed instrument: what the entry filters read (see quant_ai/filters.py)."""
+        rt, now = self.rt, self.rt.clock()
+        held = [k[1] for k, s in rt.portfolio.slices.items() if s.qty]
+        ids = list(dict.fromkeys([*held, *result.get("_candidates", []), *rt.live.subscribed]))
+        sec, news = rt.company.refresh_sec(ids, now), rt.company.refresh_news(ids, now)
+        for name, part in (("SEC", sec), ("news", news)):
+            if part.get("error"):
+                self._note("company", f"{name}: {part['error']}", "warning")
+        status = rt.company.status()
+        # Flat, so the panel can show it on one line.
+        return {"stocks_with_results_dates": status["with_earnings_dates"], "stocks_with_fundamentals": status["with_fundamentals"],
+                "sec_refreshed_now": sec.get("filings_refreshed", 0), "sec": sec.get("error") or sec.get("skipped") or "ok",
+                "new_news_items": news.get("new_items", 0), "news": news.get("error") or news.get("skipped") or "ok", "detail": {"sec": sec, "news": news}}
 
     def _live(self, result: dict) -> dict:
         """Live prices for every followed instrument, in order of importance: open positions and working orders, then

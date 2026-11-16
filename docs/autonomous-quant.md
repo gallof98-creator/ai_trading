@@ -299,6 +299,27 @@ Emergency Stop blocks new orders. Then several weeks of paper results compared w
 The risk engine judges every new order against open positions plus entry orders already sent and not yet filled. Before this, several
 orders sent in the same moment could each fit a limit and together exceed it.
 
+## Entry filters: quarterly results, fundamentals, news
+
+Three filters keep strategies out of entries the price data alone cannot see. They only remove entries: they never open,
+enlarge or keep a position, and never block an order that closes one. The user's own orders are not filtered.
+
+| Filter | Data | Rule (defaults, editable in the Autopilot settings) | In the validation |
+|---|---|---|---|
+| Quarterly results | SEC filing index: 8-K item 2.02 (or 10-Q/10-K) acceptance times | no new position for 24 hours after a release, nor from 2 days before the next expected one (last release + the usual interval) until it happens (at most 5 days late) | yes |
+| Fundamentals | SEC XBRL figures as published (point in time) | long entries of daily/weekly strategies in US stocks only when the latest annual report shows a profit, positive equity, revenue down no more than 10% and liabilities at most 10 times equity | yes |
+| News | Alpaca news (Benzinga), the Alpaca key already stored | no new position for 60 minutes after a news item about the instrument (items tagged with more than 3 instruments are market news and do not count) | no: live only |
+
+The validation applies the first two exactly as live trading does: a position whose opening bar falls in a blocked period
+is removed from the backtest, and the strategy waits for its next signal (it never enters late). Each validation records
+which filters it included; when that changes (data for a stock arrives, a filter is switched), the setup is tested again.
+Within a level, the scan looks first at companies with stronger reported fundamentals (growth, margin, return on equity).
+
+The SEC requires every request to name who is asking, with a contact e-mail ("Contact given to the SEC"; the
+QAT_SEC_USER_AGENT setting takes precedence). The SEC may refuse a generic address. Data are refreshed by the Autopilot's
+"Results, fundamentals, news" step: filing index daily, reported figures after each new 10-Q/10-K (at least monthly), news
+every cycle. ETFs and crypto have no results or reports: only the news pause applies to them.
+
 ## Capital flows and crypto fees
 
 The daily-loss and drawdown limits compare equity with the start of the day and with its peak. An account that is

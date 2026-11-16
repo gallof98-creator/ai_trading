@@ -47,6 +47,9 @@ class DeploymentSpec:
     timeframe: str
     params: dict = field(default_factory=dict)
     version: str | None = None
+    # Entry filters (quant_ai/filters.py): bars, by start time, on which no position may be opened (any direction / long).
+    blocked_any: pd.Series | None = None
+    blocked_long: pd.Series | None = None
 
 
 @dataclass
@@ -204,6 +207,10 @@ def run_backtest(spec: BacktestSpec) -> BacktestResult:
         dep = Deployment(f"bt{i}", strategy, d.instrument_id, d.timeframe, "backtest")
         frame, delta = bars[(d.instrument_id, d.timeframe)], tf_delta(d.timeframe)
         signals = strategy.generate(frame)
+        if d.blocked_any is not None or d.blocked_long is not None:
+            from ..quant_ai.filters import apply_entry_block
+
+            signals = apply_entry_block(signals, d.blocked_any, d.blocked_long)
         for ts, row in signals[signals["action"] != "HOLD"].iterrows():
             close_t = ts + delta
             if spec.trade_start is not None and close_t < spec.trade_start:

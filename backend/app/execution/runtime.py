@@ -134,6 +134,9 @@ class TradingRuntime:
 
         self.intraday = IntradayData(self)  # official intraday bars: refreshed every minute, history on request
         self.autopilot = Autopilot(self)
+        from ..quant_ai.company_data import CompanyData
+
+        self.company = CompanyData(self)
         self._streamed: set[str] = set()  # stocks that use the streaming connection (within the plan's symbol limit)
         self.live_source_factory = None  # test hook: callable(runtime) -> list[(LiveSource, route)]
         self.driven: dict[str, str] = {}  # instrument -> last stored daily bar fed to the engine for global (portfolio) strategies
@@ -184,13 +187,25 @@ class TradingRuntime:
         """Candidate and exploratory setups trade on paper accounts only. Checked when the order is created and again when
         it is approved, so an account switched to real money in between can never receive one."""
         level = self.evidence_of(order.broker_id, order.instrument_id, order.strategy)
-        if level not in ("candidate", "exploration"):
+        if level in ("candidate", "exploration"):
+            try:
+                paper = is_paper_account(self.brokers.get(order.broker_id))
+            except BrokerError:
+                paper = False
+            if not paper:
+                return f"{level} setups are traded on paper accounts only, never with real money"
+        # Entries of strategies (not the user's own orders) pass the event and fundamentals filters: no new position around
+        # quarterly results, right after news about the instrument, or (long, daily strategies) in a company failing the
+        # fundamentals checks.
+        dep = next((d for d in self.deployments.values() if d.broker_id == order.broker_id and d.instrument_id == order.instrument_id
+                    and d.strategy.name == order.strategy), None)
+        if dep is None:
             return None
         try:
-            paper = is_paper_account(self.brokers.get(order.broker_id))
-        except BrokerError:
-            paper = False
-        return None if paper else f"{level} setups are traded on paper accounts only, never with real money"
+            return self.company.live_block(order.instrument_id, self.clock(), order.side is Side.BUY, dep.timeframe)
+        except Exception as exc:  # a filter that cannot be evaluated never blocks trading, and says so
+            log.error("entry_filter_failed", instrument_id=order.instrument_id, error=str(exc))
+            return None
 
     def _needs_approval(self, order: Order) -> bool:
         """Real-money orders wait for a human unless the user explicitly switched that off. Paper accounts, the internal one
@@ -246,6 +261,10 @@ class TradingRuntime:
             live_ids = [i for i in (saved.value.get("instrument_ids", []) if saved else []) if self._known(i)]
             self._streamed = set(saved.value.get("streamed", []) if saved else []) & set(live_ids)
             self.started = True
+        try:
+            self.company.load()
+        except Exception as exc:  # stored company data is a convenience: trading starts without it
+            log.error("company_data_load_failed", error=str(exc))
         if live_ids and self.settings.live_feed_autostart:
             self.configure_live()
             self.live.subscribe([self.registry.get(i) for i in live_ids])
