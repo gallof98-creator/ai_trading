@@ -338,9 +338,9 @@ def test_late_official_bars_never_trade(rt, monkeypatch):
     seen = []
     real = rt.ingest
 
-    def spy(instrument_id, timeframe, dataset, trade=True, drive_without_deployment=False):
+    def spy(instrument_id, timeframe, dataset, trade=True, **kw):
         seen.append((dataset.bars.index[0], dataset.bars.index[-1], trade))
-        return real(instrument_id, timeframe, dataset, trade=trade, drive_without_deployment=drive_without_deployment)
+        return real(instrument_id, timeframe, dataset, trade=trade, **kw)
 
     monkeypatch.setattr(rt, "ingest", spy)
     rt.intraday.tick()
