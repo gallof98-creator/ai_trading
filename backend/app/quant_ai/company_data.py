@@ -43,6 +43,7 @@ class CompanyData:
         self.tickers_at: str | None = None
         self._frames: dict[str, pd.DataFrame] = {}
         self._lock = threading.Lock()
+        self.seconds_per_cycle = 45.0  # SEC requests per Autopilot cycle stop after this long
         # Injected by tests; default to the real sources.
         self.fetch_tickers: Callable[[str], dict] | None = None
         self.fetch_filings: Callable[[str, str, str], pd.DataFrame] | None = None
@@ -187,7 +188,14 @@ class CompanyData:
                 due.append(t)
         filings_done = facts_done = 0
         missing, errors = [], []
+        import time
+
+        began, seconds = time.perf_counter(), self.seconds_per_cycle
+        processed = 0
         for ticker in due[:budget]:
+            if time.perf_counter() - began > seconds:
+                break  # the rest next cycle: this step must not hold up trading
+            processed += 1
             info = self.tickers.get(ticker.replace(".", "-")) or self.tickers.get(ticker)
             if info is None:
                 missing.append(ticker)
@@ -206,7 +214,7 @@ class CompanyData:
                          or (newest is not None and pd.Timestamp(company["facts_at"]) < newest))
                 if cfg.fundamentals and stale:
                     accepted = filings.set_index("accession")["available_at"]
-                    fetch_f = self.fetch_facts or (lambda cik, tk, ua, acc: self._sec(lambda s, c: s.facts(c, cik, tk, acc)))
+                    fetch_f = self.fetch_facts or (lambda cik, tk, ua, acc: self._sec(lambda s, c: concept_facts(s, c, cik, acc)))
                     facts = fetch_f(info["cik"], ticker, self._user_agent(), accepted)
                     keep = facts[(facts["concept"].isin(flt.CONCEPTS)) & (facts["unit"] == "USD")]
                     company["facts"] = [[r.concept, r.period_start.isoformat(), r.period_end.isoformat(), float(r.value), r.available_at.isoformat()]
@@ -218,7 +226,7 @@ class CompanyData:
                 errors.append(f"{ticker} ({company['error'][:80]})")
             self.companies[ticker] = company
             self._save(ticker, company)
-        return {"stocks": len(stocks), "filings_refreshed": filings_done, "fundamentals_refreshed": facts_done, "still_due": max(0, len(due) - budget),
+        return {"stocks": len(stocks), "filings_refreshed": filings_done, "fundamentals_refreshed": facts_done, "still_due": max(0, len(due) - processed),
                 "not_at_sec": missing[:20], "errors": errors[:10]}
 
     def refresh_news(self, instrument_ids: list[str], now: datetime) -> dict:
@@ -262,6 +270,34 @@ class CompanyData:
         return {"companies": len(self.companies), "with_earnings_dates": with_releases, "with_fundamentals": with_facts,
                 "news_symbols": len(self.news), "news_updated": self.news_at, "errors": dict(list(errors.items())[:20]),
                 "sec_contact": self._user_agent()}
+
+
+async def concept_facts(source, client, cik: str, accepted: pd.Series) -> pd.DataFrame:
+    """Only the reported figures the filters read, one small request per concept, instead of every fact the company
+    ever reported (several megabytes for a large company)."""
+    from ..datahub.http import SourceNotFound
+    from ..datahub.sources.sec import NY, cik10
+
+    rows = []
+    for concept in flt.CONCEPTS:
+        try:
+            body = await client.get_json(f"api/xbrl/companyconcept/CIK{cik10(cik)}/us-gaap/{concept}.json")
+        except SourceNotFound:
+            continue  # the company does not report this concept
+        for f in ((body or {}).get("units") or {}).get("USD", []):
+            if f.get("val") is None or not f.get("end") or not f.get("filed"):
+                continue
+            rows.append((concept, f.get("start") or f["end"], f["end"], f["val"], f.get("accn"), f["filed"]))
+    frame = pd.DataFrame(rows, columns=["concept", "period_start", "period_end", "value", "accession", "filed"])
+    for name in ("period_start", "period_end"):
+        frame[name] = pd.to_datetime(frame[name], errors="coerce", utc=True)
+    filed = pd.to_datetime(frame["filed"], errors="coerce")
+    fallback = (filed + pd.Timedelta(hours=18)).dt.tz_localize(NY).dt.tz_convert("UTC")
+    known = pd.to_datetime(frame["accession"].map(accepted) if accepted is not None and len(accepted) else pd.Series(pd.NaT, index=frame.index), utc=True)
+    frame["available_at"] = known.fillna(fallback)
+    frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+    frame["unit"] = "USD"
+    return frame[frame["value"].notna() & frame["period_end"].notna() & frame["available_at"].notna()].reset_index(drop=True)
 
 
 def alpaca_news(symbols: list[str], since: datetime, creds: dict, client=None, pages: int = 5) -> list[dict]:

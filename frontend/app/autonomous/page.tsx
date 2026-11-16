@@ -111,6 +111,7 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
           </div>}
           <div className="text-dim">Last cycle {when(st.last_cycle)} · next {st.enabled ? when(st.next_cycle) : "—"} · {st.cycles} cycles since start</div>
           {[["exchange_rates", "Exchange rates"], ["universe", "Universe"], ["prices", "Prices"], ["crypto", "Crypto"], ["candidates", "Candidates"], ["company", "Results, fundamentals, news"], ["validation", "Validation"], ["live", "Live prices"], ["scan", "Scan"]].map(([k, l]) => line(k, l))}
+          {r.seconds_per_step && <div className="flex gap-2"><span className="w-28 shrink-0 text-dim">Time per step</span><span className="text-dim">{Object.entries(r.seconds_per_step as Record<string, number>).filter(([, v]) => v >= 1).map(([k, v]) => `${k.replace(/_/g, " ")} ${v >= 60 ? `${(v / 60).toFixed(1)} min` : `${v}s`}`).join(" · ") || "every step under a second"}</span></div>}
           {r.scan?.funnel && <div className="mt-2 rounded border border-line p-2">
             <div className="text-dim">Where the {r.scan.funnel.setups} strategy/instrument pairs ended up</div>
             <div className="mt-1 flex flex-wrap gap-1.5">

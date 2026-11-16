@@ -178,3 +178,28 @@ def test_a_changed_filter_sends_the_validation_back_for_a_retest(rt):
     install_sec(rt, filings([("8-K", "2.02", "2023-01-01 21:00")]), [])
     rt.company.refresh_sec([STOCK], rt.clock())
     assert rt.company.signature(STOCK, "1d") != v["filters"]   # the autopilot treats it as due (see Autopilot._validate)
+
+
+def test_only_the_needed_concepts_are_downloaded_and_dated_by_their_filing():
+    import asyncio
+
+    from app.datahub.http import SourceNotFound
+    from app.quant_ai.company_data import concept_facts
+
+    asked = []
+
+    class Client:
+        async def get_json(self, path):
+            asked.append(path.rsplit("/", 1)[1])
+            if "NetIncomeLoss" in path:
+                return {"units": {"USD": [{"start": "2023-01-01", "end": "2023-12-31", "val": 5, "accn": "A1", "filed": "2024-02-01"},
+                                          {"start": "2024-01-01", "end": "2024-12-31", "val": 7, "accn": "A2", "filed": "2025-02-01"}]}}
+            raise SourceNotFound("not reported")
+
+    accepted = pd.Series({"A1": pd.Timestamp("2024-02-01 21:05", tz="UTC")})
+    frame = asyncio.run(concept_facts(None, Client(), "1", accepted))
+    assert asked == [f"{c}.json" for c in flt.CONCEPTS]
+    assert frame["value"].tolist() == [5, 7] and frame["available_at"].iloc[0] == pd.Timestamp("2024-02-01 21:05", tz="UTC")
+    assert frame["available_at"].iloc[1] == pd.Timestamp("2025-02-01 18:00", tz="America/New_York").tz_convert("UTC")  # no acceptance time known
+    assert flt.snapshot(flt.facts_frame([[r.concept, r.period_start.isoformat(), r.period_end.isoformat(), r.value, r.available_at.isoformat()]
+                                         for r in frame.itertuples()]), pd.Timestamp("2025-03-01", tz="UTC")).net_income == 7

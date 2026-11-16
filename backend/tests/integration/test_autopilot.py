@@ -305,3 +305,13 @@ def test_validation_goes_breadth_first_with_daily_data_before_minute_data(rt):
         tested = {(v["strategy"], v["instrument_id"]) for v in opp.validations(s, rt.clock())}
     # Two validations: the first strategy on two different instruments, not both strategies on the first instrument.
     assert {t[0] for t in tested} == {"ema_crossover"} and len({t[1] for t in tested}) == 2
+
+
+def test_validation_gets_most_of_a_cycle_never_an_hour_and_opportunities_come_first(rt):
+    configure(rt, cycle_minutes=15)
+    assert rt.autopilot.validation_budget() == 540
+    configure(rt, cycle_minutes=5)
+    assert rt.autopilot.validation_budget() == 180
+    out = rt.autopilot.run_cycle()
+    steps = list(out["seconds_per_step"])
+    assert steps.index("scan") < steps.index("validation") < steps.index("rescan")

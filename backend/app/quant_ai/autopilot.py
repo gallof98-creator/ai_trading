@@ -7,6 +7,8 @@ sent without a person's approval, and the autopilot cannot change the trading mo
 """
 from __future__ import annotations
 
+import time
+
 import threading
 from collections import deque
 from datetime import datetime, timedelta
@@ -200,16 +202,25 @@ class Autopilot:
             return {"skipped": "a cycle is already running"}
         self.state["running"] = True
         result: dict = {"started": self.rt.clock().isoformat()}
+        timings: dict[str, float] = {}
         try:
+            # Opportunities are looked for BEFORE the long validation work, so a cycle busy re-validating never delays an
+            # entry; and once more after it, only if it produced setups that may trade.
             for name, step in (("exchange_rates", self._fx), ("universe", self._seed), ("prices", self._update_prices), ("crypto", self._crypto), ("candidates", self._candidates),
-                               ("company", self._company), ("intraday", self._intraday), ("validation", self._validate), ("live", self._live), ("scan", self._scan)):
+                               ("company", self._company), ("intraday", self._intraday), ("live", self._live), ("scan", self._scan), ("validation", self._validate),
+                               ("rescan", self._rescan)):
                 self.state.update(step=name, step_started=self.rt.clock().isoformat(), step_progress=None)
+                began = time.perf_counter()
                 try:
-                    result[name] = step(result)
+                    out = step(result)
+                    if out is not None:
+                        result[name] = out
                 except Exception as exc:  # one failing step must not stop the others or the next cycle
                     result[name] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
                     self._note(name, result[name]["error"], "warning")
+                timings[name] = round(time.perf_counter() - began, 1)
             result.pop("_candidates", None)
+            result["seconds_per_step"] = timings
             return result
         finally:
             self.state.update(running=False, step=None, step_started=None, step_progress=None, last_cycle=self.rt.clock().isoformat(),
@@ -435,7 +446,7 @@ class Autopilot:
         datasets.clear()
         unfinished = 0
         for (strategy, iid, tf), spec, outcome in zip(labels, specs, self.pool.run(
-                specs, cfg.validation_workers, timeout=self.validation_seconds,
+                specs, cfg.validation_workers, timeout=self.validation_budget(),
                 progress=lambda done, total: self.state.update(step_progress=f"{done} of {total} validations done"))):
             if outcome is None:
                 unfinished += 1  # out of time: it stays on the list for the next cycle
@@ -476,6 +487,24 @@ class Autopilot:
         return {"stocks_with_results_dates": status["with_earnings_dates"], "stocks_with_fundamentals": status["with_fundamentals"],
                 "sec_refreshed_now": sec.get("filings_refreshed", 0), "sec": sec.get("error") or sec.get("skipped") or "ok",
                 "new_news_items": news.get("new_items", 0), "news": news.get("error") or news.get("skipped") or "ok", "detail": {"sec": sec, "news": news}}
+
+    def _rescan(self, result: dict) -> dict | None:
+        v = result.get("validation") or {}
+        if not (v.get("passed") or v.get("candidates")):
+            return None
+        out = self._scan(result)
+        before = result.get("scan") or {}
+        # One account of the cycle's scans: the latest view of every setup, with the entries of both passes counted.
+        for k in ("proposed", "sent"):
+            if isinstance(out.get(k), int) and isinstance(before.get(k), int):
+                out[k] += before[k]
+        out["passes"] = 2
+        result["scan"] = out
+        return None
+
+    def validation_budget(self) -> float:
+        """Seconds one cycle may spend validating: most of the cycle, never an hour of it. Unfinished work waits."""
+        return min(self.validation_seconds, max(120.0, self.cfg.cycle_minutes * 60 * 0.6))
 
     def _live(self, result: dict) -> dict:
         """Live prices for every followed instrument, in order of importance: open positions and working orders, then

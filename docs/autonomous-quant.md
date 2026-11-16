@@ -39,9 +39,14 @@ Off by default; switched on from the Autonomous Quant page. Every cycle (15 minu
 | Prices | Brings daily prices up to date once a day | Alpaca key |
 | Crypto | Adds the configured crypto pairs (BTC/USD, ETH/USD and others, quoted in USD) and refreshes their daily history from Alpaca's crypto data; the still-forming bar of the current day is never stored | - |
 | Candidates | Keeps the most traded instruments above the price and traded-value floors that the account can trade, plus anything with a live feed | - |
-| Validation | Runs the walk-forward validation of each chosen strategy on each candidate; redoes it when it is older than 30 days | - |
+| Results, fundamentals, news | SEC filing index and reported figures of the followed US stocks (at most 45 seconds of requests per cycle), recent Alpaca news | SEC contact; Alpaca key for news |
 | Live prices | Subscribes instruments that have a validated strategy | a live source |
 | Scan | Creates a proposal wherever a validated strategy opens a position on its latest bar | - |
+| Validation | Runs the walk-forward validation of each chosen strategy on each candidate; redoes it when it is older than 30 days or its filters changed. At most 60% of the cycle (at least 2 minutes); what is left waits for the next cycle | - |
+| Scan again | Only when the validation produced setups that may trade | - |
+
+The scan runs before the validation, so a cycle busy re-validating never delays an entry. The panel shows how long each
+step took.
 
 Each step reports what it did or why it was skipped, and one failing step does not stop the others. Every minute, independently of the
 cycle, lapsed proposals are removed and orders working at an external broker are followed up.
