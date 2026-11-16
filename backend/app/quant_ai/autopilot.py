@@ -136,7 +136,20 @@ class Autopilot:
         due = None
         if self.cfg.enabled:
             due = now.isoformat() if last is None else (datetime.fromisoformat(last) + timedelta(minutes=self.cfg.cycle_minutes)).isoformat()
-        return {**self.state, "enabled": self.cfg.enabled, "next_cycle": due, "broker_id": self._broker(), "alpaca_key": self._alpaca() is not None,
+        # What the running cycle is doing right now, so that a long first cycle can be told apart from a stuck one.
+        current = None
+        if self.state.get("running") and self.state.get("step"):
+            since = datetime.fromisoformat(self.state["step_started"])
+            detail = self.state.get("step_progress")
+            job = self.rt.download.snapshot() if self.rt.download is not None else None
+            if not detail and self.state["step"] in ("universe", "prices") and job and job.get("status") in ("pending", "running"):
+                detail = f"downloading daily prices: {job.get('done', 0)} of {job.get('total', 0)} instruments"
+            metrics = self.rt.global_markets.metrics_job
+            if not detail and metrics is not None and not metrics.completed.is_set():
+                snap = metrics.snapshot()
+                detail = f"computing scanner metrics: {snap.get('done', 0)} of {snap.get('total', 0)}"
+            current = {"step": self.state["step"], "since": since.isoformat(), "minutes": round((now - since).total_seconds() / 60, 1), "detail": detail}
+        return {**self.state, "current": current, "enabled": self.cfg.enabled, "next_cycle": due, "broker_id": self._broker(), "alpaca_key": self._alpaca() is not None,
                 "trading_mode": self.rt.user_settings.trading_mode, "settings": self.cfg.model_dump(), "activity": list(self.activity),
                 "validation_workers": worker_count(self.cfg.validation_workers),
                 "sends_orders_by_itself": self.rt.user_settings.trading_mode == "auto",
@@ -189,6 +202,7 @@ class Autopilot:
         try:
             for name, step in (("exchange_rates", self._fx), ("universe", self._seed), ("prices", self._update_prices), ("crypto", self._crypto), ("candidates", self._candidates),
                                ("intraday", self._intraday), ("validation", self._validate), ("live", self._live), ("scan", self._scan)):
+                self.state.update(step=name, step_started=self.rt.clock().isoformat(), step_progress=None)
                 try:
                     result[name] = step(result)
                 except Exception as exc:  # one failing step must not stop the others or the next cycle
@@ -197,7 +211,8 @@ class Autopilot:
             result.pop("_candidates", None)
             return result
         finally:
-            self.state.update(running=False, last_cycle=self.rt.clock().isoformat(), last_result=result, cycles=self.state["cycles"] + 1)
+            self.state.update(running=False, step=None, step_started=None, step_progress=None, last_cycle=self.rt.clock().isoformat(),
+                              last_result=result, cycles=self.state["cycles"] + 1)
             self._lock.release()
 
     # ---- steps
@@ -405,7 +420,9 @@ class Autopilot:
                     self._note("validation", f"{strategy} on {iid} {tf}: {str(exc)[:160]}", "warning")
         datasets.clear()
         unfinished = 0
-        for (strategy, iid, tf), spec, outcome in zip(labels, specs, self.pool.run(specs, cfg.validation_workers, timeout=self.validation_seconds)):
+        for (strategy, iid, tf), spec, outcome in zip(labels, specs, self.pool.run(
+                specs, cfg.validation_workers, timeout=self.validation_seconds,
+                progress=lambda done, total: self.state.update(step_progress=f"{done} of {total} validations done"))):
             if outcome is None:
                 unfinished += 1  # out of time: it stays on the list for the next cycle
             elif isinstance(outcome, Exception):  # e.g. too little history for this timeframe

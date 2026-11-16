@@ -264,3 +264,29 @@ def test_etfs_are_kept_in_the_universe_as_etfs_and_analysed(rt):
         assert rt.store.load(s, "ETF:QQQ", "1d") is not None and rt.store.load(s, "ETF:SPY", "1d") is not None
     assert out["candidates"]["by_liquidity"] == 3 and out["validation"]["run"] == 6   # ETFs are validated like any other instrument
     assert rt.registry.is_mapped("paper-main", "ETF:QQQ") and rt.registry.get("ETF:QQQ").lot_size == 0.0001
+
+
+def test_a_running_cycle_says_which_step_it_is_on_and_how_far_it_got(rt):
+    import threading
+
+    configure(rt)
+    release, entered = threading.Event(), threading.Event()
+    real = rt.autopilot._validate
+
+    def slow_validate(result):
+        rt.autopilot.state.update(step_progress="3 of 25 validations done")
+        entered.set()
+        release.wait(30)
+        return real(result)
+
+    rt.autopilot._validate = slow_validate
+    worker = threading.Thread(target=rt.autopilot.run_cycle)
+    worker.start()
+    assert entered.wait(60)
+    st = rt.autopilot.status()
+    assert st["running"] and st["current"]["step"] == "validation" and st["current"]["detail"] == "3 of 25 validations done"
+    assert st["current"]["minutes"] >= 0 and st["cycles"] == 0
+    release.set()
+    worker.join(120)
+    st = rt.autopilot.status()
+    assert not st["running"] and st["current"] is None and st["cycles"] == 1 and st["step"] is None

@@ -10,6 +10,7 @@ from __future__ import annotations
 import multiprocessing
 import os
 import time
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 
@@ -45,7 +46,8 @@ class ValidationPool:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
 
-    def run(self, specs: list[WalkForwardSpec], workers: int = 0, timeout: float | None = None) -> list[dict | Exception | None]:
+    def run(self, specs: list[WalkForwardSpec], workers: int = 0, timeout: float | None = None,
+            progress: Callable[[int, int], None] | None = None) -> list[dict | Exception | None]:
         """One entry per spec, in the same order: the walk-forward result, the exception it raised, or None when it
         did not finish within `timeout` seconds (it is simply done again later)."""
         workers = min(worker_count(workers), max(1, len(specs)))
@@ -54,7 +56,7 @@ class ValidationPool:
         mode = "parallel"
         if workers <= 1 or len(specs) < 2:
             mode = "sequential"
-            self._sequential(specs, results, range(len(specs)), started, timeout)
+            self._sequential(specs, results, range(len(specs)), started, timeout, progress)
         else:
             try:
                 futures = {self._pool(workers).submit(walk_forward, spec): i for i, spec in enumerate(specs)}
@@ -66,6 +68,8 @@ class ValidationPool:
                             raise
                         except Exception as exc:  # this validation failed (for example too little history); the others carry on
                             results[futures[future]] = exc
+                        if progress:
+                            progress(sum(r is not None for r in results), len(specs))
                 except TimeoutError:
                     for future in futures:
                         future.cancel()
@@ -74,13 +78,13 @@ class ValidationPool:
                 log.warning("validation_pool_unavailable", error=type(exc).__name__)
                 self.close()
                 mode = "sequential (process pool unavailable)"
-                self._sequential(specs, results, [i for i, r in enumerate(results) if r is None], started, timeout)
+                self._sequential(specs, results, [i for i, r in enumerate(results) if r is None], started, timeout, progress)
         self.last = {"mode": mode, "workers": workers if mode == "parallel" else 1, "validations": len(specs),
                      "finished": sum(r is not None for r in results), "seconds": round(time.perf_counter() - started, 2)}
         return results
 
     @staticmethod
-    def _sequential(specs, results, indexes, started: float, timeout: float | None) -> None:
+    def _sequential(specs, results, indexes, started: float, timeout: float | None, progress=None) -> None:
         for i in indexes:
             if timeout is not None and time.perf_counter() - started > timeout:
                 return
@@ -88,3 +92,5 @@ class ValidationPool:
                 results[i] = walk_forward(specs[i])
             except Exception as exc:
                 results[i] = exc
+            if progress:
+                progress(sum(r is not None for r in results), len(specs))

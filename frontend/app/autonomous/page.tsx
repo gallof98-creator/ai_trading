@@ -101,6 +101,12 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
       {!st.broker_id && <p className="mt-2 text-xs text-warn">No trading account: create a paper account under Execution.</p>}
       <div className="mt-3 grid gap-4 lg:grid-cols-2">
         <div className="space-y-1 font-mono text-xs">
+          {st.current && <div className="rounded border border-accent/40 px-2 py-1 text-accent">
+            Now: {({ exchange_rates: "exchange rates", universe: "adding instruments and downloading their history", prices: "updating daily prices", crypto: "crypto histories",
+              candidates: "choosing candidates", intraday: "requesting intraday history", validation: "validating strategies", live: "live prices", scan: "scanning for opportunities" } as Record<string, string>)[st.current.step] ?? st.current.step}
+            {" "}for {st.current.minutes} min{st.current.detail ? ` · ${st.current.detail}` : ""}
+            <div className="text-[11px] text-dim">The first cycle downloads histories and validates many strategy/instrument pairs: with many instruments, all strategies and minute timeframes it can take an hour or more. Each step has a time limit.</div>
+          </div>}
           <div className="text-dim">Last cycle {when(st.last_cycle)} · next {st.enabled ? when(st.next_cycle) : "—"} · {st.cycles} cycles since start</div>
           {[["exchange_rates", "Exchange rates"], ["universe", "Universe"], ["prices", "Prices"], ["crypto", "Crypto"], ["candidates", "Candidates"], ["validation", "Validation"], ["live", "Live prices"], ["scan", "Scan"]].map(([k, l]) => line(k, l))}
           {r.scan?.funnel && <div className="mt-2 rounded border border-line p-2">
