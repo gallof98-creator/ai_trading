@@ -404,6 +404,15 @@ class Autopilot:
             stored = {(c["instrument_id"], c["timeframe"]) for c in self.rt.store.coverage(session) if c["kind"] != "simulated"}
         todo = [(s, i, tf) for i in candidates for tf in cfg.timeframes for s in cfg.strategies
                 if (i, tf) in stored and (i, tf) not in downloading and known.get((s, i, tf)) in (None, "expired")]
+        # Breadth first: every candidate gets a first test before any gets a second one, and daily data (complete, quick to
+        # test) goes before minute data. Depth first, a large universe would spend days on its first few instruments.
+        rank = {iid: k for k, iid in enumerate(candidates)}
+        order = {name: k for k, name in enumerate(cfg.strategies)}
+        todo.sort(key=lambda t: (-tf_delta(t[2]), order.get(t[0], 0), rank.get(t[1], 0)))
+        waiting = [k for k in {(i, tf) for i in candidates for tf in cfg.timeframes} if k in downloading or k not in stored]
+        if not todo and waiting:
+            self._note("validation", f"nothing to validate yet: {len(waiting)} candidate series still have no complete history "
+                                     f"({', '.join(sorted({tf for _, tf in waiting}))}). Add the 1d timeframe to validate on daily data meanwhile.", "warning")
         batch = todo[: cfg.validations_per_cycle]
         done = passed = failed = promising = 0
         # Read each series once, however many strategies are tested on it; then compute side by side; then record.

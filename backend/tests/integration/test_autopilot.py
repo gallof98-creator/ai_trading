@@ -292,3 +292,14 @@ def test_a_running_cycle_says_which_step_it_is_on_and_how_far_it_got(rt):
     worker.join(120)
     st = rt.autopilot.status()
     assert not st["running"] and st["current"] is None and st["cycles"] == 1 and st["step"] is None
+
+
+def test_validation_goes_breadth_first_with_daily_data_before_minute_data(rt):
+    configure(rt, validations_per_cycle=2)   # strategies: ema_crossover, then rsi_reversion
+    rt.autopilot.tick()
+    with rt.db.session() as s:
+        from app.quant_ai import opportunities as opp
+
+        tested = {(v["strategy"], v["instrument_id"]) for v in opp.validations(s, rt.clock())}
+    # Two validations: the first strategy on two different instruments, not both strategies on the first instrument.
+    assert {t[0] for t in tested} == {"ema_crossover"} and len({t[1] for t in tested}) == 2
