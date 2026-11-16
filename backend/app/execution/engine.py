@@ -114,6 +114,9 @@ class TradingEngine:
         self._cost_per_unit = cost_per_unit or (lambda instrument, price: 0.0)
         self._proposal_ttl = proposal_ttl or (lambda: None)
         self._auto_exit: Callable[[Order], bool] = lambda order: False  # set by the runtime
+        # Why an order may not be sent from this account at all (None = it may). Set by the runtime: entries resting on
+        # weaker evidence than "validated" are refused on real-money accounts.
+        self._entry_block: Callable[[Order], str | None] = lambda order: None
         self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
         self._rationale: dict = {}  # set while a signal is being turned into orders
         self._working: dict[str, float] = {}  # order id -> signed notional (base currency) of entries sent but not yet filled
@@ -425,6 +428,10 @@ class TradingEngine:
                pending_close: bool = False) -> Order:
         if order.client_order_id in self._client_ids:  # the same signal was already acted on
             return self.orders[self._client_ids[order.client_order_id]]
+        blocked = None if order.reduce_only else self._entry_block(order)
+        if blocked:
+            self._client_ids[order.client_order_id] = order.id
+            return self._reject(order, blocked, ts)
         state = self._risk_state(ts)
         if pending_close:
             # The slice being reversed is closed by the order just created; judge the entry against the book without it.

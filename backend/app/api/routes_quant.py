@@ -50,13 +50,15 @@ class ScanIn(BaseModel):
     instrument_ids: list[str] = Field(default_factory=list, max_length=500)
     min_traded_value: float = Field(0.0, ge=0)
     include_candidates: bool = False
+    include_exploration: bool = False
     require_regime_fit: bool = False
 
 
 @router.post("/scan")
 def scan(body: ScanIn, user: User = Depends(trader), session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> dict:
     try:
-        return opportunities.scan(session, rt, body.broker_id, user.email, body.instrument_ids or None, body.min_traded_value, body.include_candidates, body.require_regime_fit)
+        return opportunities.scan(session, rt, body.broker_id, user.email, body.instrument_ids or None, body.min_traded_value, body.include_candidates, body.require_regime_fit,
+                                    body.include_exploration)
     except (ValueError, RuntimeError_) as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
 
@@ -68,12 +70,15 @@ def dashboard(_: User = Depends(viewer), session: Session = Depends(get_session)
     s = rt.user_settings
     capital = s.initial_paper_capital
     by_strategy: dict[str, dict] = {}
+    by_level: dict[str, dict] = {}
     for t in rt.portfolio.trades:
-        row = by_strategy.setdefault(t.strategy or "manual", {"strategy": t.strategy or "manual", "trades": 0, "wins": 0, "pnl_quote": 0.0})
-        row["trades"] += 1
-        row["wins"] += t.pnl > 0
-        row["pnl_quote"] += t.pnl
-    for row in by_strategy.values():
+        level = rt.evidence_of(t.broker_id, t.instrument_id, t.strategy)
+        for table, key, extra in ((by_strategy, t.strategy or "manual", {"strategy": t.strategy or "manual"}), (by_level, level, {"level": level})):
+            row = table.setdefault(key, {**extra, "trades": 0, "wins": 0, "pnl_quote": 0.0})
+            row["trades"] += 1
+            row["wins"] += t.pnl > 0
+            row["pnl_quote"] += t.pnl
+    for row in [*by_strategy.values(), *by_level.values()]:
         row["win_rate"] = row["wins"] / row["trades"] if row["trades"] else None
     return {
         "configuration": {"virtual_capital": capital, "base_currency": s.base_currency, "trading_mode": s.trading_mode, "risk_per_trade": s.risk.risk_per_trade,
@@ -86,7 +91,9 @@ def dashboard(_: User = Depends(viewer), session: Session = Depends(get_session)
         "deployments": [{"id": k, "strategy": d.strategy.name, "instrument_id": d.instrument_id, "timeframe": d.timeframe, "broker_id": d.broker_id}
                         for k, d in rt.deployments.items()],
         "performance_by_strategy": sorted(by_strategy.values(), key=lambda r: -r["pnl_quote"]),
-        "positions": [{"broker_id": b, "instrument_id": i, "strategy": st, "qty": sl.qty, "avg_price": sl.avg_price, "price": rt.portfolio.prices.get(i),
+        # Exploratory trades are kept apart: their result says whether the rejected setups really had nothing.
+        "performance_by_evidence": [by_level[k] for k in ("validated", "candidate", "exploration") if k in by_level],
+        "positions": [{"broker_id": b, "instrument_id": i, "strategy": st, "evidence": rt.evidence_of(b, i, st), "qty": sl.qty, "avg_price": sl.avg_price, "price": rt.portfolio.prices.get(i),
                        "stop_price": (rt.engine.protections.get((b, i, st)).stop_price if rt.engine.protections.get((b, i, st)) else None)}
                       for (b, i, st), sl in rt.portfolio.slices.items() if sl.qty],
     }

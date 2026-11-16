@@ -11,7 +11,7 @@ import pandas as pd
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from ..brokers.base import BrokerAdapter, BrokerError, BrokerManager
+from ..brokers.base import BrokerAdapter, BrokerError, BrokerManager, is_paper_account
 from ..core.config import Settings
 from ..core.logging import get_logger
 from ..database.base import Database
@@ -137,9 +137,13 @@ class TradingRuntime:
         self._streamed: set[str] = set()  # stocks that use the streaming connection (within the plan's symbol limit)
         self.live_source_factory = None  # test hook: callable(runtime) -> list[(LiveSource, route)]
         self.driven: dict[str, str] = {}  # instrument -> last stored daily bar fed to the engine for global (portfolio) strategies
+        # "broker|instrument|strategy" -> the evidence an entry rested on (validated, candidate, exploration), so results
+        # are reported per level and exploratory trades never mix with the others.
+        self.evidence: dict[str, str] = {}
         from ..global_markets.service import GlobalMarkets
 
         self.engine._auto_exit = self._auto_exit
+        self.engine._entry_block = self.entry_block
         self.global_markets = GlobalMarkets(self)
         self.provider_factory = None  # test hook: callable(name, api_key) -> PriceProvider
         self.download = None
@@ -164,14 +168,35 @@ class TradingRuntime:
             adapter = self.brokers.get(order.broker_id)
         except BrokerError:
             return False
-        return adapter.capabilities.is_simulated or getattr(adapter, "is_live", True) is False
+        return is_paper_account(adapter)
+
+    @staticmethod
+    def evidence_key(broker_id: str, instrument_id: str, strategy: str | None) -> str:
+        return f"{broker_id}|{instrument_id}|{strategy or ''}"
+
+    def evidence_of(self, broker_id: str, instrument_id: str, strategy: str | None) -> str:
+        """The evidence the strategy trading this slice rests on; "validated" for anything not started by the opportunity scan."""
+        return self.evidence.get(self.evidence_key(broker_id, instrument_id, strategy), "validated")
+
+    def entry_block(self, order: Order) -> str | None:
+        """Candidate and exploratory setups trade on paper accounts only. Checked when the order is created and again when
+        it is approved, so an account switched to real money in between can never receive one."""
+        level = self.evidence_of(order.broker_id, order.instrument_id, order.strategy)
+        if level not in ("candidate", "exploration"):
+            return None
+        try:
+            paper = is_paper_account(self.brokers.get(order.broker_id))
+        except BrokerError:
+            paper = False
+        return None if paper else f"{level} setups are traded on paper accounts only, never with real money"
 
     def _needs_approval(self, order: Order) -> bool:
-        """Real-money orders wait for a human unless the user explicitly switched that off."""
+        """Real-money orders wait for a human unless the user explicitly switched that off. Paper accounts, the internal one
+        and a broker's paper environment, follow the trading mode."""
         if not self.user_settings.live_orders_require_approval:
             return False
         try:
-            return not self.brokers.get(order.broker_id).capabilities.is_simulated
+            return not is_paper_account(self.brokers.get(order.broker_id))
         except BrokerError:
             return True
 
@@ -208,6 +233,7 @@ class TradingRuntime:
             if meta is not None:
                 self.kinds, self.replays = dict(meta.value.get("kinds", {})), dict(meta.value.get("replays", {}))
                 self.driven = dict(meta.value.get("driven", {}))
+                self.evidence = dict(meta.value.get("evidence", {}))
             for row in session.scalars(select(StrategyDeployment).where(StrategyDeployment.is_active.is_(True))):
                 self._activate(row)
             for iid, tf in {(d.instrument_id, self._exec_tf(d.instrument_id)) for d in self.deployments.values()}:
@@ -240,7 +266,7 @@ class TradingRuntime:
     def persist(self) -> None:
         def write(session: Session) -> None:
             values = {"runtime:portfolio": self.portfolio.to_state(), "runtime:risk": self.risk.to_state(), "runtime:engine": self.engine.to_state(),
-                      "runtime:meta": {"kinds": self.kinds, "replays": self.replays, "driven": self.driven}}
+                      "runtime:meta": {"kinds": self.kinds, "replays": self.replays, "driven": self.driven, "evidence": self.evidence}}
             for adapter in self.brokers.all():
                 if isinstance(adapter, SimulatedBroker):
                     values[f"paper:{adapter.broker_id}"] = adapter.to_state()
@@ -1403,7 +1429,7 @@ class TradingRuntime:
                 raise RuntimeError_(f"No pending approval {approval_id}")
             void = None
             if approve and not approval.order.reduce_only:
-                void = self._recheck(approval, ts)
+                void = self.entry_block(approval.order) or self._recheck(approval, ts)
             order = self.engine.resolve_approval(approval_id, approve and void is None, f"system: {void}" if void else actor, ts)
             if void:
                 with self.db.session() as session:

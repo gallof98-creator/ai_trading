@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from ..backtesting import service as bt
 from ..backtesting.stats import benjamini_hochberg, expected_max_sharpe
 from ..backtesting.walk_forward import WalkForwardSpec, walk_forward
+from ..brokers.base import is_paper_account
 from ..database.models import ResearchItem, StrategyDeployment
 from ..domain.models import SignalAction, TradingMode
 from ..market_data.quality import DataKind
@@ -71,6 +72,10 @@ CRITERIA = {
 }
 STOP_GRID = [1.5, 2.5]
 CANDIDATE = {"min_profitable_folds": 3, "min_out_of_sample_trades": 8}
+# The third, weakest level: setups that failed validation but did not lose on unseen data. Traded only when the user
+# switches exploration on, only on paper accounts, to measure them in real time; never evidence of an edge.
+EXPLORATION = {"min_profitable_folds": 2, "min_out_of_sample_trades": 5}
+LEVELS = ("validated", "candidate", "exploration")
 # How long after its signal bar an entry may still be proposed, and how far the price may have moved by then.
 SCAN = {"entry_window_bars": 3, "max_drift_stop_fraction": 0.5}
 SCAN_BARS = 6000  # bars read for a signal: every daily history fits; an intraday one is read from its recent end
@@ -252,6 +257,25 @@ def multiple_testing(session: Session, now: datetime | None = None) -> dict:
                        "none had an edge. A validated setup has to be unlikely as a fluke among all of them, not just on its own."}
 
 
+def explorable(v: dict) -> bool:
+    """A rejected setup that is not clearly losing: market data, enough unseen trades, positive unseen return after
+    costs, drawdown within the limit, profitable in at least half the unseen periods. Results under current criteria only."""
+    oos = v.get("out_of_sample") or {}
+    return (v.get("status") == "rejected" and v.get("criteria_version") == CRITERIA["version"] and not v.get("due_for_retest")
+            and v.get("data_kind") != DataKind.SIMULATED.value
+            and (oos.get("number_of_trades") or 0) >= EXPLORATION["min_out_of_sample_trades"]
+            and (oos.get("total_return") or 0) > 0
+            and oos.get("max_drawdown") is not None and oos["max_drawdown"] <= CRITERIA["max_out_of_sample_drawdown"]
+            and (v.get("profitable_folds") or 0) >= EXPLORATION["min_profitable_folds"])
+
+
+def level_of(v: dict) -> str | None:
+    """The level a setup may be traded at: validated, candidate, exploration, or None."""
+    if v["status"] in ("validated", "candidate"):
+        return v["status"]
+    return "exploration" if explorable(v) else None
+
+
 def _recent(last_bar_close: pd.Timestamp, timeframe: str, now: datetime) -> bool:
     """The signal bar must be the latest one a trader could act on: within two bars of now (four days for daily and weekly)."""
     age = pd.Timestamp(now) - last_bar_close
@@ -259,9 +283,12 @@ def _recent(last_bar_close: pd.Timestamp, timeframe: str, now: datetime) -> bool
 
 
 def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[str] | None = None, min_traded_value: float = 0.0,
-         include_candidates: bool = False, require_regime_fit: bool = False) -> dict:
+         include_candidates: bool = False, require_regime_fit: bool = False, include_exploration: bool = False) -> dict:
     """Look at every validated (strategy, instrument, timeframe): where the strategy opened a position on the latest
-    completed bar and the market regime suits it, deploy it (if it is not already) and create a proposal."""
+    completed bar and the market regime suits it, deploy it (if it is not already) and create a proposal.
+
+    Weaker evidence is traded on paper accounts only (the internal one, or a broker's paper environment): candidates when
+    `include_candidates`, and, when `include_exploration`, setups that failed validation without losing on unseen data."""
     from ..signals.engine import signal_from_row
 
     now = rt.clock()
@@ -274,9 +301,11 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
     proposed, sent, skipped = [], [], []
     funnel: dict = {"setups": 0}
     automatic = TradingMode(rt.user_settings.trading_mode) is TradingMode.AUTO
-    # Strongest evidence first: fully validated setups before candidates, then by out-of-sample return. With one
-    # proposal per instrument, this decides which strategy gets it.
-    ordered = sorted(validations(session, now), key=lambda v: (v["status"] != "validated", -(v["out_of_sample"].get("total_return") or -1e9)))
+    paper = is_paper_account(adapter)
+    # Strongest evidence first: validated setups, then candidates, then exploration, each by out-of-sample return. With
+    # one proposal per instrument, this decides which strategy gets it.
+    rank = {"validated": 0, "candidate": 1, "exploration": 2}
+    ordered = sorted(validations(session, now), key=lambda v: (rank.get(level_of(v) or "", 3), -(v["out_of_sample"].get("total_return") or -1e9)))
     for v in ordered:
         iid, tf, strategy = v["instrument_id"], v["timeframe"], v["strategy"]
         if instrument_ids and iid not in instrument_ids:
@@ -289,14 +318,22 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
 
         funnel["setups"] += 1
 
-        if v["status"] == "candidate":
+        level = level_of(v)
+        if level == "candidate":
             if not include_candidates:
                 skip("validation", "candidate only (too few unseen trades): not proposed unless candidates are allowed")
                 continue
-            if not adapter.capabilities.is_simulated:
-                skip("validation", "candidate only: weaker evidence is traded on paper accounts, never on a broker account")
+            if not paper:
+                skip("validation", "candidate only: weaker evidence is traded on paper accounts, never with real money")
                 continue
-        elif v["status"] != "validated":
+        elif level == "exploration":
+            if not include_exploration:
+                skip("validation", "did not pass validation (exploration is off)")
+                continue
+            if not paper:
+                skip("validation", "exploration: traded on paper accounts only, never with real money")
+                continue
+        elif level != "validated":
             skip("validation", "validation expired; it will be run again" if v["status"] == "expired" else "did not pass validation")
             continue
         try:
@@ -399,10 +436,16 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
                                    f"{frame.index[opened]:%Y-%m-%d %H:%M} UTC" + (f" ({age} bar(s) ago)" if age else "") + f"; the latest close is {signal.price:g}. "
                                    f"Market regime: {regime.replace('_', ' ')}, which "
                                    + ("is one" if regime in fits else "is NOT one") + f" that {MODULES[v['family']]['label'].lower()} is meant for."},
-            "validation": {"id": v["id"], "level": v["status"], "tested_at": v["tested_at"], **v["out_of_sample"], "profitable_folds": v["profitable_folds"], "folds": v["folds"],
-                           "walk_forward_efficiency": v["walk_forward_efficiency"], "caveat": v["caveat"]},
+            "validation": {"id": v["id"], "level": level, "tested_at": v["tested_at"], **v["out_of_sample"], "profitable_folds": v["profitable_folds"], "folds": v["folds"],
+                           "walk_forward_efficiency": v["walk_forward_efficiency"],
+                           "caveat": v["caveat"] if level != "exploration" else (
+                               "Exploration: this setup FAILED validation; it is traded on paper only because it did not lose on unseen data, "
+                               "to measure it in real time. There is no evidence of an edge.")},
             "data": {"kind": data.kind.value, "source": data.source, "last_bar_close": close_time.isoformat(), "bars": int(len(bars))}})
         before = set(rt.engine.approvals)
+        # Recorded before the order is created: the engine refuses weaker evidence on a real-money account, and results
+        # are reported per level.
+        rt.evidence[rt.evidence_key(broker_id, iid, strategy)] = level
         with rt.lock:
             # Orders are sent without asking only when the user has chosen automatic mode; real-money accounts still wait for approval.
             orders = rt.engine.on_signal(signal, dep, mode_override=None if automatic else TradingMode.SEMI_AUTO)
@@ -410,17 +453,18 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         new = [a for a in rt.engine.approvals if a not in before]
         submitted = [o for o in orders if o.status.value in ("submitted", "filled", "partially_filled")]
         if new:
-            proposed.append({**label, "proposal_ids": new, "regime": regime})
+            proposed.append({**label, "proposal_ids": new, "regime": regime, "level": level})
             funnel["proposed"] = funnel.get("proposed", 0) + 1
         elif submitted:
-            sent.append({**label, "order_ids": [o.id for o in submitted], "regime": regime})
+            sent.append({**label, "order_ids": [o.id for o in submitted], "regime": regime, "level": level})
             funnel["sent"] = funnel.get("sent", 0) + 1
         else:
             reason = next((o.reason for o in orders if o.status.value == "rejected"), None)
             skip("risk" if reason else "already", f"refused by the risk engine: {reason}" if reason else "already proposed for this entry (it was rejected or lapsed)")
     return {"scanned_at": now.isoformat(), "broker_id": broker_id, "proposed": proposed, "sent": sent, "skipped": skipped, "funnel": funnel,
             "validated": sum(1 for v in validations(session, now) if v["status"] == "validated"),
-            "candidates": sum(1 for v in validations(session, now) if v["status"] == "candidate")}
+            "candidates": sum(1 for v in validations(session, now) if v["status"] == "candidate"),
+            "explorable": sum(1 for v in validations(session, now) if explorable(v))}
 
 
 def universes(session: Session, rt, broker_id: str | None = None) -> dict:

@@ -209,5 +209,5 @@ def in_session(index: pd.DatetimeIndex, calendar) -> pd.Series:
     clock = local.hour * 60 + local.minute
     opens, closes = calendar.open_time.hour * 60 + calendar.open_time.minute, calendar.close_time.hour * 60 + calendar.close_time.minute
     days = pd.Series(local.date, index=index)
-    keep = (clock >= opens) & (clock < closes) & local.weekday.isin(list(calendar.weekdays)) & ~days.isin(list(calendar.holidays)).to_numpy()
+    keep = (clock >= opens) & (clock < closes) & local.day_of_week.isin(list(calendar.weekdays)) & ~days.isin(list(calendar.holidays)).to_numpy()
     return pd.Series(keep, index=index)

@@ -62,6 +62,12 @@ class BrokerCapabilities:
         }
 
 
+def is_paper_account(adapter: "BrokerAdapter") -> bool:
+    """No real money behind it: the internal simulated account, or a broker's paper environment. An adapter that does
+    not say explicitly that it is not live counts as real money."""
+    return adapter.capabilities.is_simulated or getattr(adapter, "is_live", True) is False
+
+
 class BrokerAdapter(ABC):
     """Uniform interface over one broker/exchange account. Adapters translate; they hold no
     strategy, sizing or risk logic."""

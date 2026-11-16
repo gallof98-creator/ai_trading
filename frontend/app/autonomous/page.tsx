@@ -41,7 +41,7 @@ function Proposal({ p, canTrade, onDone }: { p: Json; canTrade: boolean; onDone:
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
         <Badge kind="up">risk engine: approved when proposed</Badge>
         {p.live ? <Badge kind={p.live.fresh ? "up" : "warn"}>{p.live.fresh ? `● LIVE ${num(p.live.price)}` : `price ${Math.round(p.live.age_seconds)}s old`}</Badge> : <Badge>no live feed: priced on the last stored bar</Badge>}
-        {r.validation && <Badge kind={r.validation.level === "candidate" ? "warn" : "up"}>{r.validation.level === "candidate" ? "CANDIDATE (weaker evidence)" : "validated"}: {r.validation.profitable_folds}/{r.validation.folds} unseen periods profitable, {r.validation.number_of_trades} trades</Badge>}
+        {r.validation && <Badge kind={r.validation.level === "exploration" ? "down" : r.validation.level === "candidate" ? "warn" : "up"}>{r.validation.level === "exploration" ? "EXPLORATION (failed validation, paper only)" : r.validation.level === "candidate" ? "CANDIDATE (weaker evidence)" : "validated"}: {r.validation.profitable_folds}/{r.validation.folds} unseen periods profitable, {r.validation.number_of_trades} trades</Badge>}
         {r.opportunity && !r.opportunity.regime_suits && <Badge kind="warn">regime {nice(r.opportunity.regime)}: not the one this family is meant for</Badge>}
         <button className="text-accent underline" onClick={() => setOpen(!open)}>{open ? "hide details" : "why and how it was checked"}</button>
       </div>
@@ -145,7 +145,8 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
           <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-dim">
             {[["seed_most_active", "Add the most traded US stocks when the universe is small"], ["daily_price_update", "Refresh daily prices"], ["live_subscribe", "Ask for live prices where a strategy is validated"], ["live_all_candidates", "Live prices for every followed instrument (the most important stream, the rest by REST requests)"],
               ["minute_update", "Download official bars every minute for followed instruments"],
-              ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
+              ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"],
+              ["exploration", "Exploration: also trade setups that failed validation but did not lose on unseen data (many more trades; paper accounts only, internal or Alpaca paper; results shown apart)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
               .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
           </div>
           <div className="mt-3"><Field label="ETFs always kept in the universe (US tickers, comma separated)">
@@ -271,11 +272,13 @@ function Autonomous({ user }: { user: User }) {
         </Panel>
         <Panel title="Active strategies and performance">
           <Table max="max-h-40" empty="No strategy is active." head={["Strategy", "Instrument", "Timeframe", "Account"]} rows={deployments.map((x: Json) => [nice(x.strategy), sym(x.instrument_id), x.timeframe, x.broker_id])} />
+          <h3 className="mb-1 mt-3 text-xs text-dim">Closed trades by evidence level (exploration is kept apart: it measures setups that failed validation)</h3>
+          <Table max="max-h-40" empty="No closed trade yet." head={["Evidence", "Trades", "Win rate", "P&L"]} rows={(d.data.performance_by_evidence ?? []).map((x: Json) => [<Badge key="l" kind={x.level === "exploration" ? "down" : x.level === "candidate" ? "warn" : "up"}>{x.level}</Badge>, x.trades, pct(x.win_rate, 0), <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Closed trades by strategy</h3>
           <Table max="max-h-40" empty="No closed trade yet." head={["Strategy", "Trades", "Win rate", "P&L (quote currency)"]} rows={d.data.performance_by_strategy.map((x: Json) => [nice(x.strategy), x.trades, pct(x.win_rate, 0), <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Open positions</h3>
-          <Table max="max-h-40" empty="No open position." head={["Instrument", "Strategy", "Quantity", "Entry", "Last", "Stop", "Account"]}
-            rows={positions.map((x: Json) => [<Link key="s" className="text-accent hover:underline" href={chartHref(x.instrument_id)}>{sym(x.instrument_id)}</Link>, nice(x.strategy), num(x.qty, Math.abs(x.qty) < 1 ? 5 : 0), num(x.avg_price), x.price ? num(x.price) : "—", x.stop_price ? num(x.stop_price) : "—", x.broker_id])} />
+          <Table max="max-h-40" empty="No open position." head={["Instrument", "Strategy", "Evidence", "Quantity", "Entry", "Last", "Stop", "Account"]}
+            rows={positions.map((x: Json) => [<Link key="s" className="text-accent hover:underline" href={chartHref(x.instrument_id)}>{sym(x.instrument_id)}</Link>, nice(x.strategy), x.evidence ?? "—", num(x.qty, Math.abs(x.qty) < 1 ? 5 : 0), num(x.avg_price), x.price ? num(x.price) : "—", x.stop_price ? num(x.stop_price) : "—", x.broker_id])} />
         </Panel>
       </div>
 

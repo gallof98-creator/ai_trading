@@ -489,7 +489,8 @@ class Autopilot:
         if self.rt.risk.halted:
             return {"skipped": "trading is paused by the risk engine"}
         with self.rt.db.session() as session:
-            out = opp.scan(session, self.rt, broker, ACTOR, include_candidates=self.cfg.paper_candidates, require_regime_fit=self.cfg.require_regime_fit)
+            out = opp.scan(session, self.rt, broker, ACTOR, include_candidates=self.cfg.paper_candidates, require_regime_fit=self.cfg.require_regime_fit,
+                           include_exploration=self.cfg.exploration)
         if out["proposed"]:
             names = ", ".join(f"{p['strategy']} on {p['instrument_id'].split(':')[1]}" for p in out["proposed"])
             self._note("scan", f"{len(out['proposed'])} new proposal(s): {names}")
@@ -503,6 +504,6 @@ class Autopilot:
         for s in out["skipped"]:
             key = s["reason"].split(" (")[0].split(":")[0]
             blockers[key] = blockers.get(key, 0) + 1
-        return {"validated_setups": out["validated"], "candidate_setups": out["candidates"], "proposed": len(out["proposed"]), "sent": len(out["sent"]), "not_proposed": len(out["skipped"]),
+        return {"validated_setups": out["validated"], "candidate_setups": out["candidates"], "explorable_setups": out["explorable"], "proposed": len(out["proposed"]), "sent": len(out["sent"]), "not_proposed": len(out["skipped"]),
                 "funnel": out["funnel"], "blockers": sorted(([k, n] for k, n in blockers.items()), key=lambda x: -x[1])[:8],
                 "reasons": [f"{s['strategy']} {s['instrument_id'].split(':')[1]} {s['timeframe']}: {s['reason']}" for s in out["skipped"][:40]]}

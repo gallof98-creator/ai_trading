@@ -260,7 +260,10 @@ def test_connecting_external_brokers_respects_the_live_gate_and_approval_default
         rt.connect_broker("binance-test", "admin", exchange_factory=factory)
     from app.domain.models import Order, Side
     order = Order(broker_id="binance-test", instrument_id=BTC, side=Side.BUY, qty=0.01)
-    assert rt._needs_approval(order) is True  # non-simulated venue: human approval by default
+    assert rt._needs_approval(order) is False  # an exchange's testnet is paper: it follows the trading mode
+    rt.brokers.get("binance-test")._authorization = object()  # as if live trading had been authorized
+    assert rt._needs_approval(order) is True  # real money: human approval by default
+    rt.brokers.get("binance-test")._authorization = None
     assert [b["id"] for b in rt.broker_status()] == ["binance-test"]
     rt.disconnect_broker("binance-test", "admin")
     assert rt.broker_status() == []

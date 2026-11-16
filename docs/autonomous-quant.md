@@ -170,6 +170,19 @@ instrument too rarely. Hence:
 |---|---|---|
 | validated | all eleven checks, and the multiple-testing control | any account |
 | candidate | market prices, profitable in 3 of 4 unseen periods, at least 8 unseen trades, positive return, drawdown at most 25%, still profitable with costs doubled and without its best trade | paper accounts only |
+| exploration | failed validation, but: market prices, profitable in 2 of 4 unseen periods, at least 5 unseen trades, positive return after costs, drawdown at most 25% | paper accounts only, and only when "Exploration" is switched on |
+
+"Paper accounts" means the internal simulated account or a broker's paper environment (Alpaca paper, an exchange testnet):
+anything without a live-trading authorization. Paper accounts follow the trading mode; in automatic mode their orders are sent
+without asking. Real-money accounts always wait for approval unless that default is changed, and they never receive a candidate
+or exploration entry: the scan skips them, and the trading engine refuses such an entry again when the order is created and when
+it is approved, so a deployment started on paper cannot trade real money if its account is later switched to live.
+
+Exploration exists to get many more trades and real-time evidence on setups the validation could not settle. It is not evidence
+of an edge, and with costs included the expected result is negative. Every exploratory proposal says "EXPLORATION (failed
+validation, paper only)", and closed trades are reported per evidence level on the Autonomous page (validated, candidate,
+exploration), so exploratory results never mix with the others. For many trades a day, combine it with intraday timeframes
+(15m, 1h), small positions (per-instrument limit 5-10%, risk per trade 0.5-1%) and crypto pairs, which trade around the clock.
 
 The counts in the next paragraph were measured with the previous criteria; the stricter ones can only validate fewer.
 

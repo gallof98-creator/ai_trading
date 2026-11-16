@@ -96,6 +96,9 @@ class AutopilotSettings(BaseModel):
     # Paper accounts only; each proposal says which level of evidence it rests on.
     paper_candidates: bool = True
     require_regime_fit: bool = False   # only propose when the current market regime is one the strategy family is meant for
+    # Exploration: also trade setups that FAILED validation but did not lose on unseen data, to measure them in real time.
+    # Paper accounts only (the internal one or a broker's paper environment), never real money; off unless switched on.
+    exploration: bool = False
 
 
 class UserSettings(BaseModel):

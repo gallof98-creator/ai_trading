@@ -89,7 +89,7 @@ def test_validation_needs_several_unseen_periods_and_is_recorded(rt):
 def test_scan_proposes_only_validated_strategies_and_explains_itself(rt):
     with rt.db.session() as s:
         assert opp.scan(s, rt, "paper-main", "admin") == {"scanned_at": rt.clock().isoformat(), "broker_id": "paper-main", "proposed": [], "sent": [], "skipped": [],
-                                                              "funnel": {"setups": 0}, "validated": 0, "candidates": 0}
+                                                              "funnel": {"setups": 0}, "validated": 0, "candidates": 0, "explorable": 0}
         opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
         opp.validate(s, rt, "rsi_reversion", CYC, "1d", "admin", allow_short=True)
     with rt.db.session() as s:
@@ -191,10 +191,11 @@ def test_candidate_level_is_weaker_evidence_labelled_and_kept_to_paper_accounts(
     assert strict["proposed"] == [] and "candidate only" in strict["skipped"][0]["reason"] and strict["candidates"] == 1 and strict["validated"] == 0
     rt.brokers.register(CcxtAdapter("exchange-x", rt.registry, FakeCcxt()))
     rt.brokers.get("exchange-x").connect()
+    rt.brokers.get("exchange-x")._authorization = object()  # as if live trading had been authorized: real money
     rt.registry.map_symbol("exchange-x", CYC, "CYC/USD")
     with rt.db.session() as s:
         real = opp.scan(s, rt, "exchange-x", "admin", include_candidates=True)
-    assert real["proposed"] == [] and any("never on a broker account" in x["reason"] for x in real["skipped"])
+    assert real["proposed"] == [] and any("never with real money" in x["reason"] for x in real["skipped"])
     rt.brokers.remove("exchange-x")
     with rt.db.session() as s:
         paper = opp.scan(s, rt, "paper-main", "admin", include_candidates=True)
@@ -256,3 +257,74 @@ def test_a_daily_position_on_an_instrument_with_live_prices_fills_is_protected_a
         assert rt.portfolio.qty(key) == 0 and rt.portfolio.trades[-1].exit_reason == "stop_loss"
         assert not [a for a in rt.engine.approvals.values() if a.order.instrument_id == CYC and a.order.reduce_only]   # the waiting exit is withdrawn
     rt.live.stop()
+
+
+def _rejected_but_not_losing(rt):
+    """The candidate from the fixture, recorded again as a setup that failed validation without losing on unseen data."""
+    with rt.db.session() as s:
+        v = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin")
+        payload = {k: v[k] for k in v if k not in ("id", "status", "tested_at")}
+        payload["profitable_folds"] = 2
+        rt.now[0] += timedelta(seconds=1)
+        opp.record(s, "rejected", payload, rt.clock())
+    with rt.db.session() as s:
+        [latest] = [x for x in opp.validations(s, rt.clock()) if x["instrument_id"] == CYC]
+    assert latest["status"] == "rejected" and opp.explorable(latest) and opp.level_of(latest) == "exploration"
+    return latest
+
+
+def test_exploration_trades_rejected_but_not_losing_setups_on_paper_only_when_switched_on(rt):
+    from app.brokers.ccxt_adapter import CcxtAdapter
+    from tests.execution.fakes import FakeCcxt
+
+    _rejected_but_not_losing(rt)
+    with rt.db.session() as s:
+        off = opp.scan(s, rt, "paper-main", "admin", include_candidates=True)
+    assert off["proposed"] == [] and any("exploration is off" in x["reason"] for x in off["skipped"]) and off["explorable"] == 1
+    rt.brokers.register(CcxtAdapter("exchange-x", rt.registry, FakeCcxt()))
+    rt.brokers.get("exchange-x").connect()
+    rt.brokers.get("exchange-x")._authorization = object()  # as if live trading had been authorized: real money
+    rt.registry.map_symbol("exchange-x", CYC, "CYC/USD")
+    with rt.db.session() as s:
+        real = opp.scan(s, rt, "exchange-x", "admin", include_exploration=True)
+    assert real["proposed"] == [] and real["sent"] == [] and any("never with real money" in x["reason"] for x in real["skipped"])
+    rt.brokers.remove("exchange-x")
+    with rt.db.session() as s:
+        on = opp.scan(s, rt, "paper-main", "admin", include_exploration=True)
+    assert [p["level"] for p in on["proposed"]] == ["exploration"]
+    [p] = rt.proposals()
+    assert p["rationale"]["validation"]["level"] == "exploration" and "FAILED validation" in p["rationale"]["validation"]["caveat"]
+    assert rt.evidence_of("paper-main", CYC, "ema_crossover") == "exploration"
+
+
+def test_weaker_evidence_is_refused_by_the_engine_on_a_real_money_account_even_if_already_deployed(rt):
+    """A deployment started for exploration keeps trading later bars without the scan. If its account were real money
+    (a broker switched from paper to live), every entry must be refused by the engine itself."""
+    from app.domain.models import Order, Side
+
+    order = Order(broker_id="paper-main", instrument_id=CYC, side=Side.BUY, qty=1, strategy="ema_crossover")
+    rt.evidence[rt.evidence_key("paper-main", CYC, "ema_crossover")] = "exploration"
+    assert rt.entry_block(order) is None
+    adapter = rt.brokers.get("paper-main")
+    real = type("Caps", (), {"is_simulated": False})()
+    original = type(adapter).capabilities
+    try:
+        type(adapter).capabilities = property(lambda self: real)
+        assert "paper accounts only" in rt.entry_block(order)
+        assert rt.entry_block(order.model_copy(update={"reduce_only": True})) is not None  # the engine skips the check for closing orders
+        rt.evidence[rt.evidence_key("paper-main", CYC, "ema_crossover")] = "validated"
+        assert rt.entry_block(order) is None
+    finally:
+        type(adapter).capabilities = original
+
+
+def test_a_broker_paper_environment_counts_as_paper_and_follows_the_trading_mode():
+    from types import SimpleNamespace
+
+    from app.brokers.base import is_paper_account
+
+    caps = SimpleNamespace(is_simulated=False)
+    assert is_paper_account(SimpleNamespace(capabilities=caps, is_live=False))
+    assert not is_paper_account(SimpleNamespace(capabilities=caps, is_live=True))
+    assert not is_paper_account(SimpleNamespace(capabilities=caps))  # an adapter that does not say counts as real money
+    assert is_paper_account(SimpleNamespace(capabilities=SimpleNamespace(is_simulated=True)))
