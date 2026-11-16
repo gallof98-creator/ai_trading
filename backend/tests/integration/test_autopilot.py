@@ -94,7 +94,9 @@ def test_a_cycle_goes_from_an_empty_universe_to_a_proposal_without_a_click(rt):
     counts = {k: out["validation"][k] for k in ("run", "passed", "candidates", "could_not_run", "remaining")}
     assert counts == {"run": 4, "passed": 2, "candidates": 0, "could_not_run": 0, "remaining": 0}  # the trend rule passes, the mean-reversion rule does not
     assert out["validation"]["multiple_testing"]["setups_tested"] == 4 and out["validation"]["speed"]["validations"] == 4
-    assert out["live"] == {"subscribed": 2, "no_live_source": 0} and set(rt.live.subscribed) == {"STOCK:AAA", "STOCK:BBB"}
+    # Every candidate is followed live (within the streaming limit here, so all stream).
+    assert out["live"]["followed"] == 2 and out["live"]["streamed"] == 2 and out["live"]["unavailable"] == 0
+    assert set(rt.live.subscribed) == {"STOCK:AAA", "STOCK:BBB"}
     assert out["scan"]["validated_setups"] == 2 and out["scan"]["proposed"] == 1
     assert any("rsi_reversion AAA 1d: did not pass validation" == r for r in out["scan"]["reasons"])
 

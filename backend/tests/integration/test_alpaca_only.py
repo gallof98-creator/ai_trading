@@ -89,7 +89,7 @@ def test_one_alpaca_key_serves_listing_history_and_live_data(rt):
     assert creds == {"api_key": "PK", "api_secret": "SK"} and source == "broker account alpaca-paper"  # no second key to enter
     status = rt.provider_status()[0]
     assert status["configured"] and status["source"] == "broker account alpaca-paper" and status["key_hint"] == "…PK"
-    assert rt.configure_live() == ["alpaca-crypto", "alpaca-stocks"]
+    assert rt.configure_live() == ["alpaca-crypto", "alpaca-stocks", "alpaca-stocks-rest"]   # streamed within the plan limit, the rest polled
 
     calls = []
     rt.global_markets.discovery_factory = lambda name, key: AlpacaDiscovery(key, "SK", http_get=fake_get(calls))

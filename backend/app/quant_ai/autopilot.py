@@ -91,6 +91,7 @@ class Autopilot:
         self.pool = ValidationPool()
         self.activity: deque = deque(maxlen=80)
         self._warned: set[str] = set()
+        self._auto_live: set[str] = set()  # instruments the autopilot subscribed (a user's own subscriptions are left alone)
         self.state: dict = {"running": False, "last_cycle": None, "last_result": None, "last_seed": None, "last_price_update": None, "cycles": 0}
 
     # ---- helpers
@@ -447,20 +448,30 @@ class Autopilot:
                 out["multiple_testing"] = opp.multiple_testing(session, now)
         return out
 
-    def _live(self, _: dict) -> dict:
-        cfg, now = self.cfg, self.rt.clock()
+    def _live(self, result: dict) -> dict:
+        """Live prices for every followed instrument, in order of importance: open positions and working orders, then
+        instruments with a validated (or candidate) strategy, then the other candidates, most traded first. Stocks beyond
+        the plan's streaming limit are polled; instruments that dropped out of the list are released (never a held one)."""
+        cfg, now, rt = self.cfg, self.rt.clock(), self.rt
         if not cfg.live_subscribe:
             return {"skipped": "switched off"}
-        with self.rt.db.session() as session:
+        held = ([k[1] for k, s in rt.portfolio.slices.items() if s.qty] + [o.instrument_id for o in rt.engine.orders.values() if o.is_open]
+                + [a.order.instrument_id for a in rt.engine.approvals.values()])
+        with rt.db.session() as session:
             levels = ("validated", "candidate") if cfg.paper_candidates else ("validated",)
-            wanted = list(dict.fromkeys(v["instrument_id"] for v in opp.validations(session, now) if v["status"] in levels))
-        new = [i for i in wanted if i not in self.rt.live.subscribed and self.rt.kinds.get(i) != "simulated"][: cfg.max_instruments]
-        if not new:
-            return {"subscribed": 0}
-        out = self.rt.live_subscribe(new, ACTOR)
-        if out["subscribed"]:
-            self._note("live", f"live prices requested for {', '.join(i.split(':')[1] for i in out['subscribed'])}")
-        return {"subscribed": len(out["subscribed"]), "no_live_source": len(out["unavailable"])}
+            setups = [v["instrument_id"] for v in opp.validations(session, now) if v["status"] in levels]
+        others = result.get("_candidates", []) if cfg.live_all_candidates else []
+        ordered = list(dict.fromkeys(held + setups + others))
+        ordered = ordered[: max(cfg.max_instruments, len(set(held)))]
+        released = [i for i in self._auto_live if i not in ordered and i not in held]
+        if released:
+            rt.live_unsubscribe(released, ACTOR)
+        out = rt.live_follow(ordered, ACTOR)
+        self._auto_live = set(ordered)
+        if out["newly"]:
+            self._note("live", f"live prices for {out['followed']} instruments: {out['streamed']} streamed, {out['polled']} by REST requests "
+                               f"(Alpaca streams at most {cfg.stream_symbol_limit} stock symbols on this plan)")
+        return {**out, "released": len(released)}
 
     def _scan(self, _: dict) -> dict:
         broker = self._broker()

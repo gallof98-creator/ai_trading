@@ -229,10 +229,11 @@ class AlpacaLive(LiveSource):
     STREAM = "wss://stream.data.alpaca.markets"
 
     def __init__(self, hub: LiveHub, asset: str, key: str = "", secret: str = "", feed: str = "iex", data_url: str | None = None,
-                 stream_url: str | None = None, poll_seconds: float | None = None, allow_stream: bool = True, client: httpx.Client | None = None) -> None:
+                 stream_url: str | None = None, poll_seconds: float | None = None, allow_stream: bool = True, client: httpx.Client | None = None,
+                 name: str | None = None) -> None:
         super().__init__(hub)
         self.asset, self.key, self.secret, self.feed = asset, key, secret, feed
-        self.name = f"alpaca-{asset}"
+        self.name = name or f"alpaca-{asset}"
         self.venue = "Alpaca crypto" if asset == "crypto" else feed.upper()
         self.data_url, self.stream_url = (data_url or self.DATA).rstrip("/"), (stream_url or self.STREAM).rstrip("/")
         # Without a key Alpaca allows only a few requests a minute; with one, 200.

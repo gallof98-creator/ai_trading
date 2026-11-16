@@ -121,6 +121,15 @@ Not exercised against Alpaca from the development environment: the request param
 already uses for daily bars; whether the consolidated history is readable on a given plan is detected at run time (a refusal falls
 back to IEX and says so).
 
+### Which instruments get live prices
+
+Every followed instrument (the Autopilot's candidates, up to "Instruments followed"), in order of importance: open positions and
+working orders first, then instruments with a validated or candidate strategy, then the other candidates, most traded first.
+Alpaca's free plan streams at most 30 stock symbols over its WebSocket (verified live: about 0.3 s from trade to dashboard). The
+first 30 in that order stream; the others are polled through Alpaca's REST "latest" endpoints every few seconds. When priorities
+change (a position opens on a polled stock) the instruments are moved between the two. The limit is a setting, for paid plans.
+Crypto pairs are not counted in the stock limit.
+
 ## Strategy modules
 
 Five signal families (trend following, momentum, mean reversion, breakout, volatility) containing the 17 strategies of the library, and

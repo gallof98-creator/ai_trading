@@ -134,6 +134,7 @@ class TradingRuntime:
 
         self.intraday = IntradayData(self)  # official intraday bars: refreshed every minute, history on request
         self.autopilot = Autopilot(self)
+        self._streamed: set[str] = set()  # stocks that use the streaming connection (within the plan's symbol limit)
         self.live_source_factory = None  # test hook: callable(runtime) -> list[(LiveSource, route)]
         self.driven: dict[str, str] = {}  # instrument -> last stored daily bar fed to the engine for global (portfolio) strategies
         from ..global_markets.service import GlobalMarkets
@@ -215,6 +216,7 @@ class TradingRuntime:
                     self.bars[(iid, tf)] = ds.bars.iloc[-CACHE_BARS:]
             saved = session.get(AppSetting, "live:subscriptions")
             live_ids = [i for i in (saved.value.get("instrument_ids", []) if saved else []) if self._known(i)]
+            self._streamed = set(saved.value.get("streamed", []) if saved else []) & set(live_ids)
             self.started = True
         if live_ids and self.settings.live_feed_autostart:
             self.configure_live()
@@ -1023,6 +1025,9 @@ class TradingRuntime:
         def us_equity(inst) -> str | None:
             return inst.symbol if inst.asset_class in (AssetClass.STOCK, AssetClass.ETF) and market_of(inst) == "US" else None
 
+        def us_streamed(inst) -> str | None:  # within the plan's WebSocket symbol limit
+            return us_equity(inst) if inst.id in self._streamed else None
+
         if self.live_source_factory is not None:
             pairs = self.live_source_factory(self)
         else:
@@ -1030,7 +1035,9 @@ class TradingRuntime:
             key, secret = (alpaca[0].get("api_key", ""), alpaca[0].get("api_secret", "")) if alpaca else ("", "")
             pairs = [(AlpacaLive(self.live_hub, "crypto", key, secret), crypto)]
             if key:
-                pairs.append((AlpacaLive(self.live_hub, "stocks", key, secret), us_equity))
+                # Alpaca's free plan streams at most 30 stock symbols: those stream, every other followed stock is polled.
+                pairs.append((AlpacaLive(self.live_hub, "stocks", key, secret), us_streamed))
+                pairs.append((AlpacaLive(self.live_hub, "stocks", key, secret, allow_stream=False, poll_seconds=4.0, name="alpaca-stocks-rest"), us_equity))
             finnhub = self._provider_key("finnhub") if self.settings.provider_enabled("finnhub") else None
             if finnhub and not key:
                 pairs.append((FinnhubLive(self.live_hub, finnhub[0]), us_equity))
@@ -1059,9 +1066,15 @@ class TradingRuntime:
             raise RuntimeError_(f"{', '.join(blocked[:5])} use simulated data; live and simulated prices are never mixed")
         if not self.live.sources:
             self.configure_live()
+        limit = self.user_settings.autopilot.stream_symbol_limit
+        for iid in instrument_ids:  # a stock asked for by hand streams if the plan has room
+            inst = self.registry.get(iid)
+            if inst.asset_class in (AssetClass.STOCK, AssetClass.ETF) and len(self._streamed) < limit:
+                self._streamed.add(iid)
         # Recent minutes from the same provider first (so the chart has context and indicators are warm), then the live feed.
+        # Not needed when the official minute bars are refreshed every minute: they bring the same history.
         backfilled = {}
-        for iid in instrument_ids:
+        for iid in ([] if self.user_settings.autopilot.minute_update else instrument_ids):
             inst = self.registry.get(iid)
             name = next((n for n, route in self.live.routes.items() if route(inst)), None)
             source = self.live.sources.get(name) if name else None
@@ -1081,17 +1094,39 @@ class TradingRuntime:
 
     def live_unsubscribe(self, instrument_ids: list[str], actor: str) -> None:
         self.live.unsubscribe(instrument_ids)
+        self._streamed -= set(instrument_ids)
         self._save_live(actor)
+
+    def live_follow(self, ordered_ids: list[str], actor: str) -> dict:
+        """Follow these instruments live, most important first. The first stocks within the plan's WebSocket limit
+        stream; the rest are polled. Instruments moved between the two are re-routed."""
+        def is_stock(iid: str) -> bool:
+            return self.registry.get(iid).asset_class in (AssetClass.STOCK, AssetClass.ETF)
+
+        ids = [i for i in dict.fromkeys(ordered_ids) if self._known(i) and self.kinds.get(i) != DataKind.SIMULATED.value]
+        stocks = [i for i in ids if is_stock(i)]
+        streamed = set(stocks[: self.user_settings.autopilot.stream_symbol_limit])
+        moved = [i for i, src in self.live.subscribed.items() if is_stock(i) and ((src == "alpaca-stocks") != (i in streamed))]
+        if moved:
+            self.live.unsubscribe(moved)
+        self._streamed = streamed
+        todo = [i for i in ids if i not in self.live.subscribed]
+        out = self.live_subscribe(todo, actor) if todo else {"subscribed": {}, "unavailable": {}}
+        sources = self.live.subscribed
+        followed = sum(1 for i in ids if i in sources)
+        polled = sum(1 for i in ids if sources.get(i) == "alpaca-stocks-rest")
+        return {"followed": followed, "streamed": followed - polled, "polled": polled, "newly": len(out["subscribed"]), "unavailable": len(out["unavailable"])}
 
     def _save_live(self, actor: str) -> None:
         ids = sorted(self.live.subscribed)
 
         def write(session: Session) -> None:
             row = session.get(AppSetting, "live:subscriptions")
+            value = {"instrument_ids": ids, "streamed": sorted(self._streamed & set(ids))}
             if row is None:
-                session.add(AppSetting(key="live:subscriptions", value={"instrument_ids": ids}))
+                session.add(AppSetting(key="live:subscriptions", value=value))
             else:
-                row.value = {"instrument_ids": ids}
+                row.value = value
             audit.record(session, actor, "live.subscriptions", count=len(ids))
 
         self.journal._write(write)

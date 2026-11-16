@@ -134,6 +134,7 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
             <Field label="Instruments followed"><input type="number" min="1" max="200" className="w-24" value={cfg.max_instruments} onChange={(e) => set("max_instruments", Number(e.target.value))} /></Field>
             <Field label="Minimum price"><input type="number" min="0" step="any" className="w-24" value={cfg.min_price} onChange={(e) => set("min_price", Number(e.target.value))} /></Field>
             <Field label="Minimum traded value / day"><input type="number" min="0" step="any" className="w-36" value={cfg.min_traded_value} onChange={(e) => set("min_traded_value", Number(e.target.value))} /></Field>
+            <Field label="Stocks streamed live (Alpaca free plan: 30)"><input type="number" min="1" className="w-24" value={cfg.stream_symbol_limit} onChange={(e) => set("stream_symbol_limit", Number(e.target.value))} /></Field>
             <Field label="Validations per cycle"><input type="number" min="1" className="w-24" value={cfg.validations_per_cycle} onChange={(e) => set("validations_per_cycle", Number(e.target.value))} /></Field>
             <Field label="Instruments added per day"><input type="number" min="1" max="200" className="w-24" value={cfg.universe_step ?? 40} onChange={(e) => set("universe_step", Number(e.target.value))} /></Field>
             <Field label={`Processor cores for validation (0 = automatic, now ${st.validation_workers ?? 1})`}><input type="number" min="0" max="32" className="w-24" value={cfg.validation_workers ?? 0} onChange={(e) => set("validation_workers", Number(e.target.value))} /></Field>
@@ -142,7 +143,7 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
               <option value="iex">IEX (same feed as live prices)</option><option value="sip">Consolidated tape (15 min delayed)</option></select></Field>
           </div>
           <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-dim">
-            {[["seed_most_active", "Add the most traded US stocks when the universe is small"], ["daily_price_update", "Refresh daily prices"], ["live_subscribe", "Ask for live prices where a strategy is validated"],
+            {[["seed_most_active", "Add the most traded US stocks when the universe is small"], ["daily_price_update", "Refresh daily prices"], ["live_subscribe", "Ask for live prices where a strategy is validated"], ["live_all_candidates", "Live prices for every followed instrument (the most important stream, the rest by REST requests)"],
               ["minute_update", "Download official bars every minute for followed instruments"],
               ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
               .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
@@ -232,7 +233,7 @@ function Autonomous({ user }: { user: User }) {
             <Table max="max-h-56" empty="No live subscriptions." head={["Instrument", "Status", "Price", "Bid / ask", "Age", "Source", ""]}
               rows={d.data.live_subscriptions.map((s: Json) => { const q = s.quote; return [<Link key="s" className="text-accent hover:underline" href={chartHref(s.instrument_id)}>{sym(s.instrument_id)}</Link>,
                 q ? <Badge key="b" kind={q.fresh ? "up" : "warn"}>{q.fresh ? `● ${q.status}` : "STALE"}</Badge> : <Badge key="b">waiting</Badge>, q ? num(q.price) : "—",
-                q?.bid ? `${num(q.bid)} / ${num(q.ask)}` : "—", q ? `${Math.round(q.age_seconds)}s` : "—", `${s.source}${q?.venue ? ` · ${q.venue}` : ""}`,
+                q?.bid ? `${num(q.bid)} / ${num(q.ask)}` : "—", q ? `${Math.round(q.age_seconds)}s` : "—", `${s.source === "alpaca-stocks-rest" ? "Alpaca REST (every few s)" : s.source}${q?.venue ? ` · ${q.venue}` : ""}`,
                 canTrade ? <button key="x" className="text-dim underline" onClick={() => post("/api/live/unsubscribe", { instrument_ids: [s.instrument_id] }).then(refresh)}>stop</button> : ""]; })} />
             {canTrade && <div className="flex flex-wrap items-end gap-2">
               <Field label="Go live on an instrument (e.g. CRYPTO:BTC/USD, STOCK:AAPL)"><input className="w-64" value={liveId} onChange={(e) => setLiveId(e.target.value)} /></Field>

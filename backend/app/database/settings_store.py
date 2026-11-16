@@ -71,6 +71,12 @@ class AutopilotSettings(BaseModel):
                                                              "UNI/USD", "AAVE/USD", "BCH/USD"], max_length=50)
     # Exchange-traded funds always kept in the universe (the "most traded stocks" screen does not reliably include them).
     etfs: list[str] = Field(default_factory=lambda: ["SPY", "QQQ", "IWM", "DIA", "VTI", "EFA", "EEM", "GLD", "TLT", "XLK", "XLF", "XLE"], max_length=100)
+    # Live prices for every followed instrument, not only those with a validated strategy. Open positions and working
+    # orders always come first.
+    live_all_candidates: bool = True
+    # How many US stock symbols Alpaca streams over its WebSocket on your plan (30 on the free plan, unlimited on a paid
+    # one). The most important instruments stream; the others get their prices by REST requests every few seconds.
+    stream_symbol_limit: int = Field(30, ge=1, le=10_000)
     min_price: float = Field(5.0, ge=0)
     min_traded_value: float = Field(20_000_000.0, ge=0)  # 20-day average traded value, quote currency
     validations_per_cycle: int = Field(60, ge=1, le=500)

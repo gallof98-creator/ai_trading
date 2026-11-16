@@ -298,7 +298,7 @@ def test_live_bars_are_stored_charted_and_fill_paper_orders(live_rt):
     again.start()
     with again.db.session() as s:
         from app.database.models import AppSetting
-        assert s.get(AppSetting, "live:subscriptions").value == {"instrument_ids": ["CRYPTO:BTC/USD"]}
+        assert s.get(AppSetting, "live:subscriptions").value == {"instrument_ids": ["CRYPTO:BTC/USD"], "streamed": []}
     rt.live_unsubscribe(["CRYPTO:BTC/USD"], "admin")
     assert rt.live.subscribed == {}
     rt.live.stop()
@@ -376,3 +376,44 @@ def test_stream_reaches_an_http_client_as_server_sent_events(tmp_path):
             assert wait_for(lambda: hub.status()["subscribers"] == 0, 15)  # the connection is cleaned up when the client leaves
     finally:
         server.should_exit = True
+
+
+def test_stocks_beyond_the_plan_streaming_limit_are_polled_and_the_most_important_stream(tmp_path):
+    from app.database.models import AppSetting
+
+    db = Database(f"sqlite:///{tmp_path}/s.db")
+    db.create_all()
+    with db.session() as s:
+        save_settings(s, UserSettings(initial_paper_capital=1000, base_currency="EUR"))
+    rt = TradingRuntime(db, Settings(_env_file=None, live_feed_autostart=False))
+    rt.start()
+    streamer, poller = Feeder(rt.live_hub), Feeder(rt.live_hub)
+    streamer.name, poller.name = "alpaca-stocks", "alpaca-stocks-rest"
+    us = lambda inst: inst.symbol if inst.asset_class in (AssetClass.STOCK, AssetClass.ETF) else None  # noqa: E731
+    rt.live_source_factory = lambda _rt: [(streamer, lambda inst: us(inst) if inst.id in _rt._streamed else None), (poller, us)]
+    rt.configure_live()
+    tickers = ["S%02d" % k for k in range(8)]
+    rt.add_instruments(tickers, "US", "stock", "admin")
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"autopilot": rt.user_settings.autopilot.model_copy(update={"stream_symbol_limit": 3})}))
+        rt.reload_settings(s)
+    ids = [f"STOCK:{t}" for t in tickers]
+    out = rt.live_follow(ids, "admin")
+    assert (out["followed"], out["streamed"], out["polled"]) == (8, 3, 5)
+    assert {i for i, src in rt.live.subscribed.items() if src == "alpaca-stocks"} == set(ids[:3])   # the first three, in order of importance
+    assert set(streamer.symbols) == {"S00", "S01", "S02"} and len(poller.symbols) == 5
+
+    # A position opens on S07: it moves to the stream, and the least important streamed one moves to polling.
+    out = rt.live_follow(["STOCK:S07", *ids[:7]], "admin")
+    assert (out["streamed"], out["polled"]) == (3, 5)
+    assert {i for i, src in rt.live.subscribed.items() if src == "alpaca-stocks"} == {"STOCK:S07", "STOCK:S00", "STOCK:S01"}
+    with rt.db.session() as s:
+        saved = s.get(AppSetting, "live:subscriptions").value
+    assert set(saved["streamed"]) == {"STOCK:S07", "STOCK:S00", "STOCK:S01"} and len(saved["instrument_ids"]) == 8
+
+    again = TradingRuntime(rt.db, Settings(_env_file=None, live_feed_autostart=False))
+    again.start()
+    assert again._streamed == {"STOCK:S07", "STOCK:S00", "STOCK:S01"}   # the routing survives a restart
+    rt.live_unsubscribe(["STOCK:S07"], "admin")
+    assert "STOCK:S07" not in rt._streamed and "STOCK:S07" not in rt.live.subscribed
+    rt.live.stop()
