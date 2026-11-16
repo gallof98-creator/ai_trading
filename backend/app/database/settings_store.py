@@ -101,6 +101,9 @@ class UserSettings(BaseModel):
     proposal_ttl_minutes: int = Field(15, ge=1, le=1440)
     # A proposal is void if, when approved, the price has moved by more than this fraction of its stop distance.
     max_entry_drift: float = Field(0.25, gt=0, le=2)
+    # When a strategy signals the exit of a position it holds, close it without asking. Closing orders only, and only on
+    # paper accounts (the internal one and broker paper accounts); entries keep following the trading mode.
+    auto_close_on_exit_signal: bool = False
     # Fractional share quantities for US stocks and ETFs (Alpaca supports them). Without this, a small account cannot
     # hold even one share of an expensive stock, so most instruments would never be traded.
     fractional_shares: bool = False

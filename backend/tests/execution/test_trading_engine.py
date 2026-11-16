@@ -341,3 +341,26 @@ def test_orders_sent_but_not_yet_filled_count_towards_the_exposure_limits():
     restarted = Harness(limits=limits)
     restarted.engine.load_state({**h.engine.to_state(), "working": {"ghost": 5.0}})
     assert restarted.engine._risk_state(ts).gross_exposure == 0   # an entry that is no longer open stops counting
+
+
+def test_strategy_exits_close_by_themselves_only_when_the_user_switched_it_on():
+    for auto in (False, True):
+        h = Harness(TradingMode.SEMI_AUTO)
+        h.engine._auto_exit = lambda order, auto=auto: auto
+        ts = h.bar(100, 101, 99, 100)
+        h.signal(1, ts)
+        [entry] = list(h.engine.approvals)
+        h.engine.resolve_approval(entry, True, "trader", ts)   # entries always follow the mode: approved by hand
+        ts = h.bar(100, 101, 99.5, 100)
+        assert h.portfolio.qty(h.dep.key) > 0
+        (close,) = h.signal(0, ts, action=SignalAction.SELL)  # the strategy says: get out
+        if auto:
+            assert close.status is OrderStatus.SUBMITTED and close.reduce_only and not h.engine.approvals
+            h.bar(100, 101, 99.5, 100)
+            assert h.portfolio.qty(h.dep.key) == 0 and h.portfolio.trades[-1].exit_reason == "signal"
+        else:
+            assert close.status is OrderStatus.PENDING_APPROVAL and len(h.engine.approvals) == 1 and h.portfolio.qty(h.dep.key) > 0
+    # Switched on, a new ENTRY still waits for approval in semi-automatic mode.
+    ts = h.bar(100, 101, 99, 100)
+    (again,) = h.signal(1, ts, bar_tag="new-entry")
+    assert again.status is OrderStatus.PENDING_APPROVAL

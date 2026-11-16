@@ -557,3 +557,18 @@ def test_a_position_without_live_prices_and_without_a_resting_stop_raises_a_crit
         alerts = [n for n in s.query(Notification) if n.severity == "critical" and "No working stop on STOCK:AAPL" in n.title]
     assert len(alerts) == 1   # said once, loudly, not every minute
     rt.live.stop()
+
+
+def test_automatic_exits_apply_to_paper_accounts_only_and_only_when_switched_on(tmp_path):
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake)
+    rt.create_paper_account("paper-main", "Main", "admin")
+    sell = lambda broker: Order(broker_id=broker, instrument_id="STOCK:AAPL", side=Side.SELL, qty=1, reduce_only=True, reason="signal")  # noqa: E731
+    assert not rt._auto_exit(sell("paper-main")) and not rt._auto_exit(sell("alpaca-paper"))   # off by default
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"auto_close_on_exit_signal": True}))
+        rt.reload_settings(s)
+    assert rt._auto_exit(sell("paper-main")) and rt._auto_exit(sell("alpaca-paper"))           # internal paper and Alpaca paper
+    rt.brokers.get("alpaca-paper")._authorization = object()                                    # what a live connection looks like
+    assert not rt._auto_exit(sell("alpaca-paper"))                                              # never on a real-money account
+    rt.live.stop()

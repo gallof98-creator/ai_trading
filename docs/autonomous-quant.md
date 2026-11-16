@@ -228,6 +228,20 @@ without fractions, any stock above that price could never be bought. At Alpaca, 
 the day; a protective stop for a fractional position is not left resting at the broker (the platform watches it and closes at the
 bar that crosses it), and orders worth less than 1 USD are refused.
 
+## How positions are closed
+
+| Exit | Closes by itself? |
+|---|---|
+| Protective stop | Yes, always: resting at the broker, or watched by the platform on live prices |
+| Take profit | Yes, always (resting, or watched by the platform) |
+| Exit signalled by the strategy | Semi-automatic: a closing proposal that waits for approval and never lapses. With "close on exit signal" switched on (Settings), it is sent without asking on paper accounts; never without approval on a real-money account |
+| Emergency Stop | Follows the emergency policy in Settings (default: blocks new risk, closes nothing) |
+
+If a stop or target closes a position while its exit proposal is waiting, the proposal is withdrawn.
+
+For an instrument with live prices, the live minutes fill orders and trigger stops, while the downloaded daily bars still reach daily
+strategies (signals only), so their exits are produced. Before this was fixed, a paper order on such an instrument never filled.
+
 ## Exits the broker cannot hold
 
 Some exits cannot rest at Alpaca: a stop for a fractional quantity, a plain stop for crypto, and a take-profit next to a stop on the same

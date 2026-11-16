@@ -113,6 +113,7 @@ class TradingEngine:
         self._approval_required = approval_required or (lambda order: False)
         self._cost_per_unit = cost_per_unit or (lambda instrument, price: 0.0)
         self._proposal_ttl = proposal_ttl or (lambda: None)
+        self._auto_exit: Callable[[Order], bool] = lambda order: False  # set by the runtime
         self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
         self._rationale: dict = {}  # set while a signal is being turned into orders
         self._working: dict[str, float] = {}  # order id -> signed notional (base currency) of entries sent but not yet filled
@@ -236,6 +237,12 @@ class TradingEngine:
         if self.portfolio.qty(key) == 0 and key in self.protections:
             self._cancel_protection(key, fill.ts)
             del self.protections[key]
+        if self.portfolio.qty(key) == 0:
+            # A closing proposal still waiting for approval has nothing left to close (a stop or target got there first).
+            for aid in [a.id for a in self.approvals.values() if a.order.reduce_only and (a.order.broker_id, a.order.instrument_id, a.order.strategy) == key]:
+                gone = self.approvals.pop(aid)
+                self._record(gone.order.model_copy(update={"status": OrderStatus.CANCELLED, "updated_at": fill.ts,
+                                                           "reason": f"{gone.order.reason} | position already closed"}))
 
     # ------------------------------------------------------------------ protective orders
     def _cancel(self, order: Order | None, ts: datetime) -> None:
@@ -427,7 +434,9 @@ class TradingEngine:
         if not decision.approved:
             self._client_ids[order.client_order_id] = order.id
             return self._reject(order, "; ".join(decision.reasons), ts)
-        if mode is TradingMode.SEMI_AUTO or self._approval_required(order):
+        if order.reduce_only and order.reason == "signal" and self._auto_exit(order):
+            pass  # the user chose to let strategy exits close positions on paper accounts without asking
+        elif mode is TradingMode.SEMI_AUTO or self._approval_required(order):
             self._client_ids[order.client_order_id] = order.id
             pending = order.model_copy(update={"status": OrderStatus.PENDING_APPROVAL})
             ttl = self._proposal_ttl()

@@ -201,3 +201,58 @@ def test_candidate_level_is_weaker_evidence_labelled_and_kept_to_paper_accounts(
     assert len(paper["proposed"]) == 1
     [p] = rt.proposals()
     assert p["rationale"]["validation"]["level"] == "candidate" and "by chance" in p["rationale"]["validation"]["caveat"]
+
+
+def test_a_daily_position_on_an_instrument_with_live_prices_fills_is_protected_and_exits_on_its_strategy(rt):
+    """The Autopilot subscribes live prices for validated instruments. Live minutes must then drive fills and stops,
+    and the downloaded daily bars must still reach the daily strategy, so that its own exit signal is produced."""
+    from tests.integration.test_live import Feeder
+
+    with rt.db.session() as s:
+        opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
+    feeder = Feeder(rt.live_hub)
+    rt.live_source_factory = lambda _rt: [(feeder, lambda inst: inst.symbol if inst.symbol == "CYC/USD" else None)]
+    with rt.db.session() as s:
+        opp.scan(s, rt, "paper-main", "admin")
+    [p] = rt.proposals()
+    rt.live_subscribe([CYC], "admin")
+    rt.now[0] += timedelta(minutes=1)
+    feeder.trade("CYC/USD", p["entry_price"], rt.now[0], 50.0)
+    rt.resolve_approval(p["id"], True, "trader@example.com")
+    key = ("paper-main", CYC, "ema_crossover")
+    for k in range(1, 4):   # the next live minutes: the order must fill at the open of the first one after it
+        rt.now[0] += timedelta(minutes=1)
+        feeder.trade("CYC/USD", p["entry_price"], rt.now[0], 50.0)
+    assert rt.portfolio.qty(key) == pytest.approx(p["qty"], rel=1e-3), "a paper order on a live instrument with a daily strategy never filled"
+    stop = rt.engine.protections[key].stop_price
+    assert stop < p["entry_price"]
+
+    # The strategy's own exit: daily bars that turn the trend down, downloaded as usual.
+    bars = rt.test_bars
+    last = float(bars["close"].iloc[-1])
+    n = 40   # a long decline: enough for the slow average to be crossed (daily bars do not move stops on a live instrument)
+    closes = [last * (0.99 ** (k + 1)) for k in range(n)]
+    opens = [last] + closes[:-1]
+    falling = pd.DataFrame({"open": opens, "high": [max(o, c) * 1.001 for o, c in zip(opens, closes)], "low": [min(o, c) * 0.999 for o, c in zip(opens, closes)],
+                            "close": closes, "volume": 1e6}, index=pd.date_range(bars.index[-1] + pd.Timedelta(days=1), periods=n, freq="1D", name="ts"))
+    with rt.db.session() as s:
+        rt.store.save(s, CYC, "1d", Dataset(falling, DataKind.HISTORICAL, "test"))
+    rt.now[0] = falling.index[-1].to_pydatetime() + timedelta(days=1, hours=1)
+    for day in falling.index[::4]:   # exchange rates keep being published meanwhile
+        rt.add_fx_rate("USD", "EUR", 0.9, "manual", "admin", day.to_pydatetime())
+    fed = rt.drive_stored()
+    exits = [a for a in rt.engine.approvals.values() if a.order.reduce_only and a.order.instrument_id == CYC]
+    closed = [o for o in rt.engine.orders.values() if o.reduce_only and o.instrument_id == CYC and o.reason == "signal"]
+    assert exits or closed, "the daily strategy never saw the new daily bars, so its exit signal was never produced"
+    assert exits and exits[0].expires_at is None   # semi-automatic: the exit waits for approval, and a closing proposal never lapses
+
+    # And a resting stop on the internal paper account is triggered by live minutes.
+    rt2_price = stop * 0.98
+    if rt.portfolio.qty(key):
+        rt.now[0] += timedelta(minutes=1)
+        feeder.trade("CYC/USD", rt2_price, rt.now[0], 50.0)
+        rt.now[0] += timedelta(minutes=1)
+        feeder.trade("CYC/USD", rt2_price, rt.now[0], 50.0)
+        assert rt.portfolio.qty(key) == 0 and rt.portfolio.trades[-1].exit_reason == "stop_loss"
+        assert not [a for a in rt.engine.approvals.values() if a.order.instrument_id == CYC and a.order.reduce_only]   # the waiting exit is withdrawn
+    rt.live.stop()

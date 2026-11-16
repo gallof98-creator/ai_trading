@@ -138,6 +138,7 @@ class TradingRuntime:
         self.driven: dict[str, str] = {}  # instrument -> last stored daily bar fed to the engine for global (portfolio) strategies
         from ..global_markets.service import GlobalMarkets
 
+        self.engine._auto_exit = self._auto_exit
         self.global_markets = GlobalMarkets(self)
         self.provider_factory = None  # test hook: callable(name, api_key) -> PriceProvider
         self.download = None
@@ -153,6 +154,16 @@ class TradingRuntime:
         if inst.quote_currency != self.portfolio.base:
             bps += 2 * self.user_settings.fx_conversion_cost_bps
         return price * bps / 10_000 + (spread or 0.0)
+
+    def _auto_exit(self, order: Order) -> bool:
+        """Strategy exits close by themselves only if the user switched it on, and only on paper accounts."""
+        if not self.user_settings.auto_close_on_exit_signal or self.user_settings.trading_mode == "manual":
+            return False
+        try:
+            adapter = self.brokers.get(order.broker_id)
+        except BrokerError:
+            return False
+        return adapter.capabilities.is_simulated or getattr(adapter, "is_live", True) is False
 
     def _needs_approval(self, order: Order) -> bool:
         """Real-money orders wait for a human unless the user explicitly switched that off."""
@@ -883,9 +894,14 @@ class TradingRuntime:
             except FxRateUnavailable as exc:
                 raise RuntimeError_(f"No usable FX rate to value {instrument_id}: {exc}. Add a rate under Settings.") from None
 
-    def ingest(self, instrument_id: str, timeframe: str, dataset: Dataset, trade: bool = True, drive_without_deployment: bool = False) -> int:
+    def ingest(self, instrument_id: str, timeframe: str, dataset: Dataset, trade: bool = True, drive_without_deployment: bool = False,
+               market: bool = True, signals: bool = True) -> int:
         """Feed completed bars into the engine in time order. Returns the number of new bars processed.
-        `drive_without_deployment` lets live bars fill paper orders and check stops on instruments no strategy is deployed on."""
+
+        Two jobs, kept apart. MARKET: bars fill paper orders, trigger stops and targets and value positions. SIGNALS: bars
+        reach the strategies deployed on this timeframe. Normally one timeframe does both. For an instrument with live
+        prices, the live minutes do the market job (`drive_without_deployment`) whatever the strategy's timeframe, and
+        the strategy's own bars (aggregated or downloaded) arrive with `market=False`, so nothing is filled twice."""
         with self.lock:
             inst = self.registry.get(instrument_id)
             clean, report = validate_bars(dataset.bars, timeframe, get_calendar(inst.calendar))
@@ -900,11 +916,12 @@ class TradingRuntime:
                 return 0
             exec_tf = self._exec_tf(instrument_id)
             delta = tf_delta(timeframe)
-            drive = trade and (timeframe == exec_tf or (exec_tf is None and drive_without_deployment))
-            if drive:
+            drive = trade and market and (timeframe == exec_tf or drive_without_deployment)
+            think = trade and signals and timeframe == exec_tf
+            if drive or think:
                 self._require_fx(instrument_id, new.index[0].to_pydatetime())
             self.kinds[instrument_id] = dataset.kind.value
-            deps = [d for d in self.deployments.values() if d.instrument_id == instrument_id] if drive else []
+            deps = [d for d in self.deployments.values() if d.instrument_id == instrument_id] if think else []
             for i in range(len(new)):
                 row = new.iloc[i]
                 t_open = new.index[i].to_pydatetime()
@@ -912,10 +929,14 @@ class TradingRuntime:
                 if drive:
                     self.engine.on_bar_open(instrument_id, t_open, float(row.open), float(row.volume), delta)
                 cache = new.iloc[: i + 1] if cache is None else pd.concat([cache, new.iloc[i: i + 1]])
-                if not drive:
+                if drive:
+                    self.engine.on_bar_close(instrument_id, t_open, float(row.high), float(row.low), float(row.close), delta)
+                elif market:
                     self.portfolio.mark(instrument_id, float(row.close), t_close)
+                if not think:
+                    if drive:
+                        self.engine.end_of_timestamp(t_close, reconcile=True)
                     continue
-                self.engine.on_bar_close(instrument_id, t_open, float(row.high), float(row.low), float(row.close), delta)
                 for dep in deps:
                     frame = cache
                     if dep.timeframe != timeframe:
@@ -925,13 +946,14 @@ class TradingRuntime:
                     signal = self.signals.latest(frame, dep.strategy, instrument_id, dep.timeframe)
                     if signal is not None:
                         self.engine.on_signal(signal, dep)
-                self.engine.end_of_timestamp(t_close, reconcile=True)
+                if drive:  # signal-only bars (e.g. yesterday's daily bar on a live instrument) are not a valuation moment
+                    self.engine.end_of_timestamp(t_close, reconcile=True)
             self.bars[key] = cache.iloc[-CACHE_BARS:]
             self.journal._write(lambda session: self.store.save(session, instrument_id, timeframe, Dataset(new, dataset.kind, dataset.source)))
             if not report.ok:
                 self.notifier.notify(self.clock(), "system", "warning", f"Data quality issue: {instrument_id} {timeframe}",
                                      f"{report.duplicates_removed} duplicates, {report.invalid_rows_removed} invalid, {report.missing_bars} missing bars")
-            if drive:
+            if drive or think:
                 self.performance_monitor.check(self.portfolio.trades, self.clock())
             self.persist()
             return len(new)
@@ -1108,10 +1130,12 @@ class TradingRuntime:
             done += self.ingest(instrument_id, timeframe, Dataset(late, DataKind.REALTIME, source), trade=False)
         if len(fresh):
             if timeframe == "1m":
-                done += self.ingest(instrument_id, "1m", Dataset(fresh, DataKind.REALTIME, source), trade=exec_tf in (None, "1m"), drive_without_deployment=True)
+                # Minutes do the market job (fills, stops) whatever the strategy's timeframe; they reach one-minute strategies only.
+                done += self.ingest(instrument_id, "1m", Dataset(fresh, DataKind.REALTIME, source), drive_without_deployment=True, signals=exec_tf == "1m")
                 self._live_minute_checks(instrument_id, float(fresh["close"].iloc[-1]))
             else:
-                done += self.ingest(instrument_id, timeframe, Dataset(fresh, DataKind.REALTIME, source), trade=timeframe == exec_tf)
+                # The official minutes of the same instrument already filled orders and checked stops: this bar brings signals only.
+                done += self.ingest(instrument_id, timeframe, Dataset(fresh, DataKind.REALTIME, source), trade=timeframe == exec_tf, market=False)
         return done
 
     def _on_live_bar(self, instrument_id: str, frame: pd.DataFrame, provider: str) -> None:
@@ -1123,7 +1147,7 @@ class TradingRuntime:
             return
         source = f"live:{provider}"
         exec_tf = self._exec_tf(instrument_id)
-        self.ingest(instrument_id, "1m", Dataset(frame, DataKind.REALTIME, source), trade=exec_tf in (None, "1m"), drive_without_deployment=True)
+        self.ingest(instrument_id, "1m", Dataset(frame, DataKind.REALTIME, source), drive_without_deployment=True, signals=exec_tf == "1m")
         self._live_minute_checks(instrument_id, float(frame["close"].iloc[-1]))
         if exec_tf in (None, "1m") or tf_delta(exec_tf) >= pd.Timedelta(days=1):
             return
@@ -1136,7 +1160,8 @@ class TradingRuntime:
         if ds is None or ds.kind is DataKind.SIMULATED:
             return
         bar = resample(ds.bars, "1m", exec_tf, drop_incomplete=False)
-        self.ingest(instrument_id, exec_tf, Dataset(bar[bar.index == closes - delta], DataKind.REALTIME, source))
+        # The minutes already filled orders and checked stops: this bar only reaches the strategy.
+        self.ingest(instrument_id, exec_tf, Dataset(bar[bar.index == closes - delta], DataKind.REALTIME, source), market=False)
 
     def reference_price(self, instrument_id: str) -> dict:
         """The price an order may be sized on, with where it came from. A live-subscribed instrument must have a
@@ -1188,16 +1213,17 @@ class TradingRuntime:
                         events.setdefault(ts, []).append((iid, row))
             # Strategies deployed on daily bars of instruments without a live feed advance on downloaded bars too.
             daily = sorted({d.instrument_id for d in self.deployments.values()
-                            if self._exec_tf(d.instrument_id) == "1d" and d.instrument_id not in self.live.subscribed
-                            and self.kinds.get(d.instrument_id) != DataKind.SIMULATED.value})
+                            if self._exec_tf(d.instrument_id) == "1d" and self.kinds.get(d.instrument_id) != DataKind.SIMULATED.value})
             fed = 0
             for iid in daily:
                 with self.db.session() as session:
                     ds = self.store.load(session, iid, "1d")
                 if ds is not None and ds.kind is not DataKind.SIMULATED:
                     try:
-                        fed += self.ingest(iid, "1d", ds, trade=(iid, "1d") in self.bars)  # the first pass only warms up indicators
-                    except (RuntimeError_, ValueError) as exc:
+                        # The first pass only warms up indicators. With live prices, the minutes do the market job: daily bars bring signals only.
+                        minutes = iid in self.live.subscribed or self.intraday.official(iid)
+                        fed += self.ingest(iid, "1d", ds, trade=(iid, "1d") in self.bars, market=not minutes)
+                    except (RuntimeError_, ValueError, LookupError) as exc:  # LookupError: no exchange rate for that day
                         self.notifier.notify(self.clock(), "system", "warning", f"Daily bars of {iid} were not applied", str(exc))
             delta, bars_used = pd.Timedelta(days=1), fed
             fills_before = len(self.portfolio.trades) + sum(1 for s in self.portfolio.slices.values() if s.qty)
