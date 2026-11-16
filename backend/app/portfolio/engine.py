@@ -14,12 +14,16 @@ import numpy as np
 import pandas as pd
 
 from ..brokers.base import BrokerError, BrokerManager
-from ..domain.models import Fill
+from ..core.logging import get_logger
+from ..domain.models import AssetClass, Fill
 from ..instruments.registry import InstrumentRegistry
 from ..market_data.fx import FxRateProvider
 from ..risk.models import Exposure, PortfolioState
 
 Key = tuple[str, str, str | None]  # broker, instrument, strategy
+
+
+log = get_logger(__name__)
 
 
 @dataclass
@@ -71,6 +75,10 @@ class PortfolioEngine:
         self.reconciled = True
         self.valuation_problems: dict[str, str] = {}  # broker id -> why its figures could not be read just now
         self._last_balance: dict = {}
+        # broker id -> [equity in base currency, capital basis] at the last recorded observation. An account that joins,
+        # leaves or changes its capital basis (virtual capital set, deposit, withdrawal) is a flow of capital, not a gain
+        # or a loss: the daily and peak reference levels move with it. None until the first observation.
+        self._contrib: dict[str, list] | None = None
         self.discrepancies: list[str] = []
 
     # ------------------------------------------------------------------ fills and marks
@@ -142,7 +150,7 @@ class PortfolioEngine:
                 self.valuation_problems.pop(adapter.broker_id, None)
                 self._last_balance[adapter.broker_id] = bal
             q = self.fx.quote(bal.currency, self.base, ts)
-            out.append({"broker_id": adapter.broker_id, "currency": bal.currency, "cash": bal.cash, "equity": bal.equity,
+            out.append({"broker_id": adapter.broker_id, "basis": getattr(adapter, "capital_basis", "account"), "currency": bal.currency, "cash": bal.cash, "equity": bal.equity,
                         "margin_used": bal.margin_used, "fx_rate": q.rate, "fx_ts": q.ts.isoformat(), "fx_source": q.source,
                         "equity_base": bal.equity * q.rate, "margin_base": bal.margin_used * q.rate,
                         "is_simulated": adapter.capabilities.is_simulated if adapter.is_connected() else None,
@@ -188,14 +196,33 @@ class PortfolioEngine:
 
     def revalue(self, ts: datetime) -> PortfolioState:
         """Record an equity observation and roll the daily / peak reference levels."""
-        equity = self.equity(ts)
+        balances = self.broker_balances(ts)
+        equity = sum(b["equity_base"] for b in balances)
         if self.valuation_problems:
             # An account could not be read: its figures are old or missing, so this is not a true observation. It is not
             # recorded, and it does not move the daily or peak reference levels.
             return self.state(ts)
+        current = {b["broker_id"]: [b["equity_base"], b["basis"]] for b in balances}
         if self._day != ts.date():
             self._day = ts.date()
             self.day_start_equity = self.equity_curve[-1][1] if self.equity_curve else equity
+        if self._contrib is None:
+            # First observation with this bookkeeping (a new installation, or one updated from a version without it):
+            # earlier reference levels may include accounts valued on another basis, so they start again from here.
+            self.day_start_equity = self.peak_equity = equity
+        else:
+            flow = 0.0
+            for broker_id, (value, basis) in current.items():
+                before = self._contrib.get(broker_id)
+                if before is None or before[1] != basis:
+                    flow += value - (before[0] if before else 0.0)
+            flow -= sum(v for broker_id, (v, _) in self._contrib.items() if broker_id not in current)
+            if flow:
+                self.day_start_equity = (self.day_start_equity or 0.0) + flow
+                self.peak_equity = (self.peak_equity or 0.0) + flow
+                if self.day_start_equity <= 0 or self.peak_equity <= 0:
+                    self.day_start_equity = self.peak_equity = equity
+        self._contrib = current
         self.peak_equity = max(self.peak_equity or equity, equity)
         self.equity_curve.append((ts, equity))
         self.exposure_curve.append(bool(self.slices))
@@ -218,10 +245,36 @@ class PortfolioEngine:
             for iid in sorted(set(reported) | set(internal)):
                 a, b = internal.get(iid, 0.0), reported.get(iid, 0.0)
                 lot = self.registry.get(iid).lot_size if not iid.startswith("UNMAPPED:") else 0.0
+                if abs(a - b) > max(lot / 2, 1e-9) and self._fee_in_kind(adapter, iid, a, b):
+                    continue
                 if abs(a - b) > max(lot / 2, 1e-9):
                     problems.append(f"{adapter.broker_id} {iid}: internal {a:g} vs broker {b:g}")
         self.discrepancies, self.reconciled = problems, not problems
         return problems
+
+    FEE_IN_KIND_MAX = 0.01  # crypto venues charge at most a fraction of a percent; anything larger is a real discrepancy
+
+    def _fee_in_kind(self, adapter, instrument_id: str, internal: float, reported: float) -> bool:
+        """Crypto brokers (Alpaca among them) take their trading fee out of the coins bought: buying 0.01 BTC delivers
+        about 0.00997. A long crypto holding slightly SMALLER than the books, by at most FEE_IN_KIND_MAX, is that fee: the
+        books take the broker's quantity and the missing coins are booked as commission at the average price. Anything
+        else (more coins than the books, a short, a larger gap) stays a discrepancy and stops new risk."""
+        if adapter.capabilities.is_simulated or instrument_id.startswith("UNMAPPED:"):
+            return False
+        inst = self.registry.get(instrument_id)
+        if inst.asset_class is not AssetClass.CRYPTO or internal <= 0 or not (0 < internal - reported <= self.FEE_IN_KIND_MAX * internal):
+            return False
+        keys = [k for k, s in self.slices.items() if k[0] == adapter.broker_id and k[1] == instrument_id and s.qty > 0]
+        if not keys or any(self.slices[k].qty <= 0 for k in keys):
+            return False
+        scale = reported / internal
+        for k in keys:
+            s = self.slices[k]
+            fee = s.qty * (1 - scale) * s.avg_price * inst.contract_multiplier
+            s.qty *= scale
+            s.entry_commission += fee
+        log.info("fee_in_kind_booked", broker_id=adapter.broker_id, instrument_id=instrument_id, books=internal, broker=reported)
+        return True
 
     # ------------------------------------------------------------------ persistence
     def to_state(self, curve_tail: int = 5000) -> dict:
@@ -231,6 +284,7 @@ class PortfolioEngine:
             "equity_curve": [[t.isoformat(), e] for t, e in self.equity_curve[-curve_tail:]],
             "exposure_curve": self.exposure_curve[-curve_tail:], "day_start_equity": self.day_start_equity, "peak_equity": self.peak_equity,
             "day": self._day.isoformat() if self._day else None, "reconciled": self.reconciled, "discrepancies": self.discrepancies,
+            "contributions": self._contrib,
         }
 
     def load_state(self, state: dict) -> None:
@@ -245,6 +299,7 @@ class PortfolioEngine:
         self.day_start_equity, self.peak_equity = state["day_start_equity"], state["peak_equity"]
         self._day = date.fromisoformat(state["day"]) if state["day"] else None
         self.reconciled, self.discrepancies = state["reconciled"], list(state["discrepancies"])
+        self._contrib = state.get("contributions")
 
     # ------------------------------------------------------------------ analytics
     @staticmethod

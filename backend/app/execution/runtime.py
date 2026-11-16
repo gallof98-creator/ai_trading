@@ -360,6 +360,7 @@ class TradingRuntime:
             self.portfolio.equity_curve, self.portfolio.exposure_curve = [], []
             self.portfolio.peak_equity = self.portfolio.day_start_equity = None
             self.portfolio._day = None
+            self.portfolio._contrib = None
             for approval_id in [a.id for a in self.engine.approvals.values() if a.order.broker_id == account_id]:
                 self.engine.resolve_approval(approval_id, False, f"{actor}:reset", now)
             for o in [o for o in self.engine.orders.values() if o.broker_id == account_id and o.is_open]:

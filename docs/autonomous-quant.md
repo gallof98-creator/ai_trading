@@ -299,6 +299,18 @@ Emergency Stop blocks new orders. Then several weeks of paper results compared w
 The risk engine judges every new order against open positions plus entry orders already sent and not yet filled. Before this, several
 orders sent in the same moment could each fit a limit and together exceed it.
 
+## Capital flows and crypto fees
+
+The daily-loss and drawdown limits compare equity with the start of the day and with its peak. An account that is
+connected or disconnected, or whose capital basis changes (a broker's own balance replaced by a virtual capital, a virtual
+deposit or withdrawal), moves those reference levels by the same amount: it is capital moving, not a gain or a loss. An
+account that leaves does so at its current value, so a loss it made that day still counts. After the update that
+introduced this, the reference levels start again once from the current equity.
+
+Alpaca, like most crypto venues, takes its trading fee out of the coins bought. A long crypto holding at a broker that is
+smaller than the books by at most 1% is booked as that fee (the books take the broker's quantity, the difference is a
+commission at the average price). More coins than the books, a short, or a larger gap remain a discrepancy and stop new risk.
+
 ## Limits
 
 - Crypto is followed whatever its traded value: the volume in Alpaca's crypto bars is Alpaca's own venue, a small part of the market.

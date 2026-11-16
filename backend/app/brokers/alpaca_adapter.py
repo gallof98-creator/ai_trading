@@ -209,6 +209,14 @@ class AlpacaAdapter(BrokerAdapter):
                 "status": a.get("status"), "pattern_day_trader": a.get("pattern_day_trader"), "environment": self.environment,
                 "stale": snap.get("stale", False), "error": snap.get("error")}
 
+    @property
+    def capital_basis(self) -> str:
+        """What the reported equity stands for. When it changes (virtual capital set up, a deposit or a withdrawal), the
+        jump in equity is capital moving, not a gain or a loss."""
+        if "baseline_equity" not in self.state:
+            return "account"
+        return f"virtual:{self.state.get('linked_at')}:{self.state.get('virtual_start'):.6f}"
+
     def get_account_balance(self) -> AccountBalance:
         a = self.broker_account()
         if "baseline_equity" not in self.state:

@@ -1,0 +1,85 @@
+"""Accounts joining, leaving or changing their capital basis are flows of capital, never gains or losses; and a crypto
+broker's fee taken out of the coins bought is booked as a commission instead of stopping trading as a discrepancy."""
+from datetime import timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from app.domain.models import AccountBalance, AssetClass, Position
+from tests.integration.test_semi_auto import T0, make_rt
+
+
+def loss_and_drawdown(rt):
+    st = rt.portfolio.revalue(rt.clock())
+    return 1 - st.equity / st.day_start_equity, 1 - st.equity / st.peak_equity
+
+
+class ExternalAccount:
+    """A minimal non-simulated account whose equity and capital basis the test sets."""
+
+    def __init__(self, broker_id, equity, basis="account"):
+        self.broker_id, self.equity, self.capital_basis = broker_id, equity, basis
+        self.capabilities = SimpleNamespace(is_simulated=False, asset_classes=frozenset({AssetClass.CRYPTO}))
+        self.positions = []
+
+    def get_account_balance(self):
+        return AccountBalance(broker_id=self.broker_id, currency="EUR", cash=self.equity, equity=self.equity)
+
+    def get_positions(self):
+        return self.positions
+
+    def is_connected(self):
+        return True
+
+
+def test_connecting_a_large_account_then_switching_it_to_a_small_virtual_capital_is_not_a_loss(tmp_path):
+    rt = make_rt(tmp_path)
+    assert loss_and_drawdown(rt) == (0.0, 0.0)
+    alpaca = ExternalAccount("alpaca-paper", 86_000.0)  # the broker's own paper balance, counted before a virtual capital is set
+    rt.brokers.register(alpaca)
+    rt.now[0] += timedelta(minutes=1)
+    assert loss_and_drawdown(rt) == pytest.approx((0.0, 0.0))
+    alpaca.equity, alpaca.capital_basis = 1_000.0, "virtual:2026-11-16:1000"
+    rt.now[0] += timedelta(minutes=1)
+    assert loss_and_drawdown(rt) == pytest.approx((0.0, 0.0)), "a change of capital basis was taken for a 99% loss"
+    alpaca.equity = 900.0  # a real loss on the virtual capital still counts
+    rt.now[0] += timedelta(minutes=1)
+    loss, dd = loss_and_drawdown(rt)
+    assert loss == pytest.approx(100 / 2_000) and dd == pytest.approx(100 / 2_000)
+    rt.brokers.remove("alpaca-paper")
+    rt.now[0] += timedelta(minutes=1)
+    loss, dd = loss_and_drawdown(rt)
+    # The account left with what it had (a withdrawal at its current value): the 100 it lost today still counts, now
+    # against the 1,100 that remained in play.
+    assert loss == pytest.approx(100 / 1_100) and dd == pytest.approx(100 / 1_100)
+
+
+def test_reference_levels_survive_a_restart_and_restart_once_after_an_update(tmp_path):
+    rt = make_rt(tmp_path)
+    rt.portfolio.revalue(rt.clock())
+    state = rt.portfolio.to_state()
+    assert state["contributions"] == {"paper-main": [pytest.approx(1000.0), "account"]}
+    old = {k: v for k, v in state.items() if k != "contributions"}
+    old["peak_equity"] = old["day_start_equity"] = 87_000.0   # recorded by an earlier version while a broker balance was counted
+    rt.portfolio.load_state(old)
+    assert loss_and_drawdown(rt) == (0.0, 0.0)
+
+
+def test_a_crypto_fee_taken_in_coins_is_booked_as_commission_not_a_discrepancy(tmp_path):
+    rt = make_rt(tmp_path)
+    iid = "CRYPTO:BTC/USD"
+    acct = ExternalAccount("alpaca-paper", 1_000.0)
+    rt.brokers.register(acct)
+    from app.portfolio.engine import Slice
+
+    key = ("alpaca-paper", iid, "ema_crossover")
+    rt.portfolio.slices[key] = Slice(0.01, 68_000.0, T0, 1.0)
+    acct.positions = [Position(broker_id="alpaca-paper", instrument_id=iid, qty=0.009975, avg_price=68_000.0)]
+    assert rt.portfolio.reconcile() == []
+    assert rt.portfolio.slices[key].qty == pytest.approx(0.009975)
+    assert rt.portfolio.slices[key].entry_commission == pytest.approx(1.0 + 0.000025 * 68_000.0)
+    # More coins than the books, or a gap larger than any fee, is still a discrepancy.
+    acct.positions = [Position(broker_id="alpaca-paper", instrument_id=iid, qty=0.0095, avg_price=68_000.0)]
+    assert rt.portfolio.reconcile() and not rt.portfolio.reconciled
+    acct.positions = [Position(broker_id="alpaca-paper", instrument_id=iid, qty=0.011, avg_price=68_000.0)]
+    assert rt.portfolio.reconcile()
