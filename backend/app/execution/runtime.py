@@ -140,6 +140,8 @@ class TradingRuntime:
         # "broker|instrument|strategy" -> the evidence an entry rested on (validated, candidate, exploration), so results
         # are reported per level and exploratory trades never mix with the others.
         self.evidence: dict[str, str] = {}
+        self._last_order_poll: datetime | None = None
+        self.order_poll_seconds = 10.0
         from ..global_markets.service import GlobalMarkets
 
         self.engine._auto_exit = self._auto_exit
@@ -1163,8 +1165,16 @@ class TradingRuntime:
             closed = self.engine.check_soft_exits(instrument_id, price, self.clock())
             if closed:
                 self.persist()
-        with self.lock:  # orders working at an external broker are followed up on every live minute
+        # Orders working at an external broker are followed up with the live minutes, at most once every few seconds:
+        # every followed instrument closes its minute at the same moment, and one request round per minute is enough.
+        # Asking the broker once per instrument kept the engine locked, and every page waiting, for seconds each minute.
+        # An exit just sent is followed up at once.
+        now = self.clock()
+        if not closed and self._last_order_poll is not None and (now - self._last_order_poll).total_seconds() < self.order_poll_seconds:
+            return
+        with self.lock:
             if any(o.is_open and not o.is_simulated_venue for o in self.engine.orders.values()):
+                self._last_order_poll = now
                 self.engine.poll_orders(self.clock())
                 self.persist()
 
@@ -1513,6 +1523,15 @@ class TradingRuntime:
 
     # ------------------------------------------------------------------ views
     def overview(self) -> dict:
+        # Broker figures are read before taking the engine lock (the adapters cache them): a slow broker then delays
+        # this page only, not every page and every trading decision waiting for the lock.
+        for adapter in self.brokers.all():
+            refresh = getattr(adapter, "_refresh", None)
+            if refresh is not None:
+                try:
+                    refresh()
+                except Exception:  # reported, with the last known figures, by the valuation below
+                    pass
         with self.lock:
             now = self.clock()
             if not self.brokers.all():

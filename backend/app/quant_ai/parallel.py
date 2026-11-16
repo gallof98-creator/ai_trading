@@ -22,10 +22,11 @@ MAX_AUTO_WORKERS = 8
 
 
 def worker_count(configured: int = 0) -> int:
-    """`configured` processes, or every core but one (at most eight) when it is 0."""
+    """`configured` processes, or half the cores (at most eight) when it is 0: the rest stay free for the pages, the
+    live feeds and the trading engine, which share the machine with the validations."""
     if configured > 0:
         return configured
-    return max(1, min(MAX_AUTO_WORKERS, (os.cpu_count() or 2) - 1))
+    return max(1, min(MAX_AUTO_WORKERS, (os.cpu_count() or 2) // 2))
 
 
 class ValidationPool:

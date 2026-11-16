@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi.responses import JSONResponse
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import text
 
 from . import __version__
@@ -115,6 +116,9 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
 
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True,
                        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type", "X-Requested-With"])
+    # Large JSON answers (instrument lists, validations) are compressed, typically to a tenth. The live price stream
+    # (text/event-stream) is left uncompressed by this middleware, so it is never buffered.
+    app.add_middleware(GZipMiddleware, minimum_size=2048)
     api_limiter = RateLimiter(settings.api_rate_limit_per_minute)
 
     @app.middleware("http")

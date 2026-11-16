@@ -87,7 +87,7 @@ def dashboard(_: User = Depends(viewer), session: Session = Depends(get_session)
                           "live_trading_authorized": rt.settings.live_trading_authorized},
         "overview": ov, "proposals": rt.proposals(), "brokers": rt.broker_status(), "live": rt.live_hub.status(),
         "live_subscriptions": [{"instrument_id": i, "source": src, "quote": rt.live_hub.quote(i)} for i, src in sorted(rt.live.subscribed.items())],
-        "universes": opportunities.universes(session, rt), "validations": opportunities.validations(session, rt.clock()),
+        "universes": opportunities.universes(session, rt), **_validation_rows(session, rt),
         "deployments": [{"id": k, "strategy": d.strategy.name, "instrument_id": d.instrument_id, "timeframe": d.timeframe, "broker_id": d.broker_id}
                         for k, d in rt.deployments.items()],
         "performance_by_strategy": sorted(by_strategy.values(), key=lambda r: -r["pnl_quote"]),
@@ -101,6 +101,19 @@ def dashboard(_: User = Depends(viewer), session: Session = Depends(get_session)
 
 class PauseIn(BaseModel):
     reason: str = Field("paused by the user", max_length=200)
+
+
+def _validation_rows(session: Session, rt: TradingRuntime, limit: int = 400) -> dict:
+    """What the dashboard's validation table shows, and no more: the full records (every check, statistic and
+    robustness figure) are at /api/quant/validations. Tradable levels first, then the most recently tested."""
+    rank = {"validated": 0, "candidate": 1, "exploration": 2}
+    rows = sorted(opportunities.validations(session, rt.clock()), key=lambda v: v["tested_at"], reverse=True)
+    rows.sort(key=lambda v: rank.get(opportunities.level_of(v) or "", 3))
+    keep = ("id", "strategy", "instrument_id", "timeframe", "status", "profitable_folds", "folds", "tested_at", "due_for_retest")
+    return {"validations": [{**{k: v.get(k) for k in keep}, "level": opportunities.level_of(v),
+                             "out_of_sample": {k: (v.get("out_of_sample") or {}).get(k) for k in ("total_return", "max_drawdown", "number_of_trades")}}
+                            for v in rows[:limit]],
+            "validations_total": len(rows)}
 
 
 @router.post("/pause", status_code=status.HTTP_204_NO_CONTENT)

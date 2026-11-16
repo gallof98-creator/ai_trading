@@ -572,3 +572,23 @@ def test_automatic_exits_apply_to_paper_accounts_only_and_only_when_switched_on(
     rt.brokers.get("alpaca-paper")._authorization = object()                                    # what a live connection looks like
     assert not rt._auto_exit(sell("alpaca-paper"))                                              # never on a real-money account
     rt.live.stop()
+
+
+def test_orders_at_a_broker_are_followed_up_once_per_round_of_live_minutes_not_once_per_instrument(tmp_path):
+    """Every followed instrument closes its minute at the same moment. Asking the broker about working orders once per
+    instrument kept the engine locked (and every page waiting) for seconds each minute."""
+    from app.domain.models import Order, OrderStatus, Side
+
+    rt = make_rt(tmp_path)
+    working = Order(broker_id="alpaca-paper", instrument_id="CRYPTO:BTC/USD", side=Side.BUY, qty=1, status=OrderStatus.SUBMITTED, is_simulated=False)
+    rt.engine.orders[working.id] = working
+    calls = []
+    rt.engine.poll_orders = lambda ts: calls.append(ts)
+    rt.persist = lambda: None
+    for k in range(30):
+        rt._live_minute_checks(f"STOCK:S{k}", 10.0)
+    assert len(calls) == 1
+    rt.now[0] += timedelta(minutes=1)
+    for k in range(30):
+        rt._live_minute_checks(f"STOCK:S{k}", 10.0)
+    assert len(calls) == 2

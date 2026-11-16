@@ -227,7 +227,24 @@ def validate(session: Session, rt, strategy: str, instrument_id: str, timeframe:
     return record(session, tier, payload, rt.clock())
 
 
+_CACHE: dict = {}
+
+
 def validations(session: Session, now: datetime | None = None) -> list[dict]:
+    """See `_validations`. Every page refresh and every scan reads them, and the table only grows (each retest adds a
+    row), so the result is kept until a validation is recorded or the minute changes (expiry depends on the time)."""
+    from sqlalchemy import func
+
+    count, latest = session.execute(select(func.count(), func.max(ResearchItem.created_at)).where(ResearchItem.kind == "validation")).one()
+    key = (str(session.get_bind().url), count, latest, now.replace(second=0, microsecond=0) if now else None, CRITERIA["version"])
+    hit = _CACHE.get("validations")
+    if hit is None or hit[0] != key:
+        hit = (key, _validations(session, now))
+        _CACHE["validations"] = hit
+    return [dict(v) for v in hit[1]]  # top-level copies: callers may set fields without changing the cached result
+
+
+def _validations(session: Session, now: datetime | None = None) -> list[dict]:
     """The latest validation of every (strategy, instrument, timeframe), newest first.
 
     Two rules are applied here, on the whole set, because they depend on the other tests:
