@@ -325,6 +325,27 @@ QAT_SEC_USER_AGENT setting takes precedence). The SEC may refuse a generic addre
 "Results, fundamentals, news" step: filing index daily, reported figures after each new 10-Q/10-K (at least monthly), news
 every cycle. ETFs and crypto have no results or reports: only the news pause applies to them.
 
+## Positions you close or open yourself at the broker
+
+You may close, reduce or open positions directly in the broker's own app or website (Alpaca). On every round of order
+checks the platform compares its books with the broker's positions:
+
+* **closed or reduced there**: booked as an exit with the reason `closed_at_broker`, at the broker's own fill price for
+  that order (the latest filled order on the instrument that the platform did not send); if none is found, at the last
+  known price, and the alert says so. The position's stops and targets are cancelled, closing proposals withdrawn, and a
+  partial close resizes the stop of what is left (manual positions are reduced first, then the smallest);
+* **opened there**: followed as a manual position (`manual:broker`), without a stop;
+* **reversed** (long to short or the other way): left as a discrepancy for you to look at.
+
+A difference is taken over only when it is seen again at least 20 seconds later on freshly read figures, and never from
+figures the broker could not refresh, so a fill of the platform's own order is never mistaken for your action. While it
+waits for that confirmation (at most five minutes), and while one of the platform's orders on that instrument is on its
+way, it does not trip the reconciliation breaker. Resetting that breaker first takes in what you did at the broker.
+
+Before any closing order is sent to a broker that does not enforce reduce-only itself (Alpaca), the platform reads the
+position actually held there: if it is gone, nothing is sent; if it is smaller, only what is held is sold. A position you
+already closed can therefore never be sold again into a short.
+
 ## Capital flows and crypto fees
 
 The daily-loss and drawdown limits compare equity with the start of the day and with its peak. An account that is

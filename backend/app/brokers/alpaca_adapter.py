@@ -380,6 +380,17 @@ class AlpacaAdapter(BrokerAdapter):
                      limit_price=float(raw["limit_price"]) if raw.get("limit_price") else None, stop_price=float(raw["stop_price"]) if raw.get("stop_price") else None)
         return self._to_order(raw, base)
 
+    def closed_outside(self, instrument_id: str, side: str, known_client_ids: set[str]) -> float | None:
+        """Average fill price of the most recent filled order on this instrument and side that the platform did not send
+        (the user's own close in Alpaca's app or website), or None when there is none."""
+        rows = self._trading("GET", "/v2/orders", params={"status": "closed", "symbols": self._symbol(instrument_id), "limit": 50,
+                                                          "direction": "desc"}) or []
+        for raw in rows:
+            if (raw.get("side", "").lower() == side and raw.get("status") == "filled" and raw.get("client_order_id") not in known_client_ids
+                    and raw.get("filled_avg_price")):
+                return float(raw["filled_avg_price"])
+        return None
+
     def get_open_orders(self) -> list[Order]:
         reverse = {self.registry.to_broker(self.broker_id, i.id): i.id for i in self.registry.all() if self.registry.is_mapped(self.broker_id, i.id)}
         out = []

@@ -1204,8 +1204,10 @@ class TradingRuntime:
             return
         with self.lock:
             if any(o.is_open and not o.is_simulated_venue for o in self.engine.orders.values()):
-                self._last_order_poll = now
                 self.engine.poll_orders(self.clock())
+            self._last_order_poll = now
+            # Positions closed or opened directly at the broker by the user are taken into the books.
+            if self.engine.sync_with_broker(self.clock(), fresh=True) or any(o.is_open and not o.is_simulated_venue for o in self.engine.orders.values()):
                 self.persist()
 
     def ingest_official(self, instrument_id: str, timeframe: str, frame: pd.DataFrame, source: str) -> int:
@@ -1365,6 +1367,7 @@ class TradingRuntime:
             now = self.clock()
             self.broker_monitor.check(now)
             self.engine.poll_orders(now)
+            self.engine.sync_with_broker(now, fresh=True)
             for iid in sorted({d.instrument_id for d in self.deployments.values()}):
                 if self.kinds.get(iid) == DataKind.SIMULATED.value:
                     self.feed_status[iid] = "simulated replay (no live feed)"
@@ -1454,6 +1457,15 @@ class TradingRuntime:
         with self.lock:
             if name not in self.risk.breakers:
                 raise RuntimeError_(f"Circuit breaker {name} is not tripped")
+            if name == "reconciliation":
+                # What the user did directly at the broker is taken into the books first, on figures read now.
+                for adapter in self.brokers.all():
+                    if hasattr(adapter, "invalidate"):
+                        adapter.invalidate()
+                taken = self.engine.sync_with_broker(self.clock(), confirmed=True)
+                if taken:
+                    with self.db.session() as session:
+                        audit.record(session, actor, "positions.synced_from_broker", changes=taken[:50])
             if name == "reconciliation" and self.portfolio.reconcile():
                 raise RuntimeError_("Positions still do not reconcile: " + "; ".join(self.portfolio.discrepancies))
             self.risk.reset_breaker(name, self.clock(), actor)

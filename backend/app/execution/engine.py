@@ -97,6 +97,10 @@ class Journal:
         self.alerts.append({"ts": ts, "category": category, "severity": severity, "title": title, "body": body})
 
 
+EXTERNAL_STRATEGY = "manual:broker"  # positions the user opened directly at a broker
+EXTERNAL_CONFIRM_SECONDS = 20.0
+
+
 class TradingEngine:
     def __init__(self, registry: InstrumentRegistry, brokers: BrokerManager, portfolio: PortfolioEngine, risk: RiskEngine,
                  fx: FxRateProvider, limits: Callable[[], RiskLimits], mode: Callable[[], TradingMode], journal: Journal | None = None,
@@ -119,6 +123,7 @@ class TradingEngine:
         self._entry_block: Callable[[Order], str | None] = lambda order: None
         self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
         self._rationale: dict = {}  # set while a signal is being turned into orders
+        self._external_seen: dict[tuple[str, str], tuple[float, float, datetime]] = {}  # differences with the broker awaiting confirmation
         self._unconfirmed: dict[str, str] = {}  # order id -> when: sent, no answer, unknown whether the broker has it
         self._working: dict[str, float] = {}  # order id -> signed notional (base currency) of entries sent but not yet filled
         self.orders: dict[str, Order] = {}
@@ -183,7 +188,15 @@ class TradingEngine:
     def end_of_timestamp(self, ts: datetime, reconcile: bool = False) -> None:
         """Call once after all bars closing at `ts`: revalue, run circuit breakers, apply the emergency policy."""
         if reconcile:
-            problems = self.portfolio.reconcile()
+            self.sync_with_broker(ts)
+            # A difference waiting for its confirmation as the user's own action at the broker is not a fault (for a few
+            # minutes at most: one that is never confirmed becomes one).
+            pending = {k for k, (_, _, seen) in self._external_seen.items() if ts - seen < timedelta(minutes=5)}
+            # Nor is one on an instrument with one of our orders on its way: the broker may show the fill before we read it.
+            protective = {o.id for p in self.protections.values() for o in (p.stop_order, p.target_order) if o is not None}
+            pending |= {(o.broker_id, o.instrument_id) for o in self.orders.values()
+                        if o.is_open and not o.is_simulated_venue and o.id not in protective}
+            problems = self.portfolio.reconcile(pending)
             if problems:
                 self.journal.alert(ts, "reconciliation", "critical", "Positions do not reconcile with the broker", "; ".join(problems))
         state = self.portfolio.revalue(ts)
@@ -513,6 +526,17 @@ class TradingEngine:
             adapter = self.brokers.get(order.broker_id)
         except BrokerError as exc:
             return self._reject(order, str(exc), ts)
+        if order.reduce_only:
+            covered = self._broker_holding(order, adapter, ts)
+            if covered is not None and covered <= 0:
+                # Nothing left to close at the broker (the user closed it there): sending would open the opposite position.
+                self._entry_protection.pop(order.id, None)
+                rejected = self._reject(order, "the position is no longer held at the broker (closed outside the platform); nothing was sent", ts)
+                self.sync_with_broker(ts, only=(order.broker_id, order.instrument_id))
+                return rejected
+            if covered is not None and covered < order.qty - 1e-12:
+                order = order.model_copy(update={"qty": covered, "reason": f"{order.reason or ''} | reduced to the {covered:g} held at the broker".strip(" |")})
+                self._record(order)
         to_send = self._for_broker(order, adapter)
         last_error = ""
         for attempt in range(self.retry.max_attempts):
@@ -552,6 +576,135 @@ class TradingEngine:
         # the outcome is unknown: it is looked up again (see poll_orders) and the instrument takes no new entry meanwhile.
         self._unconfirmed[order.id] = ts.isoformat()
         return self._reject(order, f"broker unreachable after {self.retry.max_attempts} attempts, outcome unknown: {last_error}", ts, alert=False)
+
+    def _broker_holding(self, order: Order, adapter, ts: datetime) -> float | None:
+        """How much of the position this closing order reduces is actually held at the broker, in the order's direction;
+        None when it need not or cannot be checked (simulated venue, venue enforcing reduce-only, positions unreadable)."""
+        caps = adapter.capabilities
+        if caps.is_simulated or caps.supports_reduce_only:
+            return None
+        try:
+            if hasattr(adapter, "invalidate"):
+                adapter.invalidate()  # the broker's current position, not a cached one
+            held = sum(p.qty for p in adapter.get_positions() if p.instrument_id == order.instrument_id)
+        except BrokerError:
+            return None  # an exit is never held back because the positions could not be read
+        if getattr(adapter, "stale", False):
+            return None
+        return max(0.0, held if order.side is Side.SELL else -held)
+
+    def sync_with_broker(self, ts: datetime, only: tuple[str, str] | None = None, confirmed: bool = False, fresh: bool = False) -> list[str]:
+        """Take into the books what the user did directly at a broker. A position closed or reduced there is booked as an
+        exit ("closed_at_broker"), at the broker's own fill price when it can be found, and its stops, targets and closing
+        proposals are withdrawn. A position opened there is adopted as a manual position (no stop is placed for it).
+        Instruments with a platform order on its way are left for the next check. Returns what was taken over."""
+        notes: list[str] = []
+        for adapter in self.brokers.all():
+            if adapter.capabilities.is_simulated or (only and adapter.broker_id != only[0]):
+                continue
+            try:
+                if fresh and hasattr(adapter, "invalidate"):
+                    adapter.invalidate()  # read the broker's positions now, not a cached copy
+                if not adapter.is_connected() or getattr(adapter, "stale", False):
+                    continue  # old figures could look like a change: nothing is taken over from them
+                reported = {}
+                for p in adapter.get_positions():
+                    reported.setdefault(p.instrument_id, []).append(p)
+            except BrokerError:
+                continue
+            internal: dict[str, float] = {}
+            for (b, iid, _), sl in self.portfolio.slices.items():
+                if b == adapter.broker_id:
+                    internal[iid] = internal.get(iid, 0.0) + sl.qty
+            protective = {o.id for p in self.protections.values() for o in (p.stop_order, p.target_order) if o is not None}
+            in_flight = {o.instrument_id for o in self.orders.values() if o.is_open and o.broker_id == adapter.broker_id and o.id not in protective}
+            for iid in sorted(set(internal) | set(reported)):
+                if (only and iid != only[1]) or iid.startswith("UNMAPPED:") or iid in in_flight:
+                    continue
+                a = internal.get(iid, 0.0)
+                b = sum(p.qty for p in reported.get(iid, []))
+                inst = self.registry.get(iid)
+                if abs(a - b) <= max(inst.lot_size / 2, 1e-9):
+                    continue
+                if inst.asset_class.value == "crypto" and 0 < a and 0 < a - b <= 0.01 * a:
+                    continue  # the fee taken in coins: booked by the portfolio reconciliation
+                same_side = a == 0 or b == 0 or (a > 0) == (b > 0)
+                if not same_side:
+                    continue  # reversed outside the platform: left as a discrepancy for a person to look at
+                # Taken over only when the same difference is seen again at least EXTERNAL_CONFIRM_SECONDS later: a
+                # broker's figures read a moment before one of our own fills must never be mistaken for the user's action.
+                seen = self._external_seen.get((adapter.broker_id, iid))
+                if confirmed:  # a person asked for it (resetting the reconciliation breaker), on figures just read
+                    seen = (a, b, ts - timedelta(seconds=EXTERNAL_CONFIRM_SECONDS))
+                if not seen or abs(seen[0] - a) > 1e-9 or abs(seen[1] - b) > 1e-9:
+                    self._external_seen[(adapter.broker_id, iid)] = (a, b, ts)
+                    continue
+                if (ts - seen[2]).total_seconds() < EXTERNAL_CONFIRM_SECONDS:
+                    continue
+                self._external_seen.pop((adapter.broker_id, iid), None)
+                if abs(b) < abs(a):
+                    notes += self._book_external_close(adapter, iid, abs(a) - abs(b), 1 if a > 0 else -1, reported.get(iid, []), ts)
+                else:
+                    notes += self._adopt_external_position(adapter, iid, b - a, reported.get(iid, []), ts)
+        return notes
+
+    def _book_external_close(self, adapter, iid: str, qty: float, direction: int, positions: list, ts: datetime) -> list[str]:
+        price, source = None, "estimated from the last known price"
+        finder = getattr(adapter, "closed_outside", None)
+        if finder is not None:
+            try:
+                found = finder(iid, "sell" if direction > 0 else "buy", set(self._client_ids))
+            except BrokerError:
+                found = None
+            if found:
+                price, source = found, "the broker's fill price"
+        if price is None:
+            price = next((p.last_price for p in positions if p.last_price), None) or self.portfolio.prices.get(iid)
+        if not price:
+            self.journal.alert(ts, "reconciliation", "critical", f"Position changed at {adapter.broker_id} for {iid}, price unknown",
+                               "it could not be taken into the books; it stays a discrepancy")
+            return []
+        keys = sorted([k for k, sl in self.portfolio.slices.items() if k[0] == adapter.broker_id and k[1] == iid and sl.qty * direction > 0],
+                      key=lambda k: abs(self.portfolio.slices[k].qty))
+        left, notes = qty, []
+        # Manual positions first, then the smallest strategy positions: a partial close outside the platform is most
+        # likely the user's own position, and otherwise leaves the larger strategy positions intact.
+        keys.sort(key=lambda k: not str(k[2]).startswith("manual"))
+        for key in keys:
+            if left <= 1e-12:
+                break
+            take = min(left, abs(self.portfolio.slices[key].qty))
+            oid = self._new_id()
+            order = Order(id=oid, client_order_id=f"{oid}:closed_at_broker", broker_id=adapter.broker_id, instrument_id=iid,
+                          side=Side.SELL if direction > 0 else Side.BUY, qty=take, status=OrderStatus.FILLED, filled_qty=take, avg_fill_price=price,
+                          reduce_only=True, strategy=key[2], is_simulated=False, reason="closed_at_broker", created_at=ts, updated_at=ts)
+            self._client_ids[order.client_order_id] = oid
+            self._record(order)
+            self._apply_fill(Fill(order_id=oid, broker_id=adapter.broker_id, instrument_id=iid, side=order.side, qty=take, price=price,
+                                  commission=0.0, ts=ts, strategy=key[2]), order)
+            if self.portfolio.qty(key) != 0 and key in self.protections:
+                self._place_protection(key, self.protections[key], ts)  # resize the stop to what is left
+            left -= take
+            notes.append(f"{iid} {key[2]}: {take:g} closed at {adapter.broker_id} ({source} {price:g})")
+        if notes:
+            self.journal.alert(ts, "reconciliation", "warning", f"Position closed outside the platform: {iid}", "; ".join(notes))
+        return notes
+
+    def _adopt_external_position(self, adapter, iid: str, qty: float, positions: list, ts: datetime) -> list[str]:
+        price = next((p.avg_price for p in positions if p.avg_price), None) or self.portfolio.prices.get(iid)
+        if not price:
+            return []
+        oid = self._new_id()
+        order = Order(id=oid, client_order_id=f"{oid}:opened_at_broker", broker_id=adapter.broker_id, instrument_id=iid,
+                      side=Side.BUY if qty > 0 else Side.SELL, qty=abs(qty), status=OrderStatus.FILLED, filled_qty=abs(qty), avg_fill_price=price,
+                      strategy=EXTERNAL_STRATEGY, is_simulated=False, reason="opened_at_broker", created_at=ts, updated_at=ts)
+        self._client_ids[order.client_order_id] = oid
+        self._record(order)
+        self._apply_fill(Fill(order_id=oid, broker_id=adapter.broker_id, instrument_id=iid, side=order.side, qty=abs(qty), price=price,
+                              commission=0.0, ts=ts, strategy=EXTERNAL_STRATEGY), order)
+        note = f"{iid}: {qty:g} opened at {adapter.broker_id} outside the platform, followed as a manual position (no stop placed)"
+        self.journal.alert(ts, "reconciliation", "warning", f"Position opened outside the platform: {iid}", note)
+        return [note]
 
     def _adopt(self, order: Order, found: Order, adapter, ts: datetime) -> Order:
         """The broker has this order although the request seemed to fail. It becomes ours under our id, and whatever it

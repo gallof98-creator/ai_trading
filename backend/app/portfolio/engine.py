@@ -229,8 +229,9 @@ class PortfolioEngine:
         return self.state(ts)
 
     # ------------------------------------------------------------------ reconciliation
-    def reconcile(self) -> list[str]:
-        """Compare internal books with each broker's reported positions."""
+    def reconcile(self, pending: set[tuple[str, str]] | frozenset = frozenset()) -> list[str]:
+        """Compare internal books with each broker's reported positions. `pending`: (broker, instrument) differences already
+        recognised as the user's own action at the broker and about to be taken into the books (see sync_with_broker)."""
         problems: list[str] = []
         for adapter in self.brokers.all():
             try:
@@ -243,6 +244,8 @@ class PortfolioEngine:
                 if broker_id == adapter.broker_id:
                     internal[iid] = internal.get(iid, 0.0) + s.qty
             for iid in sorted(set(reported) | set(internal)):
+                if (adapter.broker_id, iid) in pending:
+                    continue
                 a, b = internal.get(iid, 0.0), reported.get(iid, 0.0)
                 lot = self.registry.get(iid).lot_size if not iid.startswith("UNMAPPED:") else 0.0
                 if abs(a - b) > max(lot / 2, 1e-9) and self._fee_in_kind(adapter, iid, a, b):

@@ -175,6 +175,7 @@ class FakeAlpaca:
     def __init__(self):
         self.equity, self.cash, self.buying_power = 100_000.0, 100_000.0, 200_000.0
         self.orders: dict[str, dict] = {}
+        self.outside: list[dict] = []  # orders the user placed in Alpaca's own app (not through the platform)
         self.positions: list[dict] = []
         self.requests: list[tuple[str, str, dict | None]] = []
         self.fail: int | None = None
@@ -211,6 +212,9 @@ class FakeAlpaca:
             self.orders[oid] = {"id": oid, "status": "accepted", "filled_qty": "0", "filled_avg_price": None, **body}
             return httpx.Response(200, json=self.orders[oid])
         if path == "/v2/orders" and request.method == "GET":
+            if request.url.params.get("status") == "closed":
+                done = [o for o in [*self.orders.values(), *self.outside] if o["status"] in ("filled", "canceled")]
+                return httpx.Response(200, json=list(reversed(done)))
             return httpx.Response(200, json=[o for o in self.orders.values() if o["status"] in ("accepted", "new", "partially_filled")])
         if path == "/v2/orders:by_client_order_id":
             found = [o for o in self.orders.values() if o["client_order_id"] == request.url.params["client_order_id"]]
@@ -619,4 +623,70 @@ def test_instruments_added_after_alpaca_was_connected_are_tradable_there_at_once
     rt.add_instruments(["NOTLISTED"], "US", "stock", "admin")
     assert rt.registry.is_mapped("alpaca-paper", "STOCK:MSFT") and rt.registry.is_mapped("alpaca-paper", "CRYPTO:ETH/USD")
     assert not rt.registry.is_mapped("alpaca-paper", "STOCK:NOTLISTED")   # only what Alpaca lists
+    rt.live.stop()
+
+
+def close_in_alpacas_app(fake, symbol, qty, price):
+    """What the user does on Alpaca's website: sell the shares; the position is gone."""
+    fake.outside.append({"id": f"app-{len(fake.outside) + 1}", "client_order_id": f"web-{len(fake.outside) + 1}", "symbol": symbol, "side": "sell",
+                         "qty": str(qty), "status": "filled", "filled_qty": str(qty), "filled_avg_price": str(price)})
+    fake.positions = [p for p in fake.positions if p["symbol"] != symbol]
+
+
+def test_a_position_closed_in_alpacas_own_app_is_booked_at_its_price_and_never_sold_again(tmp_path):
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    held = rt.portfolio.qty(key)
+    assert held > 0 and rt.engine.protections[key].soft_stop
+    close_in_alpacas_app(fake, "AAPL", held, fill * 1.01)
+    stop = rt.engine.protections[key].stop_price
+    # The price falls through the platform's own stop before it has noticed: it must NOT sell shares that are gone.
+    tick(rt, "AAPL", stop * 0.99, minute)
+    tick(rt, "AAPL", stop * 0.99, minute + 1)
+    sells = [o for o in fake.orders.values() if o["side"] == "sell"]
+    assert sells == [], "the platform sold shares the user had already sold: a short sale"
+    # Seen twice, 20 seconds or more apart: booked as an exit at Alpaca's own fill price.
+    tick(rt, "AAPL", stop * 0.99, minute + 2)
+    assert rt.portfolio.qty(key) == 0 and key not in rt.engine.protections
+    t = rt.portfolio.trades[-1]
+    assert t.exit_reason == "closed_at_broker" and t.exit_price == pytest.approx(fill * 1.01) and t.qty == pytest.approx(held)
+    assert rt.portfolio.reconcile() == [] and not rt.risk.breakers.get("reconciliation")
+    assert [o for o in fake.orders.values() if o["side"] == "sell"] == []
+    rt.live.stop()
+
+
+def test_a_partial_close_in_alpacas_app_keeps_the_rest_protected_and_an_own_position_is_adopted(tmp_path):
+    fake = FakeAlpaca()
+    fake.assets.append({"symbol": "MSFT", "tradable": True, "shortable": True, "fractionable": True, "class": "us_equity"})
+    rt = alpaca_runtime(tmp_path, fake)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    held = rt.portfolio.qty(key)
+    fake.outside.append({"id": "app-1", "client_order_id": "web-1", "symbol": "AAPL", "side": "sell", "qty": str(held / 2), "status": "filled",
+                         "filled_qty": str(held / 2), "filled_avg_price": str(fill)})
+    fake.positions = [{**fake.positions[0], "qty": str(held / 2)}]
+    rt.add_instruments(["MSFT"], "US", "stock", "admin")
+    fake.positions.append({"symbol": "MSFT", "qty": "3", "side": "long", "avg_entry_price": "400", "current_price": "401"})
+    for k in range(3):
+        tick(rt, "AAPL", fill, minute + k)
+    assert rt.portfolio.qty(key) == pytest.approx(held / 2) and key in rt.engine.protections
+    assert rt.portfolio.qty(("alpaca-paper", "STOCK:MSFT", "manual:broker")) == 3
+    assert rt.portfolio.reconcile() == []
+    rt.live.stop()
+
+
+def test_resetting_the_reconciliation_breaker_takes_in_what_was_done_at_the_broker(tmp_path):
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    close_in_alpacas_app(fake, "AAPL", rt.portfolio.qty(key), fill)
+    rt.brokers.get("alpaca-paper").invalidate()
+    rt.portfolio.reconcile()   # e.g. tripped before this version, or by a difference that was never confirmed
+    rt.risk.monitor(rt.portfolio.state(rt.clock()))
+    assert "reconciliation" in rt.risk.breakers
+    rt.reset_breaker("reconciliation", "admin")
+    assert "reconciliation" not in rt.risk.breakers and rt.portfolio.qty(key) == 0
     rt.live.stop()
