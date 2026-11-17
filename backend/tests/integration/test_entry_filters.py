@@ -203,3 +203,18 @@ def test_only_the_needed_concepts_are_downloaded_and_dated_by_their_filing():
     assert frame["available_at"].iloc[1] == pd.Timestamp("2025-02-01 18:00", tz="America/New_York").tz_convert("UTC")  # no acceptance time known
     assert flt.snapshot(flt.facts_frame([[r.concept, r.period_start.isoformat(), r.period_end.isoformat(), r.value, r.available_at.isoformat()]
                                          for r in frame.itertuples()]), pd.Timestamp("2025-03-01", tz="UTC")).net_income == 7
+
+
+def test_short_entries_follow_the_short_selling_switch_and_the_switch_sends_validations_back(rt):
+    from app.database.settings_store import save_settings
+
+    with_stock(rt)
+    dep_id = rt.add_deployment("ema_crossover", {}, STOCK, "1d", "paper-main", "admin")
+    rt.update_deployment(dep_id, "admin", active=True)
+    short = Order(broker_id="paper-main", instrument_id=STOCK, side=Side.SELL, qty=1, strategy="ema_crossover")
+    assert rt.user_settings.autopilot.allow_short is False
+    assert "short selling is switched off" in rt.entry_block(short)
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"autopilot": rt.user_settings.autopilot.model_copy(update={"allow_short": True})}))
+        rt.reload_settings(s)
+    assert rt.entry_block(short) is None

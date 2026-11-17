@@ -325,6 +325,18 @@ QAT_SEC_USER_AGENT setting takes precedence). The SEC may refuse a generic addre
 "Results, fundamentals, news" step: filing index daily, reported figures after each new 10-Q/10-K (at least monthly), news
 every cycle. ETFs and crypto have no results or reports: only the news pause applies to them.
 
+## Short selling
+
+Off by default ("Allow short selling" in the Autopilot settings, needs a margin account). While it is off, a strategy's
+sell signal only closes a long position: no short sale is ever opened, by the scan or by an active strategy, whatever its
+earlier validation allowed. The Autopilot panel shows LONG ONLY or LONG + SHORT. Switching it sends every validation done
+the other way back for a retest (setups that could trade first), so the rule traded is always the one tested.
+At Alpaca, short sales of stocks and ETFs are whole shares (Alpaca does not short fractions): the size is rounded down,
+and no short is opened when not even one share fits the risk limits. Crypto cannot be sold short at Alpaca.
+
+In semi-automatic mode a strategy's exit signal is a proposal waiting for approval, unless "close positions on the
+strategy's exit signal" is on (paper accounts): a position whose strategy turned bearish stays open until then.
+
 ## Each account on its own capital
 
 Position size and the exposure limits (per instrument, per strategy, per account, leverage, margin, number of positions,

@@ -690,3 +690,23 @@ def test_resetting_the_reconciliation_breaker_takes_in_what_was_done_at_the_brok
     rt.reset_breaker("reconciliation", "admin")
     assert "reconciliation" not in rt.risk.breakers and rt.portfolio.qty(key) == 0
     rt.live.stop()
+
+
+def test_short_sales_at_alpaca_are_whole_shares_because_alpaca_does_not_short_fractions(tmp_path):
+    from app.domain.models import Order, OrderType, Side
+
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake)
+    inst = rt.registry.get("STOCK:AAPL")
+    assert rt.engine.whole_if_short("alpaca-paper", inst, -1, 3.7) == 3.0
+    assert rt.engine.whole_if_short("alpaca-paper", inst, -1, 0.6) == 0.0      # under one share: no short at all
+    assert rt.engine.whole_if_short("alpaca-paper", inst, 1, 3.7) == 3.7       # buying fractions is fine
+    rt.add_instruments(["BTC/USD"], "", "crypto", "admin")
+    assert rt.engine.whole_if_short("alpaca-paper", rt.registry.get("CRYPTO:BTC/USD"), -1, 0.37) == 0.37
+    adapter = rt.brokers.get("alpaca-paper")
+    short = Order(broker_id="alpaca-paper", instrument_id="STOCK:AAPL", side=Side.SELL, qty=2.5, type=OrderType.MARKET)
+    assert any("fractions of a share short" in r for r in adapter.instrument_reasons(short))
+    assert not any("short" in r for r in adapter.instrument_reasons(short.model_copy(update={"qty": 2.0})))
+    closing = short.model_copy(update={"reduce_only": True})     # selling fractions you own is not a short sale
+    assert not any("fractions of a share short" in r for r in adapter.instrument_reasons(closing))
+    rt.live.stop()

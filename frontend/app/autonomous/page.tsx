@@ -87,6 +87,8 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
   return (
     <Panel title="Autopilot" right={<span className="flex flex-wrap items-center gap-2">
       <Badge kind={st.enabled ? "up" : "dim"}>{st.enabled ? (st.running ? "RUNNING A CYCLE" : "ON") : "OFF"}</Badge>
+      {st.settings && <span title={st.settings.allow_short ? "Sell signals open short positions where the account and the instrument allow it (at Alpaca: whole shares only)." : "Sell signals only close long positions: no short sale is ever opened. Switch on 'Allow short selling' in the settings below (needs a margin account); strategies are then validated again with shorts."}>
+        <Badge kind={st.settings.allow_short ? "warn" : "dim"}>{st.settings.allow_short ? "LONG + SHORT" : "LONG ONLY"}</Badge></span>}
       {canTrade && <Button kind={st.enabled ? "ghost" : "primary"} disabled={act.busy} onClick={() => save({ ...st.settings, enabled: !st.enabled }, st.enabled ? "Autopilot switched off." : "Autopilot switched on.")}>{st.enabled ? "Switch off" : "Switch on"}</Button>}
       {canTrade && <Button kind="ghost" disabled={act.busy || st.running} onClick={() => act.run(() => post("/api/quant/autopilot/run"), "Cycle started; it can take a few minutes.").then(ap.reload)}>Run a cycle now</Button>}
     </span>}>

@@ -416,7 +416,9 @@ class Autopilot:
             none = {"earnings": False, "fundamentals": False}
             current = opp.validations(session, now)
             known = {(v["strategy"], v["instrument_id"], v["timeframe"]):
-                     ("expired" if v["due_for_retest"] or (v.get("filters") or none) != self.rt.company.signature(v["instrument_id"], v["timeframe"]) else v["status"])
+                     ("expired" if v["due_for_retest"] or (v.get("filters") or none) != self.rt.company.signature(v["instrument_id"], v["timeframe"])
+                      # tested long-only but shorts are now allowed (or the reverse): the rule traded would not be the one tested
+                      or bool(v.get("long_only", True)) == bool(cfg.allow_short) else v["status"])
                      for v in current}
             # Setups that were tradable (validated or candidate when last tested) are retested first: after a change of
             # criteria or filters, what could trade comes back in the first cycles instead of waiting behind every

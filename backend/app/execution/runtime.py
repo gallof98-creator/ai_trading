@@ -209,6 +209,8 @@ class TradingRuntime:
                     and d.strategy.name == order.strategy), None)
         if dep is None:
             return None
+        if order.side is Side.SELL and not self.user_settings.autopilot.allow_short:
+            return "short selling is switched off (Autopilot settings): a sell signal only closes long positions"
         try:
             return self.company.live_block(order.instrument_id, self.clock(), order.side is Side.BUY, dep.timeframe)
         except Exception as exc:  # a filter that cannot be evaluated never blocks trading, and says so
@@ -1522,7 +1524,7 @@ class TradingRuntime:
         fits = [order.qty, self.risk.headroom(order.broker_id, inst, order.strategy, state) / unit]
         if intent.stop_distance:
             fits.append(self.user_settings.risk.risk_per_trade * state.scoped(order.broker_id).equity / ((intent.stop_distance + cost) * inst.contract_multiplier * intent.fx_rate))
-        qty = inst.round_qty(min(fits))
+        qty = self.engine.whole_if_short(order.broker_id, inst, -1 if order.side is Side.SELL else 1, inst.round_qty(min(fits)))
         if qty <= 0 or qty < inst.min_qty:
             return f"at the current price {price:g} no tradable quantity fits the risk and exposure limits any more"
         if qty != order.qty:

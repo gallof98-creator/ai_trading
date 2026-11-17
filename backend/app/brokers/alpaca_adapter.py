@@ -194,6 +194,8 @@ class AlpacaAdapter(BrokerAdapter):
         if self._snapshot is not None:
             self._snapshot = {**self._snapshot, "at": float("-inf")}
 
+    whole_units_for_short = True  # stocks and ETFs: fractional quantities can be bought and sold, never sold short
+
     def map_instruments(self) -> int:
         """Link every platform instrument Alpaca lists to its Alpaca symbol. Called on connect and again whenever
         instruments are added (the Autopilot adds stocks, ETFs and crypto pairs over time): an instrument added after the
@@ -295,6 +297,8 @@ class AlpacaAdapter(BrokerAdapter):
         if order.reduce_only and order.type is OrderType.LIMIT:
             # Alpaca reserves the shares for the first resting sell order, so a target cannot rest next to the stop.
             reasons.append("a take-profit cannot rest at Alpaca next to the stop on the same shares; the platform watches the target itself")
+        if not crypto and order.side is Side.SELL and not order.reduce_only and abs(order.qty - round(order.qty)) > 1e-9:
+            reasons.append("Alpaca does not sell fractions of a share short: a short sale must be whole shares")
         if not crypto and abs(order.qty - round(order.qty)) > 1e-9 and (order.type is not OrderType.MARKET or not asset.get("fractionable", False)):
             reasons.append("fractional share quantities are accepted only for market orders in fractionable stocks")
         price = order.limit_price or order.stop_price

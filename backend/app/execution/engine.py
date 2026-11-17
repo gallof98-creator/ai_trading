@@ -424,6 +424,7 @@ class TradingEngine:
             qty = position_size(state.scoped(dep.broker_id).equity, limits.risk_per_trade, signal.stop_distance or 0.0, signal.price, inst, fx_rate,
                                 max_notional=self.risk.headroom(dep.broker_id, inst, dep.strategy.name, state),
                                 realized_vol=self._realized_vol(inst.id), target_vol=limits.target_volatility, cost_per_unit=cost)
+            qty = self.whole_if_short(dep.broker_id, inst, -1 if target < 0 else 1, qty)
             if qty <= 0:
                 self.journal.alert(ts, "sizing", "info", f"No position taken in {inst.id}",
                                    "the size allowed by the risk budget and exposure limits is below the minimum tradable quantity")
@@ -577,6 +578,16 @@ class TradingEngine:
         # the outcome is unknown: it is looked up again (see poll_orders) and the instrument takes no new entry meanwhile.
         self._unconfirmed[order.id] = ts.isoformat()
         return self._reject(order, f"broker unreachable after {self.retry.max_attempts} attempts, outcome unknown: {last_error}", ts, alert=False)
+
+    def whole_if_short(self, broker_id: str, inst: Instrument, direction: int, qty: float) -> float:
+        """A short sale of shares is whole shares at brokers that do not short fractions (Alpaca): rounded down."""
+        if direction >= 0 or inst.asset_class.value not in ("stock", "etf"):
+            return qty
+        try:
+            adapter = self.brokers.get(broker_id)
+        except BrokerError:
+            return qty
+        return float(int(qty + 1e-9)) if getattr(adapter, "whole_units_for_short", False) else qty
 
     def _broker_holding(self, order: Order, adapter, ts: datetime) -> float | None:
         """How much of the position this closing order reduces is actually held at the broker, in the order's direction;
