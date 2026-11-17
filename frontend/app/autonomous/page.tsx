@@ -121,6 +121,17 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
             </div>
             {r.scan.blockers?.length > 0 && <ul className="mt-1.5 list-disc pl-5 text-dim">{r.scan.blockers.slice(0, 4).map(([reason, n]: [string, number]) => <li key={reason}>{n} × {reason}</li>)}</ul>}
           </div>}
+          {r.scan?.tradable_setups && <details className="pt-1" open={r.scan.tradable_setups.length > 0 && r.scan.tradable_setups.length <= 15}>
+            <summary className="cursor-pointer text-accent">setups that may trade ({r.scan.tradable_setups.length}): what happened to each at the last scan</summary>
+            {r.scan.tradable_setups.length === 0 ? <p className="mt-1 text-dim">No setup is validated, candidate or (with exploration on) explorable yet: nothing can be traded until the validation finds one.</p> :
+              <div className="mt-1 max-h-64 overflow-auto"><table className="w-full text-left">
+                <thead className="text-dim"><tr><th className="pr-2">Setup</th><th className="pr-2">Level</th><th className="pr-2">Outcome</th><th>Why</th></tr></thead>
+                <tbody>{r.scan.tradable_setups.map((t: Json, i: number) => <tr key={i} className="border-t border-line align-top">
+                  <td className="pr-2">{nice(t.strategy)} {sym(t.instrument_id)} {t.timeframe}</td>
+                  <td className="pr-2"><Badge kind={String(t.level).startsWith("validated") ? "up" : String(t.level).startsWith("candidate") ? "warn" : "down"}>{t.level}</Badge></td>
+                  <td className="pr-2">{t.outcome === "proposed" || t.outcome === "sent" ? <Badge kind="up">{t.outcome}</Badge> : (FUNNEL.find(([k]) => k === t.outcome)?.[1] ?? t.outcome)}</td>
+                  <td className="text-dim">{t.reason}</td></tr>)}</tbody></table></div>}
+          </details>}
           {r.scan?.reasons?.length > 0 && <details className="pt-1"><summary className="cursor-pointer text-accent">why {r.scan.reasons.length} setups were not proposed</summary><ul className="mt-1 max-h-40 list-disc overflow-auto pl-5 text-dim">{r.scan.reasons.map((x: string) => <li key={x}>{x}</li>)}</ul></details>}
         </div>
         <div className="max-h-48 overflow-auto font-mono text-xs">

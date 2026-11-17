@@ -133,10 +133,7 @@ class AlpacaAdapter(BrokerAdapter):
         for asset_class in ("us_equity", "crypto"):
             for a in self._trading("GET", "/v2/assets", params={"status": "active", "asset_class": asset_class}) or []:
                 self.assets[a["symbol"]] = a
-        for inst in self.registry.all():
-            symbol = self._native(inst)
-            if symbol and symbol in self.assets and not self.registry.is_mapped(self.broker_id, inst.id):
-                self.registry.map_symbol(self.broker_id, inst.id, symbol)
+        self.map_instruments()
         self._caps = BrokerCapabilities(
             asset_classes=frozenset({AssetClass.STOCK, AssetClass.ETF, AssetClass.CRYPTO}),
             order_types=frozenset({OrderType.MARKET, OrderType.LIMIT, OrderType.STOP, OrderType.STOP_LIMIT}),
@@ -196,6 +193,18 @@ class AlpacaAdapter(BrokerAdapter):
         """Forget the cached account and positions (after an order changed them)."""
         if self._snapshot is not None:
             self._snapshot = {**self._snapshot, "at": float("-inf")}
+
+    def map_instruments(self) -> int:
+        """Link every platform instrument Alpaca lists to its Alpaca symbol. Called on connect and again whenever
+        instruments are added (the Autopilot adds stocks, ETFs and crypto pairs over time): an instrument added after the
+        account was connected must be tradable here too. Returns how many were newly linked."""
+        added = 0
+        for inst in self.registry.all():
+            symbol = self._native(inst)
+            if symbol and symbol in self.assets and not self.registry.is_mapped(self.broker_id, inst.id):
+                self.registry.map_symbol(self.broker_id, inst.id, symbol)
+                added += 1
+        return added
 
     @property
     def stale(self) -> bool:

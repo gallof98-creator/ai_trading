@@ -1,6 +1,8 @@
 """Autopilot: universe, prices, validation, live subscriptions and scans without a click; orders still need one."""
 from datetime import timedelta
 
+from app.quant_ai import opportunities as opp
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -315,3 +317,25 @@ def test_validation_gets_most_of_a_cycle_never_an_hour_and_opportunities_come_fi
     out = rt.autopilot.run_cycle()
     steps = list(out["seconds_per_step"])
     assert steps.index("scan") < steps.index("validation") < steps.index("rescan")
+
+
+def test_after_a_change_of_criteria_former_candidates_are_retested_first_and_every_tradable_setup_is_listed(rt, monkeypatch):
+    configure(rt, allow_short=False)
+    out = rt.autopilot.tick()
+    assert out["validation"]["candidates"] == 2
+    listed = {(t["strategy"], t["instrument_id"].split(":")[1], t["level"], t["outcome"]) for t in out["scan"]["tradable_setups"]}
+    assert any(level == "candidate" and outcome == "proposed" for *_, level, outcome in listed)
+    with rt.db.session() as s:
+        before = {(v["strategy"], v["instrument_id"]): v["recorded_status"] for v in opp.validations(s, rt.clock())}
+    former = {k for k, st in before.items() if st == "candidate"}
+    monkeypatch.setitem(opp.CRITERIA, "version", 99)   # new criteria: every earlier result is due for a retest
+    opp._CACHE.clear()
+    configure(rt, allow_short=False, validations_per_cycle=2)
+    rt.now[0] += timedelta(minutes=16)
+    again = rt.autopilot.tick()
+    assert again["validation"]["run"] == 2
+    # The candidates waiting for their retest are listed, with why they are not traded meanwhile.
+    assert all(t["level"] for t in again["scan"]["tradable_setups"])
+    with rt.db.session() as s:
+        retested = {(v["strategy"], v["instrument_id"]) for v in opp.validations(s, rt.clock()) if v["criteria_version"] == 99}
+    assert retested == former, "the setups that could trade were not retested first"

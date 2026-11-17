@@ -604,3 +604,19 @@ def test_the_agreed_starting_configuration_is_unchanged():
     assert s.live_orders_require_approval is True and s.safety_limits_confirmed is False
     assert s.autopilot.exploration is False and s.autopilot.enabled is False and s.auto_close_on_exit_signal is False
     assert Settings(_env_file=None).live_trading_authorized is False
+
+
+def test_instruments_added_after_alpaca_was_connected_are_tradable_there_at_once(tmp_path):
+    """The Autopilot adds stocks, ETFs and crypto pairs over time. Alpaca linked its symbols only when the account was
+    connected, so every later instrument was 'not tradable at alpaca-paper' until a restart: candidates on them never traded."""
+    fake = FakeAlpaca()
+    fake.assets += [{"symbol": "MSFT", "tradable": True, "shortable": True, "fractionable": True, "class": "us_equity"},
+                    {"symbol": "ETH/USD", "tradable": True, "shortable": False, "fractionable": True, "class": "crypto"}]
+    rt = alpaca_runtime(tmp_path, fake)
+    assert not any(i.symbol in ("MSFT", "ETH/USD") for i in rt.registry.all())
+    rt.add_instruments(["MSFT"], "US", "stock", "admin")
+    rt.add_instruments(["ETH/USD"], "", "crypto", "admin")
+    rt.add_instruments(["NOTLISTED"], "US", "stock", "admin")
+    assert rt.registry.is_mapped("alpaca-paper", "STOCK:MSFT") and rt.registry.is_mapped("alpaca-paper", "CRYPTO:ETH/USD")
+    assert not rt.registry.is_mapped("alpaca-paper", "STOCK:NOTLISTED")   # only what Alpaca lists
+    rt.live.stop()

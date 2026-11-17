@@ -269,7 +269,7 @@ def _validations(session: Session, now: datetime | None = None) -> list[dict]:
         expired = now is not None and datetime.fromisoformat(r.payload["valid_until"]) < now
         outdated = r.payload.get("criteria_version") != CRITERIA["version"] and r.status != "rejected"
         out.append({"id": r.id, "status": "expired" if (expired and r.status == "validated") or outdated else r.status, "tested_at": r.created_at.isoformat(),
-                    "due_for_retest": bool(expired or outdated), **r.payload})
+                    "due_for_retest": bool(expired or outdated), "recorded_status": r.status, **r.payload})
     family = {v["id"]: (v.get("statistics") or {}).get("p_value") for v in out if v.get("criteria_version") == CRITERIA["version"] and not v["due_for_retest"]}
     accepted = benjamini_hochberg(family, CRITERIA["max_false_discovery_rate"])
     for v in out:
@@ -362,7 +362,7 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         label = {"strategy": strategy, "instrument_id": iid, "timeframe": tf}
 
         def skip(stage: str, reason: str, label=label, v=v) -> None:
-            skipped.append({**label, "level": level_of(v), "stage": stage, "reason": reason})
+            skipped.append({**label, "level": level_of(v), "recorded": v.get("recorded_status"), "stage": stage, "reason": reason})
             funnel[stage] = funnel.get(stage, 0) + 1
 
         funnel["setups"] += 1

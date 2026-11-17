@@ -414,9 +414,16 @@ class Autopilot:
             # ... and when the entry filters it was tested with changed (results dates or reported figures became available,
             # or a filter was switched on or off): what is traded must be what was tested.
             none = {"earnings": False, "fundamentals": False}
+            current = opp.validations(session, now)
             known = {(v["strategy"], v["instrument_id"], v["timeframe"]):
                      ("expired" if v["due_for_retest"] or (v.get("filters") or none) != self.rt.company.signature(v["instrument_id"], v["timeframe"]) else v["status"])
-                     for v in opp.validations(session, now)}
+                     for v in current}
+            # Setups that were tradable (validated or candidate when last tested) are retested first: after a change of
+            # criteria or filters, what could trade comes back in the first cycles instead of waiting behind every
+            # setup that was rejected anyway.
+            was_tradable = {(v["strategy"], v["instrument_id"], v["timeframe"]) for v in current
+                            if v.get("recorded_status") in ("validated", "candidate")
+                            or (cfg.exploration and ((v.get("out_of_sample") or {}).get("total_return") or 0) > 0)}
             stored = {(c["instrument_id"], c["timeframe"]) for c in self.rt.store.coverage(session) if c["kind"] != "simulated"}
         todo = [(s, i, tf) for i in candidates for tf in cfg.timeframes for s in cfg.strategies
                 if (i, tf) in stored and (i, tf) not in downloading and known.get((s, i, tf)) in (None, "expired")]
@@ -424,7 +431,7 @@ class Autopilot:
         # test) goes before minute data. Depth first, a large universe would spend days on its first few instruments.
         rank = {iid: k for k, iid in enumerate(candidates)}
         order = {name: k for k, name in enumerate(cfg.strategies)}
-        todo.sort(key=lambda t: (-tf_delta(t[2]), order.get(t[0], 0), rank.get(t[1], 0)))
+        todo.sort(key=lambda t: (t not in was_tradable, -tf_delta(t[2]), order.get(t[0], 0), rank.get(t[1], 0)))
         waiting = [k for k in {(i, tf) for i in candidates for tf in cfg.timeframes} if k in downloading or k not in stored]
         if not todo and waiting:
             self._note("validation", f"nothing to validate yet: {len(waiting)} candidate series still have no complete history "
@@ -554,7 +561,16 @@ class Autopilot:
         for s in out["skipped"]:
             key = s["reason"].split(" (")[0].split(":")[0]
             blockers[key] = blockers.get(key, 0) + 1
-        return {"validated_setups": out["validated"], "candidate_setups": out["candidates"], "explorable_setups": out["explorable"], "proposed": len(out["proposed"]), "sent": len(out["sent"]), "not_proposed": len(out["skipped"]),
+        # Every setup that may trade (or could before its pending retest), with what happened to it in this scan.
+        tradable = ([{"strategy": p["strategy"], "instrument_id": p["instrument_id"], "timeframe": p["timeframe"], "level": p.get("level"),
+                      "outcome": "proposed", "reason": "waiting for your approval"} for p in out["proposed"]]
+                    + [{"strategy": p["strategy"], "instrument_id": p["instrument_id"], "timeframe": p["timeframe"], "level": p.get("level"),
+                        "outcome": "sent", "reason": "order sent"} for p in out["sent"]]
+                    + [{"strategy": x["strategy"], "instrument_id": x["instrument_id"], "timeframe": x["timeframe"],
+                        "level": x.get("level") or (f"{x['recorded']} (retest due)" if x.get("recorded") in ("validated", "candidate") else None),
+                        "outcome": x["stage"], "reason": x["reason"]}
+                       for x in out["skipped"] if x.get("level") or x.get("recorded") in ("validated", "candidate")])
+        return {"tradable_setups": tradable[:300], "validated_setups": out["validated"], "candidate_setups": out["candidates"], "explorable_setups": out["explorable"], "proposed": len(out["proposed"]), "sent": len(out["sent"]), "not_proposed": len(out["skipped"]),
                 "funnel": out["funnel"], "blockers": sorted(([k, n] for k, n in blockers.items()), key=lambda x: -x[1])[:8],
                 # Tradable levels first (validated, candidate, exploration), each marked, so the setups that could have traded are on top.
                 "reasons": [(f"[{s['level']}] " if s.get("level") else "") + f"{s['strategy']} {s['instrument_id'].split(':')[1]} {s['timeframe']}: {s['reason']}"

@@ -540,6 +540,8 @@ class TradingRuntime:
             for adapter in self.brokers.all():
                 if isinstance(adapter, SimulatedBroker):
                     adapter.map_all_instruments()
+                elif hasattr(adapter, "map_instruments"):  # external accounts that list their tradable symbols (Alpaca)
+                    adapter.map_instruments()
             self._apply_share_lots()
             if out["created"]:
                 audit.record(session, actor, "instruments.added", market=market, count=len(out["created"]), ids=out["created"][:200])
