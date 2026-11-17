@@ -113,7 +113,8 @@ class Autopilot:
             try:
                 if adapter.is_connected() and adapter.capabilities.trading_enabled:
                     return adapter.broker_id
-            except Exception:
+            except Exception as exc:  # an account that cannot answer is not chosen
+                log.warning("autopilot_account_unavailable", broker_id=adapter.broker_id, error=str(exc))
                 continue
         return None
 

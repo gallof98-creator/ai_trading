@@ -100,7 +100,7 @@ QAT_ADMIN_EMAIL=you@example.com QAT_ADMIN_PASSWORD='a-long-password' uvicorn app
 ```
 
 ```bash
-cd backend && pytest          # 430 tests, about 12 minutes; never contacts a real broker
+cd backend && pytest          # 438 tests, about 12 minutes; never contacts a real broker
 ```
 
 ```bash

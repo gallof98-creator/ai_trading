@@ -119,6 +119,7 @@ class TradingEngine:
         self._entry_block: Callable[[Order], str | None] = lambda order: None
         self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
         self._rationale: dict = {}  # set while a signal is being turned into orders
+        self._unconfirmed: dict[str, str] = {}  # order id -> when: sent, no answer, unknown whether the broker has it
         self._working: dict[str, float] = {}  # order id -> signed notional (base currency) of entries sent but not yet filled
         self.orders: dict[str, Order] = {}
         self._client_ids: dict[str, str] = {}  # client order id -> order id (duplicate-order guard)
@@ -192,6 +193,8 @@ class TradingEngine:
 
     def poll_orders(self, ts: datetime) -> None:
         """Real brokers: pull order updates and turn filled-quantity changes into fills."""
+        if self._unconfirmed:
+            self._resolve_unconfirmed(ts)
         for old in [o for o in self.orders.values() if o.is_open and not o.is_simulated_venue]:
             adapter = self.brokers.get(old.broker_id)
             try:
@@ -429,6 +432,8 @@ class TradingEngine:
         if order.client_order_id in self._client_ids:  # the same signal was already acted on
             return self.orders[self._client_ids[order.client_order_id]]
         blocked = None if order.reduce_only else self._entry_block(order)
+        if not order.reduce_only and (order.broker_id, order.instrument_id) in self.unconfirmed_instruments():
+            blocked = "an earlier order on this instrument may have reached the broker without an answer; no new entry until it is found or ruled out"
         if blocked:
             self._client_ids[order.client_order_id] = order.id
             return self._reject(order, blocked, ts)
@@ -520,19 +525,64 @@ class TradingEngine:
                 except BrokerError:
                     found = None
                 if found is not None:
-                    return self._record(found.model_copy(update={"id": order.id, "strategy": order.strategy, "signal_id": order.signal_id,
-                                                                 "reason": order.reason, "reduce_only": order.reduce_only}))
+                    return self._adopt(order, found, adapter, ts)
                 if attempt < self.retry.max_attempts - 1:
                     self._sleep(exc.retry_after or min(self.retry.backoff_seconds * 2 ** attempt, self.retry.max_backoff_seconds))
             except (UnsupportedOperation, OrderRejected) as exc:
+                if attempt > 0:
+                    # A refusal of a RETRY may mean "this client id is already used": the first attempt did arrive (its
+                    # answer was lost, and the lookup in between failed). Ask before believing the refusal.
+                    try:
+                        found = adapter.find_order(order.client_order_id, order.instrument_id)
+                    except BrokerError:
+                        found = None
+                        self._unconfirmed[order.id] = ts.isoformat()  # looked up again later; no new entry meanwhile
+                    if found is not None:
+                        return self._adopt(order, found, adapter, ts)
                 self._entry_protection.pop(order.id, None)
                 return self._reject(order, str(exc), ts)
             except BrokerError as exc:
                 self._entry_protection.pop(order.id, None)
                 return self._reject(order, f"broker error: {exc}", ts)
         self._entry_protection.pop(order.id, None)
-        self.journal.alert(ts, "broker", "critical", f"Broker {order.broker_id} unreachable", last_error)
-        return self._reject(order, f"broker unreachable after {self.retry.max_attempts} attempts: {last_error}", ts, alert=False)
+        self.journal.alert(ts, "broker", "critical", f"Broker {order.broker_id} unreachable: order outcome unknown",
+                           f"{order.side.value} {order.qty:g} {order.instrument_id} may or may not have reached the broker. It is looked up on every "
+                           f"order check; no new entry on this instrument is sent until it is. Last error: {last_error}")
+        # The request may have arrived even though no answer came back. Until the broker says whether it has this client id,
+        # the outcome is unknown: it is looked up again (see poll_orders) and the instrument takes no new entry meanwhile.
+        self._unconfirmed[order.id] = ts.isoformat()
+        return self._reject(order, f"broker unreachable after {self.retry.max_attempts} attempts, outcome unknown: {last_error}", ts, alert=False)
+
+    def _adopt(self, order: Order, found: Order, adapter, ts: datetime) -> Order:
+        """The broker has this order although the request seemed to fail. It becomes ours under our id, and whatever it
+        has already filled is booked as fills (recording it as already filled would leave the books without them)."""
+        sent = order.model_copy(update={"status": OrderStatus.SUBMITTED, "broker_order_id": found.broker_order_id, "filled_qty": 0.0,
+                                        "avg_fill_price": None, "commission": 0.0, "is_simulated": found.is_simulated, "updated_at": ts})
+        self._record(sent)
+        current = found.model_copy(update={"id": order.id, "strategy": order.strategy, "signal_id": order.signal_id, "reason": order.reason,
+                                           "reduce_only": order.reduce_only, "client_order_id": order.client_order_id})
+        self._ingest_update(adapter, sent, current, ts)
+        return self.orders[order.id]
+
+    def _resolve_unconfirmed(self, ts: datetime) -> None:
+        for oid, since in list(self._unconfirmed.items()):
+            order = self.orders.get(oid)
+            if order is None:
+                self._unconfirmed.pop(oid, None)
+                continue
+            try:
+                adapter = self.brokers.get(order.broker_id)
+                found = adapter.find_order(order.client_order_id, order.instrument_id)
+            except BrokerError:
+                continue  # still unknown: asked again next time
+            if found is not None:
+                self._adopt(order, found, adapter, ts)
+                self.journal.alert(ts, "broker", "warning", f"Order found at {order.broker_id} after all: {order.side.value} {order.qty:g} {order.instrument_id}",
+                                   "it is now followed as a normal order")
+            self._unconfirmed.pop(oid, None)  # found, or the broker answered that it does not have it
+
+    def unconfirmed_instruments(self) -> set[tuple[str, str]]:
+        return {(self.orders[o].broker_id, self.orders[o].instrument_id) for o in self._unconfirmed if o in self.orders}
 
     def _for_broker(self, order: Order, adapter) -> Order:
         """`reduce_only` describes the order's role for OUR strategy slice. On a netting venue that enforces
@@ -550,7 +600,7 @@ class TradingEngine:
         keep = {o.id for o in self.orders.values() if o.is_open or o.status is OrderStatus.PENDING_APPROVAL}
         keep |= set(list(self.orders)[-1000:])
         return {
-            "n": self._n, "working": dict(self._working), "orders": [self.orders[i].model_dump(mode="json") for i in self.orders if i in keep],
+            "n": self._n, "working": dict(self._working), "unconfirmed": dict(self._unconfirmed), "orders": [self.orders[i].model_dump(mode="json") for i in self.orders if i in keep],
             "client_ids": dict(list(self._client_ids.items())[-20000:]),
             "entry_protection": [[oid, list(key), list(p)] for oid, (key, p) in self._entry_protection.items()],
             "protections": [[list(key), p.direction, p.stop_distance, p.take_profit_distance, p.trailing_distance, p.stop_price,
@@ -566,6 +616,7 @@ class TradingEngine:
         self.orders = {o["id"]: Order.model_validate(o) for o in state["orders"]}
         self._client_ids = dict(state["client_ids"])
         self._working = dict(state.get("working", {}))
+        self._unconfirmed = dict(state.get("unconfirmed", {}))
         self._entry_protection = {oid: (tuple(key), tuple(p)) for oid, key, p in state["entry_protection"]}
         self.protections = {}
         for key, direction, stop, target, trailing, stop_price, stop_id, target_id, soft in state["protections"]:

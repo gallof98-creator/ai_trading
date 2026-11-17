@@ -292,6 +292,7 @@ class ResearchItem(Base):
     """AI research artefacts: reports, proposed strategy configurations, trained model records."""
 
     __tablename__ = "research_items"
+    __table_args__ = (Index("ix_research_kind_title_created", "kind", "title", "created_at"),)
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     kind: Mapped[str] = mapped_column(String(16), index=True)  # report | proposal | model
     status: Mapped[str] = mapped_column(String(16), default="new")

@@ -31,8 +31,10 @@ export function Shell({ children }: { children: (user: User) => React.ReactNode 
       api<{ unread: number }>("/api/notifications?limit=1").then((n) => setUnread(n.unread)).catch(() => {});
     };
     poll();
-    const id = setInterval(poll, 10_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => { if (!document.hidden) poll(); }, 10_000);  // background tabs do not poll
+    const onVisible = () => { if (!document.hidden) poll(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, [router]);
 
   const logout = async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); router.replace("/login"); };

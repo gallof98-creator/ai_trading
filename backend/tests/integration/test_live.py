@@ -417,3 +417,29 @@ def test_stocks_beyond_the_plan_streaming_limit_are_polled_and_the_most_importan
     rt.live_unsubscribe(["STOCK:S07"], "admin")
     assert "STOCK:S07" not in rt._streamed and "STOCK:S07" not in rt.live.subscribed
     rt.live.stop()
+
+
+def test_a_quote_says_market_currency_and_stops_calling_itself_live_when_the_feed_goes_quiet():
+    now = [T0 + timedelta(seconds=1)]
+    hub = LiveHub(clock=lambda: now[0], stale_after=timedelta(seconds=30))
+    hub.describe = lambda iid: {"currency": "USD", "market": "CRYPTO"}
+    hub.publish(tick(100, 1))
+    q = hub.quote("CRYPTO:BTC/USD")
+    assert (q["status"], q["effective_status"], q["fresh"], q["currency"], q["market"], q["provider"]) == ("LIVE", "LIVE", True, "USD", "CRYPTO", "test")
+    now[0] += timedelta(minutes=5)
+    q = hub.quote("CRYPTO:BTC/USD")
+    assert q["status"] == "LIVE" and q["effective_status"] == "STALE" and q["fresh"] is False and q["age_seconds"] >= 300
+
+
+def test_a_subscriber_that_fails_is_detached_and_never_stalls_the_feed():
+    hub = LiveHub(clock=lambda: T0 + timedelta(seconds=1))
+    good = []
+
+    def broken(event):
+        raise RuntimeError("Event loop is closed")
+
+    hub.subscribe(broken)
+    hub.subscribe(good.append)
+    hub.publish(tick(100, 1))
+    hub.publish(tick(101, 2))
+    assert len(good) == 2 and len(hub._subscribers) == 1

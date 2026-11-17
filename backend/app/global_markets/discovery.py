@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..market_data.providers import ProviderAuthError, ProviderError, ProviderRateLimited
-from .exchanges import EXCHANGES, US_VENUE_MIC, Exchange
+from .exchanges import US_VENUE_MIC, Exchange
 
 SECURITY_TYPES = ("common_stock", "preferred_stock", "etf", "reit", "adr", "depositary_receipt", "closed_end_fund", "other")
 EQUITY_TYPES = frozenset({"common_stock"})  # what "equity-only" statistics may include

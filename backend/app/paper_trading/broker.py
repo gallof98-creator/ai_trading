@@ -197,7 +197,7 @@ class SimulatedBroker(BrokerAdapter):
 
     def process_open(self, instrument_id: str, ts: datetime, open_: float, volume: float, bar_delta: pd.Timedelta) -> list[Fill]:
         """A new bar opened at `ts`: accrue financing, then fill everything marketable at the open."""
-        prev_ts, self.last_ts = self.last_ts, ts
+        self.last_ts = ts
         self._accrue_financing(instrument_id, ts, bar_delta)
         self.last_price[instrument_id] = open_
         self._volume_left = {instrument_id: self._volume_budget(volume)}

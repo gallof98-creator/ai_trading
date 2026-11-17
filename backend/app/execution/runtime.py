@@ -128,6 +128,7 @@ class TradingRuntime:
         from ..market_data.live import LiveFeed, LiveHub
 
         self.live_hub = LiveHub(clock, on_bar=self._on_live_bar)
+        self.live_hub.describe = self._describe_instrument
         self.live = LiveFeed(self.live_hub)
         from ..market_data.intraday import IntradayData
         from ..quant_ai.autopilot import Autopilot
@@ -164,6 +165,13 @@ class TradingRuntime:
         if inst.quote_currency != self.portfolio.base:
             bps += 2 * self.user_settings.fx_conversion_cost_bps
         return price * bps / 10_000 + (spread or 0.0)
+
+    def _describe_instrument(self, instrument_id: str) -> dict:
+        try:
+            inst = self.registry.get(instrument_id)
+        except KeyError:
+            return {}
+        return {"currency": inst.quote_currency, "market": market_of(inst)}
 
     def _auto_exit(self, order: Order) -> bool:
         """Strategy exits close by themselves only if the user switched it on, and only on paper accounts."""
@@ -1550,8 +1558,8 @@ class TradingRuntime:
             if refresh is not None:
                 try:
                     refresh()
-                except Exception:  # reported, with the last known figures, by the valuation below
-                    pass
+                except Exception as exc:  # reported, with the last known figures, by the valuation below
+                    log.info("broker_refresh_before_overview_failed", broker_id=adapter.broker_id, error=type(exc).__name__)
         with self.lock:
             now = self.clock()
             if not self.brokers.all():

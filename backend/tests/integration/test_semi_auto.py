@@ -592,3 +592,15 @@ def test_orders_at_a_broker_are_followed_up_once_per_round_of_live_minutes_not_o
     for k in range(30):
         rt._live_minute_checks(f"STOCK:S{k}", 10.0)
     assert len(calls) == 2
+
+
+def test_the_agreed_starting_configuration_is_unchanged():
+    """1,000 EUR virtual capital, semi-automatic, 2% risk per trade (20 EUR), live trading off, real-money orders approved
+    one by one, exploration off, automatic exits off."""
+    from app.core.config import Settings
+
+    s = initial_settings()
+    assert s.initial_paper_capital * s.risk.risk_per_trade == pytest.approx(20.0)
+    assert s.live_orders_require_approval is True and s.safety_limits_confirmed is False
+    assert s.autopilot.exploration is False and s.autopilot.enabled is False and s.auto_close_on_exit_signal is False
+    assert Settings(_env_file=None).live_trading_authorized is False

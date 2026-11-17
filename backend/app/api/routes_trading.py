@@ -54,7 +54,6 @@ def instruments(q: str = "", limit: int = 300, has_data: bool | None = None, _: 
                 session: Session = Depends(get_session)) -> list[dict]:
     """Instruments, those with stored data first. `q` filters by text; the list is capped at `limit`
     (the universe can hold thousands of stocks) - use /api/instruments/stats for totals."""
-    from ..market_data.store import BarStore
 
     from sqlalchemy import select, tuple_
 

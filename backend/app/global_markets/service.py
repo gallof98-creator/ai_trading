@@ -73,8 +73,8 @@ class CatalogJob:
                 try:
                     with db.session() as session:
                         catalog.record_failed_sync(session, self.provider_name, exchange, result["message"])
-                except Exception:
-                    pass
+                except Exception as exc:  # the failure is still in the job result; only its database record is missing
+                    log.error("catalog_failed_sync_not_recorded", exchange=code, error=str(exc))
             with self._lock:
                 self.state["results"].append(result)
                 self.state["done"] += 1
@@ -264,7 +264,8 @@ class GlobalMarkets:
             try:
                 if not self.runtime.settings.provider_enabled(name) or self.runtime._provider_key(name) is None:
                     continue
-            except Exception:
+            except Exception as exc:  # e.g. an unreadable stored key: this provider is skipped, the others carry on
+                log.error("discovery_provider_unavailable", provider=name, error=str(exc))
                 continue
             with self.runtime.db.session() as session:
                 last = session.scalar(select(SyncRun.finished_at).where(SyncRun.provider == name, SyncRun.status == "ok").order_by(SyncRun.id.desc()).limit(1))

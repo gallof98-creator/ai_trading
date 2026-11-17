@@ -342,3 +342,15 @@ def test_the_validation_chooses_the_take_profit_and_the_proposal_uses_it(rt):
     [p] = rt.proposals()
     tp = v["params"]["take_profit_atr"]
     assert (p["take_profit_price"] is None) == (tp is None)
+
+
+def test_the_validation_list_reads_only_each_setups_latest_test_and_can_be_paged(rt):
+    from fastapi.testclient import TestClient  # noqa: F401
+
+    with rt.db.session() as s:
+        first = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin")
+        rt.now[0] += timedelta(seconds=1)
+        second = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin")
+        opp._CACHE.clear()
+        rows = opp.validations(s, rt.clock())
+    assert [r["id"] for r in rows] == [second["id"]] and first["id"] != second["id"]

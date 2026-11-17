@@ -49,10 +49,18 @@ def create_strategy(name: str, params: dict | None = None, version: str | None =
         raise ValueError(f"Invalid parameters for {name}: " + "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())) from None
 
 
+_LISTED: dict = {}
+
+
 def list_strategies() -> list[dict]:
+    """Every registered strategy, latest version first described. The descriptions (parameter schemas) do not change
+    while the registry does not, so they are built once per registry state."""
     _load_builtin()
-    out = []
-    for name in sorted(_REGISTRY):
-        versions = sorted(_REGISTRY[name], key=_version_key)
-        out.append({**_REGISTRY[name][versions[-1]].describe(), "versions": versions})
-    return out
+    key = tuple((name, tuple(sorted(_REGISTRY[name]))) for name in sorted(_REGISTRY))
+    if _LISTED.get("key") != key:
+        out = []
+        for name in sorted(_REGISTRY):
+            versions = sorted(_REGISTRY[name], key=_version_key)
+            out.append({**_REGISTRY[name][versions[-1]].describe(), "versions": versions})
+        _LISTED.update(key=key, value=out)
+    return [dict(x) for x in _LISTED["value"]]

@@ -6,7 +6,6 @@ prediction: a rank describes where an instrument stands today on stated criteria
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from ..backtesting.metrics import DISCLAIMER

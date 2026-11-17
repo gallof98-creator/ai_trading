@@ -254,8 +254,15 @@ def _validations(session: Session, now: datetime | None = None) -> list[dict]:
       * a result recorded under older, weaker criteria is due for a new test and is not traded meanwhile;
       * multiple testing: among all the setups tested, only those that survive the false-discovery-rate control stay
         "validated". One that passed on its own but not across the family is reported as a candidate, with the reason."""
+    from sqlalchemy import and_, func
+
+    # Only the latest test of each setup is read (every retest adds a row; the history is kept, not re-read).
+    latest = (select(ResearchItem.title, func.max(ResearchItem.created_at).label("at")).where(ResearchItem.kind == "validation")
+              .group_by(ResearchItem.title).subquery())
+    query = (select(ResearchItem).join(latest, and_(ResearchItem.title == latest.c.title, ResearchItem.created_at == latest.c.at))
+             .where(ResearchItem.kind == "validation").order_by(ResearchItem.created_at.desc(), ResearchItem.id.desc()))
     seen, out = set(), []
-    for r in session.scalars(select(ResearchItem).where(ResearchItem.kind == "validation").order_by(ResearchItem.created_at.desc())):
+    for r in session.scalars(query):
         if r.title in seen:
             continue
         seen.add(r.title)
@@ -328,6 +335,8 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
     if rt.risk.halted:
         raise ValueError("Trading is halted by the risk engine (kill switch or circuit breaker): no new proposals")
     proposed, sent, skipped = [], [], []
+    datasets: dict = {}
+    regimes: dict[tuple[str, str], str] = {}
     funnel: dict = {"setups": 0}
     automatic = TradingMode(rt.user_settings.trading_mode) is TradingMode.AUTO
     paper = is_paper_account(adapter)
@@ -352,7 +361,7 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
             continue
         label = {"strategy": strategy, "instrument_id": iid, "timeframe": tf}
 
-        def skip(stage: str, reason: str) -> None:
+        def skip(stage: str, reason: str, label=label, v=v) -> None:
             skipped.append({**label, "level": level_of(v), "stage": stage, "reason": reason})
             funnel[stage] = funnel.get(stage, 0) + 1
 
@@ -385,7 +394,9 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
             skip("tradable", f"not tradable at {broker_id}")
             continue
         try:
-            data = bt.load_dataset(session, iid, tf, last=SCAN_BARS)
+            if (iid, tf) not in datasets:  # read once per series, however many strategies look at it
+                datasets[(iid, tf)] = bt.load_dataset(session, iid, tf, last=SCAN_BARS)
+            data = datasets[(iid, tf)]
         except bt.DataUnavailable as exc:
             skip("data", str(exc))
             continue
@@ -407,16 +418,6 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         traded = float((bars["close"] * bars["volume"]).iloc[-20:].mean())
         if traded < min_traded_value:
             skip("liquidity", f"average traded value {traded:,.0f} is below the liquidity floor {min_traded_value:,.0f}")
-            continue
-        regime = str(detect_regimes(bars)["primary"].iloc[-1])
-        fits = MODULES[v["family"]]["fits"]
-        if regime == "unknown" and require_regime_fit:
-            skip("regime", "market regime cannot be determined yet")
-            continue
-        # The validation tested the strategy in every regime, so by default the regime is reported, not used as a gate:
-        # filtering on it would trade a different rule from the one that was tested.
-        if require_regime_fit and regime not in fits:
-            skip("regime", f"current regime {regime.replace('_', ' ')} does not suit {MODULES[v['family']]['label'].lower()}")
             continue
         frame = instance.generate(bars)
         if company:
@@ -442,6 +443,19 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         drift = abs(float(last["close"]) - float(frame["close"].iloc[opened]))
         if age and drift > SCAN["max_drift_stop_fraction"] * stop:
             skip("signal", f"the price has moved {drift / stop:.0%} of the stop distance since the entry signal {age} bar(s) ago")
+            continue
+        # The market regime, only now that there is an entry to judge (it is the costliest part of a scan), once per series.
+        if (iid, tf) not in regimes:
+            regimes[(iid, tf)] = str(detect_regimes(bars)["primary"].iloc[-1])
+        regime = regimes[(iid, tf)]
+        fits = MODULES[v["family"]]["fits"]
+        if regime == "unknown" and require_regime_fit:
+            skip("regime", "market regime cannot be determined yet")
+            continue
+        # The validation tested the strategy in every regime, so by default the regime is reported, not used as a gate:
+        # filtering on it would trade a different rule from the one that was tested.
+        if require_regime_fit and regime not in fits:
+            skip("regime", f"current regime {regime.replace('_', ' ')} does not suit {MODULES[v['family']]['label'].lower()}")
             continue
         signal = signal_from_row(frame.index[-1], last, instance, iid, tf, close_time).model_copy(
             update={"action": SignalAction.BUY if target > 0 else SignalAction.SELL})
@@ -538,7 +552,8 @@ def universes(session: Session, rt, broker_id: str | None = None) -> dict:
             continue
         try:
             classes = adapter.capabilities.asset_classes
-        except Exception:
+        except Exception as exc:  # not connected: reported as such below instead of guessing
+            out["tradable"][adapter.broker_id] = {"count": 0, "with_prices": 0, "error": f"{type(exc).__name__}: {exc}"[:200]}
             continue
         ids = [i.id for i in instruments if rt.registry.is_mapped(adapter.broker_id, i.id) and i.asset_class in classes]
         out["tradable"][adapter.broker_id] = {"count": len(ids), "with_prices": len(set(ids) & priced), "environment": getattr(adapter, "environment", "paper"),

@@ -86,6 +86,8 @@ class LiveHub:
     def __init__(self, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  on_bar: Callable[[str, pd.DataFrame, str], None] | None = None, stale_after: timedelta = timedelta(seconds=60)) -> None:
         self.clock, self.on_bar, self.stale_after = clock, on_bar, stale_after
+        # Market and currency of an instrument, set by the runtime, so every quote says what it is priced in and where.
+        self.describe: Callable[[str], dict] = lambda instrument_id: {}
         self._lock = threading.Lock()
         self.latest: dict[str, Tick] = {}
         self.last_trade: dict[str, Tick] = {}
@@ -137,12 +139,13 @@ class LiveHub:
                      "ask": tick.ask, "ts_source": tick.ts_source.isoformat(), "ts_received": tick.ts_received.isoformat(),
                      "latency_ms": round(tick.latency_ms, 1), "provider": tick.provider, "status": tick.status.value, "venue": tick.venue,
                      "bar": self._bars[tick.instrument_id].to_dict()}
-            targets = [send for send, symbols in self._subscribers.values() if symbols is None or tick.instrument_id in symbols]
-        for send in targets:
+            targets = [(token, send) for token, (send, symbols) in self._subscribers.items() if symbols is None or tick.instrument_id in symbols]
+        for token, send in targets:
             try:
                 send(event)
-            except Exception:  # a slow or closed dashboard connection must never stall the feed
-                pass
+            except Exception as exc:  # a closed dashboard connection must never stall the feed: it is detached
+                log.info("live_subscriber_dropped", error=type(exc).__name__)
+                self.unsubscribe(token)
         if completed is not None and self.on_bar is not None:
             frame = pd.DataFrame([[completed.open, completed.high, completed.low, completed.close, completed.volume]],
                                  index=pd.DatetimeIndex([pd.Timestamp(completed.start)], name="ts"), columns=["open", "high", "low", "close", "volume"])
@@ -169,11 +172,13 @@ class LiveHub:
             if tick is None:
                 return None
             age = (self.clock() - tick.ts_source).total_seconds()
+            fresh = tick.status is FeedStatus.LIVE and age <= self.stale_after.total_seconds()
             return {"instrument_id": instrument_id, "price": tick.price, "bid": tick.bid, "ask": tick.ask, "kind": tick.kind,
                     "ts_source": tick.ts_source.isoformat(), "ts_received": tick.ts_received.isoformat(), "age_seconds": round(age, 1),
-                    "provider": tick.provider, "status": tick.status.value, "venue": tick.venue,
-                    "fresh": tick.status is FeedStatus.LIVE and age <= self.stale_after.total_seconds(),
-                    "spread": (tick.ask - tick.bid) if tick.bid and tick.ask else None}
+                    "provider": tick.provider, "status": tick.status.value, "venue": tick.venue, "fresh": fresh,
+                    # What the price is NOW: a live feed that went quiet is not live any more.
+                    "effective_status": tick.status.value if fresh or tick.status is not FeedStatus.LIVE else "STALE",
+                    "spread": (tick.ask - tick.bid) if tick.bid and tick.ask else None, **self.describe(instrument_id)}
 
     def status(self) -> dict:
         now = self.clock()

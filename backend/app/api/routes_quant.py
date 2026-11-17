@@ -1,7 +1,7 @@
 """Autonomous quant trading: strategy modules, validation, opportunity scan, the three universes, the dashboard summary."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -41,8 +41,12 @@ def validate(body: ValidateIn, user: User = Depends(trader), session: Session = 
 
 
 @router.get("/validations")
-def list_validations(_: User = Depends(viewer), session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> list[dict]:
-    return opportunities.validations(session, rt.clock())
+def list_validations(response: Response, limit: int | None = Query(None, ge=1, le=5000), offset: int = Query(0, ge=0), _: User = Depends(viewer),
+                     session: Session = Depends(get_session), rt: TradingRuntime = Depends(get_runtime)) -> list[dict]:
+    """Every setup's latest validation, newest first. `limit`/`offset` page through them; X-Total-Count gives the total."""
+    rows = opportunities.validations(session, rt.clock())
+    response.headers["X-Total-Count"] = str(len(rows))
+    return rows[offset: offset + limit] if limit else rows[offset:]
 
 
 class ScanIn(BaseModel):

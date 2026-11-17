@@ -11,14 +11,17 @@ export function useApi<T = Json>(path: string | null, refreshMs = 0) {
   const [loading, setLoading] = useState(!!path);
   const current = useRef(path);
   current.current = path;
+  const inFlight = useRef(false);
   const reload = useCallback(async () => {
     if (!path) { setData(null); setLoading(false); return; }
+    inFlight.current = true;
     try {
       const d = await api<T>(path);
       if (current.current === path) { setData(d); setError(null); }
     } catch (e) {
       if (current.current === path) { setError(e instanceof Error ? e.message : "Request failed"); setData(null); }
     } finally {
+      inFlight.current = false;
       if (current.current === path) setLoading(false);
     }
   }, [path]);
@@ -26,8 +29,13 @@ export function useApi<T = Json>(path: string | null, refreshMs = 0) {
     setLoading(!!path);
     reload();
     if (!refreshMs || !path) return;
-    const id = setInterval(reload, refreshMs);
-    return () => clearInterval(id);
+    // Periodic refresh only while the tab is visible, and never on top of a request still waiting for its answer: a
+    // slow server is not sent a growing queue, and background tabs cost nothing. A tab coming back refreshes at once.
+    const tick = () => { if (!document.hidden && !inFlight.current) reload(); };
+    const id = setInterval(tick, refreshMs);
+    const onVisible = () => { if (!document.hidden) tick(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, [reload, refreshMs, path]);
   return { data, error, loading, reload };
 }

@@ -1,7 +1,6 @@
 """Market data, backtesting and Quant AI endpoints."""
 from __future__ import annotations
 
-import io
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -14,7 +13,7 @@ from ..execution.runtime import RuntimeError_, TradingRuntime
 from ..machine_learning.models import MODEL_NAMES
 from ..market_data.calendars import get_calendar
 from ..market_data.quality import validate_bars
-from ..market_data.sources import Dataset, load_csv
+from ..market_data.sources import Dataset
 from ..market_data.store import BarStore
 from ..market_data.timeframes import TIMEFRAMES
 from ..monitoring import audit

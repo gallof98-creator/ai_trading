@@ -25,7 +25,7 @@ from ..database.models import AppSetting, BrokerAccount, DataIngestionRun, DataS
 from ..market_data.timeframes import TIMEFRAMES, tf_delta
 from . import quality
 from .http import BudgetExhausted, SourceAuthError, SourceDisabled, SourceError, SourceNotFound, SourceRateLimited, scoped
-from .lake import DATASETS, DataLake, now_utc
+from .lake import DataLake, now_utc
 from .providers import PROVIDERS
 from .sources.alpaca import AlpacaBars
 from .sources.coingecko import CoinGeckoSource

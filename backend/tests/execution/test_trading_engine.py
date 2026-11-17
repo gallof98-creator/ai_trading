@@ -364,3 +364,104 @@ def test_strategy_exits_close_by_themselves_only_when_the_user_switched_it_on():
     ts = h.bar(100, 101, 99, 100)
     (again,) = h.signal(1, ts, bar_tag="new-entry")
     assert again.status is OrderStatus.PENDING_APPROVAL
+
+
+def _accept_then_go_dark(h, fill_before_lookup=None):
+    """The first request reaches the exchange (and maybe fills) but its answer is lost; then the network is down."""
+    import ccxt
+
+    original, calls = h.exchange.create_order, []
+    down = {"on": True}
+
+    def create(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            out = original(*a, **kw)
+            if fill_before_lookup:
+                h.exchange.fill("1", out["amount"], fill_before_lookup)
+            raise ccxt.RequestTimeout("accepted, answer lost")
+        raise ccxt.NetworkError("down")
+
+    adapter, real_find = h.engine.brokers.get("binance-test"), None
+    real_find = adapter.find_order
+
+    def find(cid, iid):
+        if down["on"]:
+            raise ConnectionLost("down")
+        return real_find(cid, iid)
+
+    h.exchange.create_order = create
+    adapter.find_order = find
+    return down
+
+
+def test_an_order_whose_outcome_is_unknown_is_looked_up_and_blocks_new_entries_until_then():
+    h = ccxt_harness()
+    down = _accept_then_go_dark(h)
+    (order,) = h.signal(1, T0, price=30000.0, stop=3000.0)
+    assert order.status is OrderStatus.REJECTED and "outcome unknown" in order.reason
+    assert h.engine.unconfirmed_instruments() == {("binance-test", BTC)}
+    # A new entry on the same instrument would be a duplicate if the first one did arrive: refused.
+    (again,) = h.signal(1, T0 + timedelta(hours=1), price=30000.0, stop=3000.0)
+    assert again.status is OrderStatus.REJECTED and "may have reached the broker" in again.reason and len(h.exchange.orders) == 1
+    # The exchange did take it, and it filled meanwhile: once reachable, it is found and its fill is booked.
+    h.exchange.fill("1", h.exchange.orders["1"]["amount"], 30010.0)
+    h.engine.poll_orders(T0 + timedelta(minutes=5))   # still down: unchanged
+    assert h.engine.unconfirmed_instruments() and h.portfolio.qty(h.dep.key) == 0
+    down["on"] = False
+    h.engine.poll_orders(T0 + timedelta(minutes=6))
+    assert h.engine.unconfirmed_instruments() == set()
+    assert h.engine.orders[order.id].status is OrderStatus.FILLED and h.portfolio.qty(h.dep.key) == pytest.approx(order.qty)
+    state = h.engine.to_state()
+    assert state["unconfirmed"] == {}
+
+
+def test_an_order_found_already_filled_after_a_lost_answer_has_its_fill_booked():
+    h = ccxt_harness()
+    import ccxt
+
+    original, calls = h.exchange.create_order, []
+
+    def create(*a, **kw):
+        out = original(*a, **kw)
+        calls.append(1)
+        if len(calls) == 1:   # the entry: filled at once, its answer lost (the protective stop that follows is normal)
+            h.exchange.fill(out["id"], out["amount"], 30005.0)
+            raise ccxt.RequestTimeout("accepted and filled, answer lost")
+        return out
+
+    h.exchange.create_order = create
+    (order,) = h.signal(1, T0, price=30000.0, stop=3000.0)
+    assert order.status is OrderStatus.FILLED
+    assert h.portfolio.qty(h.dep.key) == pytest.approx(order.qty), "the fill of an order found after a lost answer was never booked"
+    assert h.engine.protections[h.dep.key].stop_order is not None   # and the position got its stop
+
+
+def test_a_retry_refused_as_a_duplicate_finds_the_first_attempt_instead_of_losing_it():
+    """First request arrives but its answer is lost; the lookup fails too; the retry is refused because the client id is
+    already used (as Alpaca does). The order exists: it must be followed, not marked rejected."""
+    h = ccxt_harness()
+    import ccxt
+
+    original, calls = h.exchange.create_order, []
+    adapter = h.engine.brokers.get("binance-test")
+    real_find, finds = adapter.find_order, []
+
+    def create(symbol, kind, side, amount, price, params):
+        calls.append(1)
+        if len(calls) == 1:
+            original(symbol, kind, side, amount, price, params)
+            raise ccxt.RequestTimeout("answer lost")
+        if len(calls) == 2:
+            raise ccxt.InvalidOrder("client_order_id must be unique")
+        return original(symbol, kind, side, amount, price, params)
+
+    def find(cid, iid):
+        finds.append(1)
+        if len(finds) == 1:
+            raise ConnectionLost("lookup failed too")
+        return real_find(cid, iid)
+
+    h.exchange.create_order, adapter.find_order = create, find
+    (order,) = h.signal(1, T0, price=30000.0, stop=3000.0)
+    assert order.status is OrderStatus.SUBMITTED and order.broker_order_id == "1" and len(h.exchange.orders) == 1

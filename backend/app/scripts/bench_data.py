@@ -21,7 +21,6 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import select
 
-from ..core.config import Settings
 from ..database.base import Database
 from ..database.models import BarRow
 from ..datahub.http import ApiClient

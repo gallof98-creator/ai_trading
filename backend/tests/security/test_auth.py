@@ -127,3 +127,32 @@ def test_cors_only_allows_configured_origins(client):
     bad = client.options("/api/auth/me", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"})
     assert ok.headers.get("access-control-allow-origin") == "http://localhost:3000"
     assert "access-control-allow-origin" not in bad.headers
+
+
+def test_every_endpoint_requires_a_login_and_no_viewer_can_change_anything(client):
+    """Exhaustive, from the API schema, so a new endpoint without protection fails here."""
+    import re
+
+    from tests.conftest import VIEWER
+
+    viewer = login(client, VIEWER)
+    public = {("POST", "/api/auth/login"), ("GET", "/health")}
+    # Endpoints every signed-in user needs for their own session.
+    own_session = {("POST", "/api/auth/logout"), ("POST", "/api/auth/password"), ("POST", "/api/notifications/read-all"),
+                   ("POST", "/api/notifications/x/read"),
+                   # Calculations sent as POST that change nothing: a target-portfolio preview and a screener query.
+                   ("POST", "/api/global/portfolio/target"), ("POST", "/api/scanner/run")}
+    checked, open_to_viewer = 0, []
+    for path, ops in client.app.openapi()["paths"].items():
+        for method in ops:
+            m, url = method.upper(), re.sub(r"\{[^}]+\}", "x", path)
+            if (m, path) in public:
+                continue
+            assert client.request(m, url, json={}).status_code in (401, 403), f"{m} {path} answers without a login"
+            if m != "GET" and (m, path) not in own_session:
+                r = client.request(m, url, json={}, headers=viewer)
+                if r.status_code != 403:
+                    open_to_viewer.append(f"{m} {path} ({r.status_code})")
+            checked += 1
+    assert checked > 100
+    assert open_to_viewer == [], open_to_viewer
