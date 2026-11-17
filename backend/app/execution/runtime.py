@@ -1521,7 +1521,7 @@ class TradingRuntime:
         unit = price * inst.contract_multiplier * intent.fx_rate
         fits = [order.qty, self.risk.headroom(order.broker_id, inst, order.strategy, state) / unit]
         if intent.stop_distance:
-            fits.append(self.user_settings.risk.risk_per_trade * state.equity / ((intent.stop_distance + cost) * inst.contract_multiplier * intent.fx_rate))
+            fits.append(self.user_settings.risk.risk_per_trade * state.scoped(order.broker_id).equity / ((intent.stop_distance + cost) * inst.contract_multiplier * intent.fx_rate))
         qty = inst.round_qty(min(fits))
         if qty <= 0 or qty < inst.min_qty:
             return f"at the current price {price:g} no tradable quantity fits the risk and exposure limits any more"

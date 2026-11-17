@@ -189,10 +189,12 @@ class PortfolioEngine:
         return out
 
     def state(self, ts: datetime) -> PortfolioState:
-        equity = self.equity(ts)
+        balances = self.broker_balances(ts)
+        equity = sum(b["equity_base"] for b in balances)
         return PortfolioState(ts=ts, equity=equity, day_start_equity=self.day_start_equity or equity, peak_equity=self.peak_equity or equity,
                               exposures=self.exposures(ts), correlations=self.correlations(), reconciled=self.reconciled,
-                              valuation_problems=dict(self.valuation_problems))
+                              valuation_problems=dict(self.valuation_problems),
+                              account_equity={b["broker_id"]: b["equity_base"] for b in balances})
 
     def revalue(self, ts: datetime) -> PortfolioState:
         """Record an equity observation and roll the daily / peak reference levels."""

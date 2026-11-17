@@ -420,7 +420,8 @@ class TradingEngine:
             limits = self._limits()
             fx_rate = self._fx(inst.quote_currency, ts)
             cost = self._cost_per_unit(inst, signal.price)
-            qty = position_size(state.equity, limits.risk_per_trade, signal.stop_distance or 0.0, signal.price, inst, fx_rate,
+            # Risk per trade is a fraction of the equity of the account that trades, not of all accounts together.
+            qty = position_size(state.scoped(dep.broker_id).equity, limits.risk_per_trade, signal.stop_distance or 0.0, signal.price, inst, fx_rate,
                                 max_notional=self.risk.headroom(dep.broker_id, inst, dep.strategy.name, state),
                                 realized_vol=self._realized_vol(inst.id), target_vol=limits.target_volatility, cost_per_unit=cost)
             if qty <= 0:

@@ -83,3 +83,34 @@ def test_a_crypto_fee_taken_in_coins_is_booked_as_commission_not_a_discrepancy(t
     assert rt.portfolio.reconcile() and not rt.portfolio.reconciled
     acct.positions = [Position(broker_id="alpaca-paper", instrument_id=iid, qty=0.011, avg_price=68_000.0)]
     assert rt.portfolio.reconcile()
+
+
+def test_positions_are_sized_on_the_capital_of_the_account_that_trades_not_on_all_accounts(tmp_path):
+    """Two accounts of 1,000 EUR each. A position at one of them must be sized and capped on ITS 1,000 EUR: sizing on the
+    2,000 of both made positions twice as large, and let one account hold twice its own capital."""
+    from app.domain.models import Order, Side
+    from app.risk.models import OrderIntent
+    from app.risk.sizing import position_size
+
+    rt = make_rt(tmp_path)
+    rt.create_paper_account("paper-2", "Second", "admin")
+    iid = "CRYPTO:BTC/USD"
+    inst = rt.registry.get(iid)
+    rt.portfolio.mark(iid, 50_000.0, rt.clock())
+    state = rt.engine._risk_state(rt.clock())
+    assert state.equity == pytest.approx(2_000.0) and state.account_equity == {"paper-main": pytest.approx(1_000.0), "paper-2": pytest.approx(1_000.0)}
+    fx = 0.9
+    # Risk 2% of 1,000 = 20 EUR at a 1,000 USD stop: 0.0222 BTC, not the 0.0444 that 2,000 EUR would give.
+    qty = position_size(state.scoped("paper-main").equity, 0.02, 1_000.0, 50_000.0, inst, fx)
+    assert qty == pytest.approx(20 / (1_000 * fx), rel=1e-3)
+    # The 25% per-instrument cap is 250 EUR of THIS account.
+    room = rt.risk.headroom("paper-main", inst, "s", state)
+    assert room == pytest.approx(250.0, rel=1e-3)
+    big = Order(broker_id="paper-main", instrument_id=iid, side=Side.BUY, qty=0.01, strategy="s")   # 450 EUR: 45% of the account
+    decision = rt.risk.evaluate(OrderIntent(big, inst, 50_000.0, fx, 1_000.0), state)
+    assert not decision.approved and any("exposure in CRYPTO:BTC/USD" in r for r in decision.reasons)
+    # Positions at the other account do not use up this one's room.
+    from app.risk.models import Exposure
+
+    state.exposures.append(Exposure("paper-2", iid, "s", "crypto", "USD", 240.0, 240.0))
+    assert rt.risk.headroom("paper-main", inst, "s", state) == pytest.approx(250.0, rel=1e-3)

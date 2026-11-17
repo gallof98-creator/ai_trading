@@ -61,6 +61,14 @@ function TradingSettings({ readOnly }: { readOnly: boolean }) {
           </div>
         </Panel>
         <Panel title="Risk limits">
+          {!readOnly && <div className="mb-3 rounded border border-line p-2 text-xs text-dim">
+            <p>Every percentage is of the equity of the account the order goes to (each account on its own capital); daily loss and drawdown are of all accounts together.</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button kind="ghost" type="button" onClick={() => setS({ ...s, risk: { ...s.risk, risk_per_trade: 0.005, max_exposure_per_asset: 0.05, max_exposure_per_strategy: 1, max_concurrent_positions: 20, max_correlated_exposure: 0.3 } })}>
+                Fill in: many small positions</Button>
+              <span>risk 0.5% per trade, at most 5% of the account per instrument, up to 20 positions, at most 30% in highly correlated instruments. Nothing changes until you press Save.</span>
+            </div>
+          </div>}
           <div className="grid gap-3 sm:grid-cols-2">
             {RISK_FIELDS.map((f) => (
               <Field key={f.key} label={`${f.label}${f.percent ? " (%)" : ""}`}>

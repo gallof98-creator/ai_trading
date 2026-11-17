@@ -31,6 +31,17 @@ class PortfolioState:
     correlations: dict[tuple[str, str], float] = field(default_factory=dict)
     reconciled: bool = True  # False when internal books and broker-reported positions disagree
     valuation_problems: dict = field(default_factory=dict)  # broker id -> why its figures could not be read just now
+    # Each account's own equity (base currency). Position sizes and exposure limits are fractions of the equity of the
+    # account the order goes to: a second account's capital must never enlarge positions in the first one.
+    account_equity: dict[str, float] = field(default_factory=dict)
+
+    def scoped(self, broker_id: str) -> "PortfolioState":
+        """This state seen from one account: its own equity and its own positions. Unchanged when accounts are unknown."""
+        if broker_id not in self.account_equity:
+            return self
+        from dataclasses import replace
+
+        return replace(self, equity=self.account_equity[broker_id], exposures=[e for e in self.exposures if e.broker_id == broker_id])
 
     @property
     def margin_used(self) -> float:

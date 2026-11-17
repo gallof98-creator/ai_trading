@@ -325,6 +325,15 @@ QAT_SEC_USER_AGENT setting takes precedence). The SEC may refuse a generic addre
 "Results, fundamentals, news" step: filing index daily, reported figures after each new 10-Q/10-K (at least monthly), news
 every cycle. ETFs and crypto have no results or reports: only the news pause applies to them.
 
+## Each account on its own capital
+
+Position size and the exposure limits (per instrument, per strategy, per account, leverage, margin, number of positions,
+correlated exposure) are fractions of the equity of the account the order goes to, and count only that account's positions.
+Before, they were fractions of all accounts together: with a 1,000 EUR internal paper account and a 1,000 EUR Alpaca
+virtual capital, a position at Alpaca was sized on 2,000 EUR, and the account could hold twice its own capital. Daily loss
+and drawdown stay on all accounts together. For many small positions, the Settings page fills in a profile (0.5% risk per
+trade, 5% per instrument, 20 positions, 30% correlated); nothing changes until it is saved.
+
 ## Positions you close or open yourself at the broker
 
 You may close, reduce or open positions directly in the broker's own app or website (Alpaca). On every round of order

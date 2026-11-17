@@ -106,6 +106,9 @@ class RiskEngine:
             return RiskDecision(True, ["risk-reducing order"], risk_increasing=False)
 
         reasons: list[str] = []
+        # Sizes and exposures are judged against the account the order goes to (its equity, its positions). Loss limits
+        # (daily loss, drawdown) stay on the whole portfolio, in `monitor`.
+        state = state.scoped(order.broker_id)
         eq = state.equity
         if self.kill_switch_on:
             reasons.append(f"kill switch engaged: {self.kill_switch_reason}")
@@ -164,6 +167,7 @@ class RiskEngine:
     def headroom(self, broker_id: str, instrument, strategy: str | None, state: PortfolioState) -> float:
         """Largest additional notional (base currency) a new position in `instrument` may add without
         breaching any exposure limit. Used by position sizing; `evaluate` remains the final gate."""
+        state = state.scoped(broker_id)
         limits, eq = self._limits(), state.equity
         if eq <= 0:
             return 0.0
