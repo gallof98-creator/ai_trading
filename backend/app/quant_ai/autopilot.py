@@ -418,7 +418,9 @@ class Autopilot:
             known = {(v["strategy"], v["instrument_id"], v["timeframe"]):
                      ("expired" if v["due_for_retest"] or (v.get("filters") or none) != self.rt.company.signature(v["instrument_id"], v["timeframe"])
                       # tested long-only but shorts are now allowed (or the reverse): the rule traded would not be the one tested
-                      or bool(v.get("long_only", True)) == bool(cfg.allow_short) else v["status"])
+                      or bool(v.get("long_only", True)) == bool(cfg.allow_short)
+                      # validated without a take profit, which the user now requires
+                      or (cfg.always_take_profit and (v.get("params") or {}).get("take_profit_atr", 0) is None) else v["status"])
                      for v in current}
             # Setups that were tradable (validated or candidate when last tested) are retested first: after a change of
             # criteria or filters, what could trade comes back in the first cycles instead of waiting behind every
@@ -454,7 +456,8 @@ class Autopilot:
                     bars = cfg.validation_bars if tf_delta(tf) >= pd.Timedelta(days=1) else cfg.intraday_validation_bars
                     if (iid, tf) not in datasets:
                         datasets[(iid, tf)] = opp.bt.load_dataset(session, iid, tf, last=bars)
-                    specs.append(opp.prepare(session, self.rt, strategy, iid, tf, allow_short=cfg.allow_short, max_bars=bars, data=datasets[(iid, tf)]))
+                    specs.append(opp.prepare(session, self.rt, strategy, iid, tf, allow_short=cfg.allow_short, max_bars=bars, data=datasets[(iid, tf)],
+                                             always_take_profit=cfg.always_take_profit))
                     labels.append((strategy, iid, tf))
                 except Exception as exc:  # e.g. an unknown strategy name
                     failed += 1
@@ -556,7 +559,7 @@ class Autopilot:
             return {"skipped": "trading is paused by the risk engine"}
         with self.rt.db.session() as session:
             out = opp.scan(session, self.rt, broker, ACTOR, include_candidates=self.cfg.paper_candidates, require_regime_fit=self.cfg.require_regime_fit,
-                           include_exploration=self.cfg.exploration)
+                           include_exploration=self.cfg.exploration, always_take_profit=self.cfg.always_take_profit)
         if out["proposed"]:
             names = ", ".join(f"{p['strategy']} on {p['instrument_id'].split(':')[1]}" for p in out["proposed"])
             self._note("scan", f"{len(out['proposed'])} new proposal(s): {names}")

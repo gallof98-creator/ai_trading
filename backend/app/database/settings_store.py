@@ -112,6 +112,9 @@ class AutopilotSettings(BaseModel):
     # Exploration: also trade setups that FAILED validation but did not lose on unseen data, to measure them in real time.
     # Paper accounts only (the internal one or a broker's paper environment), never real money; off unless switched on.
     exploration: bool = False
+    # The validation may choose "no take profit" (exit on the strategy's own signal or the stop). On: every strategy is
+    # validated, and traded, with a take profit.
+    always_take_profit: bool = False
     # Entry filters from company events and fundamentals (see quant_ai/filters.py). The earnings and fundamentals filters
     # are part of the validation; the news pause applies in live trading only.
     filters: FilterSettings = Field(default_factory=FilterSettings)

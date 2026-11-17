@@ -122,7 +122,7 @@ def _static_fx(rt, instrument_id: str) -> dict[str, float]:
 
 
 def prepare(session: Session, rt, strategy: str, instrument_id: str, timeframe: str, allow_short: bool = False, max_bars: int | None = None,
-            data=None) -> WalkForwardSpec:
+            data=None, always_take_profit: bool = False) -> WalkForwardSpec:
     """Everything a validation needs, read from the database and the runtime. The result is self-contained, so the
     computation itself (`walk_forward`) can run in another process."""
     if data is None:
@@ -140,7 +140,8 @@ def prepare(session: Session, rt, strategy: str, instrument_id: str, timeframe: 
     return WalkForwardSpec(
         blocked_any=blocked_any, blocked_long=blocked_long, filters=filters,
         strategy=strategy, instrument_id=instrument_id, timeframe=timeframe, data=data, param_grid={"stop_atr": sorted({exits["stop_atr"], *STOP_GRID}),
-                                                                                                 "take_profit_atr": take_profit_grid(timeframe)},
+                                                                                                 "take_profit_atr": [t for t in take_profit_grid(timeframe)
+                                                                                                                     if t is not None or not always_take_profit]},
         initial_capital=capital, n_folds=CRITERIA["min_folds"], fixed_params=fixed, base_currency=rt.portfolio.base, limits=rt.user_settings.risk,
         static_fx=_static_fx(rt, instrument_id), instruments=rt.registry.all(), min_trades=3, robustness=True,
         stress_costs=CRITERIA["stress_cost_multiplier"])
@@ -319,7 +320,8 @@ def _recent(last_bar_close: pd.Timestamp, timeframe: str, now: datetime) -> bool
 
 
 def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[str] | None = None, min_traded_value: float = 0.0,
-         include_candidates: bool = False, require_regime_fit: bool = False, include_exploration: bool = False) -> dict:
+         include_candidates: bool = False, require_regime_fit: bool = False, include_exploration: bool = False,
+         always_take_profit: bool = False) -> dict:
     """Look at every validated (strategy, instrument, timeframe): where the strategy opened a position on the latest
     completed bar and the market regime suits it, deploy it (if it is not already) and create a proposal.
 
@@ -368,6 +370,9 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
         funnel["setups"] += 1
 
         level = level_of(v)
+        if always_take_profit and level and (v.get("params") or {}).get("take_profit_atr", 0) is None:
+            skip("validation", "validated without a take profit, which is now required: waiting for its retest")
+            continue
         if level == "candidate":
             if not include_candidates:
                 skip("validation", "candidate only (too few unseen trades): not proposed unless candidates are allowed")

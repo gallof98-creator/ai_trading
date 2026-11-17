@@ -206,6 +206,11 @@ ones the validation picked. The strategies' own parameters keep their defaults. 
 likely; the parameter-robustness and multiple-testing checks count every combination tried. Raising the criteria version
 sends every earlier validation back to be tested again.
 
+"Always use a take profit" (Autopilot settings) removes the "none" choice: every setup is then validated, and traded, with a
+target; setups validated without one are retested first and take no new position until then. Positions already open keep
+the exits they were opened with. The Autonomous page lists each open position's stop and take profit, and whether the
+broker holds it or the platform watches it ("◦"); "none" means the strategy exits on its own signal or at the stop.
+
 Strategies are validated and traded long-only by default: a small cash account cannot sell short, and a rule should be tested the way
 it will be traded. Validation uses the most recent 1,500 bars (about six years of daily data); intraday timeframes use the most recent
 20,000 bars (about a year of five-minute bars). Significance is always judged on daily returns, so a short intraday history cannot

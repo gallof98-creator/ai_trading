@@ -162,6 +162,7 @@ function AutopilotPanel({ canTrade, isAdmin, strategies, accounts }: { canTrade:
             {[["seed_most_active", "Add the most traded US stocks when the universe is small"], ["daily_price_update", "Refresh daily prices"], ["live_subscribe", "Ask for live prices where a strategy is validated"], ["live_all_candidates", "Live prices for every followed instrument (the most important stream, the rest by REST requests)"],
               ["minute_update", "Download official bars every minute for followed instruments"],
               ["paper_candidates", "Also propose candidate setups (weaker evidence, paper accounts only)"],
+              ["always_take_profit", "Always use a take profit (the validation may otherwise choose none and let the strategy exit on its own signal)"],
               ["exploration", "Exploration: also trade setups that failed validation but did not lose on unseen data (many more trades; paper accounts only, internal or Alpaca paper; results shown apart)"], ["require_regime_fit", "Only propose when the market regime suits the strategy family"], ["allow_short", "Allow short selling (needs a margin account)"]]
               .map(([k, l]) => <label key={k} className="flex items-center gap-1.5"><input type="checkbox" className="!w-auto" checked={cfg[k]} onChange={(e) => set(k, e.target.checked)} />{l}</label>)}
           </div>
@@ -307,8 +308,13 @@ function Autonomous({ user }: { user: User }) {
           <h3 className="mb-1 mt-3 text-xs text-dim">Closed trades by strategy</h3>
           <Table max="max-h-40" empty="No closed trade yet." head={["Strategy", "Trades", "Win rate", "P&L (quote currency)"]} rows={d.data.performance_by_strategy.map((x: Json) => [nice(x.strategy), x.trades, pct(x.win_rate, 0), <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Open positions</h3>
-          <Table max="max-h-40" empty="No open position." head={["Instrument", "Strategy", "Evidence", "Quantity", "Entry", "Last", "Stop", "Account"]}
-            rows={positions.map((x: Json) => [<Link key="s" className="text-accent hover:underline" href={chartHref(x.instrument_id)}>{sym(x.instrument_id)}</Link>, nice(x.strategy), x.evidence ?? "—", num(x.qty, Math.abs(x.qty) < 1 ? 5 : 0), num(x.avg_price), x.price ? num(x.price) : "—", x.stop_price ? num(x.stop_price) : "—", x.broker_id])} />
+          <Table max="max-h-48" empty="No open position." head={["Instrument", "Strategy", "Evidence", "Quantity", "Entry", "Last", "Return", "Stop", "Take profit", "Account"]}
+            rows={positions.map((x: Json) => [<Link key="s" className="text-accent hover:underline" href={chartHref(x.instrument_id)}>{sym(x.instrument_id)}</Link>, nice(x.strategy), x.evidence ?? "—",
+              num(x.qty, Math.abs(x.qty) < 1 ? 5 : 0), num(x.avg_price), x.price ? num(x.price) : "—", <span key="r" className={tone(x.unrealized_return)}>{pct(x.unrealized_return)}</span>,
+              x.stop_price ? <span key="st" title={`held by the ${x.stop_held_by}`}>{num(x.stop_price)}{x.stop_held_by === "platform" ? " ◦" : ""}</span> : "—",
+              x.take_profit_price ? <span key="tp" title={`held by the ${x.take_profit_held_by}`}>{num(x.take_profit_price)}{x.take_profit_held_by === "platform" ? " ◦" : ""}</span>
+                : <span key="tp" className="text-dim" title={x.exit_rule}>none</span>, x.broker_id])} />
+          <p className="mt-1 text-xs text-dim">◦ = watched by the platform on live prices and bar closes (the broker cannot hold it). &quot;none&quot;: the validation chose no take profit for that strategy, which then exits on its own signal or at the stop.</p>
         </Panel>
       </div>
 

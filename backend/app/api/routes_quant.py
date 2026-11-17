@@ -97,14 +97,29 @@ def dashboard(_: User = Depends(viewer), session: Session = Depends(get_session)
         "performance_by_strategy": sorted(by_strategy.values(), key=lambda r: -r["pnl_quote"]),
         # Exploratory trades are kept apart: their result says whether the rejected setups really had nothing.
         "performance_by_evidence": [by_level[k] for k in ("validated", "candidate", "exploration") if k in by_level],
-        "positions": [{"broker_id": b, "instrument_id": i, "strategy": st, "evidence": rt.evidence_of(b, i, st), "qty": sl.qty, "avg_price": sl.avg_price, "price": rt.portfolio.prices.get(i),
-                       "stop_price": (rt.engine.protections.get((b, i, st)).stop_price if rt.engine.protections.get((b, i, st)) else None)}
-                      for (b, i, st), sl in rt.portfolio.slices.items() if sl.qty],
+        "positions": [_position_row(rt, b, i, st, sl) for (b, i, st), sl in rt.portfolio.slices.items() if sl.qty],
     }
 
 
 class PauseIn(BaseModel):
     reason: str = Field("paused by the user", max_length=200)
+
+
+def _position_row(rt: TradingRuntime, broker_id: str, instrument_id: str, strategy: str | None, sl) -> dict:
+    """An open position with its exits: where the stop and the take profit are, and who holds each (the broker, or the
+    platform watching prices). No take profit means the strategy exits on its own signal or at the stop."""
+    prot = rt.engine.protections.get((broker_id, instrument_id, strategy))
+    target = (sl.avg_price + prot.direction * prot.take_profit_distance) if prot and prot.take_profit_distance else None
+    price = rt.portfolio.prices.get(instrument_id)
+    return {"broker_id": broker_id, "instrument_id": instrument_id, "strategy": strategy, "evidence": rt.evidence_of(broker_id, instrument_id, strategy),
+            "qty": sl.qty, "avg_price": sl.avg_price, "price": price,
+            "unrealized_return": (price / sl.avg_price - 1) * (1 if sl.qty > 0 else -1) if price and sl.avg_price else None,
+            "stop_price": prot.stop_price if prot else None,
+            "stop_held_by": None if not prot or prot.stop_price is None else ("platform" if prot.soft_stop else "broker"),
+            "take_profit_price": target,
+            "take_profit_held_by": None if target is None else ("broker" if prot.target_order is not None and prot.target_order.is_open else "platform"),
+            "exit_rule": ("no protection recorded (opened outside the platform or before it existed)" if prot is None else
+                          "stop and take profit" if target is not None else "stop, and the strategy's own exit signal (no take profit was chosen)")}
 
 
 def _validation_rows(session: Session, rt: TradingRuntime, limit: int = 400) -> dict:

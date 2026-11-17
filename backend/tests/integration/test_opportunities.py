@@ -370,3 +370,22 @@ def test_validations_still_running_when_time_is_up_are_collected_next_time_not_r
         assert all(isinstance(o, dict) and o["combinations_tested"] for _, _, o in again)
     finally:
         pool.close()
+
+
+def test_always_take_profit_removes_the_no_target_choice_and_holds_back_setups_validated_without_one(rt):
+    with rt.db.session() as s:
+        free = opp.prepare(s, rt, "ema_crossover", CYC, "1d")
+        bound = opp.prepare(s, rt, "ema_crossover", CYC, "1d", always_take_profit=True)
+    assert None in free.param_grid["take_profit_atr"] and None not in bound.param_grid["take_profit_atr"]
+    with rt.db.session() as s:
+        v = opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
+        payload = {k: v[k] for k in v if k not in ("id", "status", "tested_at")}
+        payload["params"] = {**payload["params"], "take_profit_atr": None}
+        rt.now[0] += timedelta(seconds=1)
+        opp.record(s, v["status"], payload, rt.clock())
+    with rt.db.session() as s:
+        held = opp.scan(s, rt, "paper-main", "admin", include_candidates=True, always_take_profit=True)
+    assert held["proposed"] == [] and any("take profit, which is now required" in x["reason"] for x in held["skipped"])
+    with rt.db.session() as s:
+        free_scan = opp.scan(s, rt, "paper-main", "admin", include_candidates=True)
+    assert not any("now required" in x["reason"] for x in free_scan["skipped"])

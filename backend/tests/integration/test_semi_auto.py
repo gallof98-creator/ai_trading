@@ -710,3 +710,21 @@ def test_short_sales_at_alpaca_are_whole_shares_because_alpaca_does_not_short_fr
     closing = short.model_copy(update={"reduce_only": True})     # selling fractions you own is not a short sale
     assert not any("fractions of a share short" in r for r in adapter.instrument_reasons(closing))
     rt.live.stop()
+
+
+def test_the_positions_table_shows_each_exit_and_who_holds_it(tmp_path):
+    from app.api.routes_quant import _position_row
+
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    row = _position_row(rt, *key, rt.portfolio.slices[key])
+    prot = rt.engine.protections[key]
+    assert row["stop_price"] == prot.stop_price and row["stop_held_by"] == "platform"           # fractional shares: nothing rests at Alpaca
+    assert row["take_profit_price"] == pytest.approx(rt.portfolio.slices[key].avg_price + prot.take_profit_distance)
+    assert row["take_profit_held_by"] == "platform" and row["exit_rule"] == "stop and take profit"
+    prot.take_profit_distance = None
+    assert _position_row(rt, *key, rt.portfolio.slices[key])["take_profit_price"] is None
+    assert "no take profit was chosen" in _position_row(rt, *key, rt.portfolio.slices[key])["exit_rule"]
+    rt.live.stop()
