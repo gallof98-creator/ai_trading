@@ -354,3 +354,19 @@ def test_the_validation_list_reads_only_each_setups_latest_test_and_can_be_paged
         opp._CACHE.clear()
         rows = opp.validations(s, rt.clock())
     assert [r["id"] for r in rows] == [second["id"]] and first["id"] != second["id"]
+
+
+def test_validations_still_running_when_time_is_up_are_collected_next_time_not_restarted(rt):
+    from app.quant_ai.parallel import ValidationPool
+
+    pool = ValidationPool()
+    try:
+        with rt.db.session() as s:
+            specs = [opp.prepare(s, rt, name, CYC, "1d") for name in ("ema_crossover", "macd")]
+        first = pool.run_keyed([("a", specs[0]), ("b", specs[1])], workers=2, timeout=0.01)
+        assert first == [] and pool.running() == {"a", "b"}            # out of time: nothing thrown away
+        again = pool.run_keyed([("a", specs[0])], workers=2, timeout=600)  # "a" is not started a second time
+        assert sorted(k for k, _, _ in again) == ["a", "b"] and pool.running() == set()
+        assert all(isinstance(o, dict) and o["combinations_tested"] for _, _, o in again)
+    finally:
+        pool.close()

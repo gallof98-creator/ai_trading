@@ -188,8 +188,8 @@ class PortfolioEngine:
         self._corr_cache = (self._marks, out)
         return out
 
-    def state(self, ts: datetime) -> PortfolioState:
-        balances = self.broker_balances(ts)
+    def state(self, ts: datetime, balances: list[dict] | None = None) -> PortfolioState:
+        balances = self.broker_balances(ts) if balances is None else balances
         equity = sum(b["equity_base"] for b in balances)
         return PortfolioState(ts=ts, equity=equity, day_start_equity=self.day_start_equity or equity, peak_equity=self.peak_equity or equity,
                               exposures=self.exposures(ts), correlations=self.correlations(), reconciled=self.reconciled,
@@ -203,7 +203,7 @@ class PortfolioEngine:
         if self.valuation_problems:
             # An account could not be read: its figures are old or missing, so this is not a true observation. It is not
             # recorded, and it does not move the daily or peak reference levels.
-            return self.state(ts)
+            return self.state(ts, balances)
         current = {b["broker_id"]: [b["equity_base"], b["basis"]] for b in balances}
         if self._day != ts.date():
             self._day = ts.date()
@@ -228,7 +228,7 @@ class PortfolioEngine:
         self.peak_equity = max(self.peak_equity or equity, equity)
         self.equity_curve.append((ts, equity))
         self.exposure_curve.append(bool(self.slices))
-        return self.state(ts)
+        return self.state(ts, balances)  # the figures just read, not a second reading of every account
 
     # ------------------------------------------------------------------ reconciliation
     def reconcile(self, pending: set[tuple[str, str]] | frozenset = frozenset()) -> list[str]:

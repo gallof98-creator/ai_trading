@@ -123,6 +123,7 @@ class TradingEngine:
         self._entry_block: Callable[[Order], str | None] = lambda order: None
         self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
         self._rationale: dict = {}  # set while a signal is being turned into orders
+        self._open: dict[str, Order] = {}  # id -> order, for the orders still working (see _record)
         self._external_seen: dict[tuple[str, str], tuple[float, float, datetime]] = {}  # differences with the broker awaiting confirmation
         self._unconfirmed: dict[str, str] = {}  # order id -> when: sent, no answer, unknown whether the broker has it
         self._working: dict[str, float] = {}  # order id -> signed notional (base currency) of entries sent but not yet filled
@@ -158,8 +159,16 @@ class TradingEngine:
 
     def _record(self, order: Order) -> Order:
         self.orders[order.id] = order
+        if order.is_open:
+            self._open[order.id] = order
+        else:
+            self._open.pop(order.id, None)
         self.journal.order(order)
         return order
+
+    def open_orders(self) -> list[Order]:
+        """Orders still working. Kept as an index: scanning every order ever recorded on each bar made long backtests slow."""
+        return list(self._open.values())
 
     def _reject(self, order: Order, reason: str, ts: datetime, alert: bool = True) -> Order:
         rejected = order.model_copy(update={"status": OrderStatus.REJECTED, "reason": f"{order.reason or ''} | rejected: {reason}".strip(" |"),
@@ -194,8 +203,8 @@ class TradingEngine:
             pending = {k for k, (_, _, seen) in self._external_seen.items() if ts - seen < timedelta(minutes=5)}
             # Nor is one on an instrument with one of our orders on its way: the broker may show the fill before we read it.
             protective = {o.id for p in self.protections.values() for o in (p.stop_order, p.target_order) if o is not None}
-            pending |= {(o.broker_id, o.instrument_id) for o in self.orders.values()
-                        if o.is_open and not o.is_simulated_venue and o.id not in protective}
+            pending |= {(o.broker_id, o.instrument_id) for o in self.open_orders()
+                        if not o.is_simulated_venue and o.id not in protective}
             problems = self.portfolio.reconcile(pending)
             if problems:
                 self.journal.alert(ts, "reconciliation", "critical", "Positions do not reconcile with the broker", "; ".join(problems))
@@ -208,7 +217,7 @@ class TradingEngine:
         """Real brokers: pull order updates and turn filled-quantity changes into fills."""
         if self._unconfirmed:
             self._resolve_unconfirmed(ts)
-        for old in [o for o in self.orders.values() if o.is_open and not o.is_simulated_venue]:
+        for old in [o for o in self.open_orders() if not o.is_simulated_venue]:
             adapter = self.brokers.get(old.broker_id)
             try:
                 new = adapter.get_order_status(old)
@@ -232,7 +241,7 @@ class TradingEngine:
             self._record(order)
             self._apply_fill(fill, order)
         # Orders the venue closed without a fill (e.g. reduce-only with nothing left, margin rejection).
-        for o in [o for o in self.orders.values() if o.is_open and o.broker_id == adapter.broker_id]:
+        for o in [o for o in self.open_orders() if o.broker_id == adapter.broker_id]:
             current = adapter.get_order_status(o)
             if current.status is not o.status:
                 self._record(current)
@@ -366,8 +375,8 @@ class TradingEngine:
         broker_id, instrument_id, strategy = key
         # A closing market order that is already on its way (e.g. sent after hours) is never sent a second time:
         # at a broker that does not enforce reduce-only, a duplicate could turn the position the other way.
-        for o in self.orders.values():
-            if o.is_open and o.reduce_only and o.type is OrderType.MARKET and (o.broker_id, o.instrument_id, o.strategy) == key:
+        for o in self.open_orders():
+            if o.reduce_only and o.type is OrderType.MARKET and (o.broker_id, o.instrument_id, o.strategy) == key:
                 return o
         inst = self.registry.get(instrument_id)
         oid = self._new_id()
@@ -629,7 +638,7 @@ class TradingEngine:
                 if b == adapter.broker_id:
                     internal[iid] = internal.get(iid, 0.0) + sl.qty
             protective = {o.id for p in self.protections.values() for o in (p.stop_order, p.target_order) if o is not None}
-            in_flight = {o.instrument_id for o in self.orders.values() if o.is_open and o.broker_id == adapter.broker_id and o.id not in protective}
+            in_flight = {o.instrument_id for o in self.open_orders() if o.broker_id == adapter.broker_id and o.id not in protective}
             for iid in sorted(set(internal) | set(reported)):
                 if (only and iid != only[1]) or iid.startswith("UNMAPPED:") or iid in in_flight:
                     continue
@@ -779,6 +788,7 @@ class TradingEngine:
     def load_state(self, state: dict) -> None:
         self._n = state["n"]
         self.orders = {o["id"]: Order.model_validate(o) for o in state["orders"]}
+        self._open = {i: o for i, o in self.orders.items() if o.is_open}
         self._client_ids = dict(state["client_ids"])
         self._working = dict(state.get("working", {}))
         self._unconfirmed = dict(state.get("unconfirmed", {}))
@@ -805,7 +815,7 @@ class TradingEngine:
         if EmergencyAction.CANCEL_OPEN_ORDERS in actions:
             for approval_id in list(self.approvals):
                 self.resolve_approval(approval_id, False, "system:emergency", ts)
-            for o in [o for o in self.orders.values() if o.is_open and o.id not in protective]:  # stops stay in place
+            for o in [o for o in self.open_orders() if o.id not in protective]:  # stops stay in place
                 self._cancel(o, ts)
                 self._entry_protection.pop(o.id, None)
         if EmergencyAction.FLATTEN_POSITIONS in actions:

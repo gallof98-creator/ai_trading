@@ -34,10 +34,15 @@ class ValidationPool:
         self._executor: ProcessPoolExecutor | None = None
         self._workers = 0
         self.last: dict = {}
+        # Validations still running when a call returned: key -> (spec, future, submitted at). They carry on in the
+        # background and are collected by the next call instead of being thrown away and started again.
+        self._carry: dict = {}
+        self.max_carry_seconds = 3 * 3600.0
 
     def _pool(self, workers: int) -> ProcessPoolExecutor:
         if self._executor is None or self._workers != workers:
             self.close()
+            self._carry.clear()  # their executor is gone
             self._executor = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
             self._workers = workers
         return self._executor
@@ -46,6 +51,63 @@ class ValidationPool:
         if self._executor is not None:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
+
+    def running(self) -> set:
+        """Keys of validations started by an earlier call and still running."""
+        return set(self._carry)
+
+    def run_keyed(self, items: list[tuple], workers: int = 0, timeout: float | None = None,
+                  progress: Callable[[int, int], None] | None = None) -> list[tuple]:
+        """Like `run`, but nothing is lost when time runs out. `items` are (key, spec). Returns (key, spec, outcome) for
+        every validation that finished during this call, including ones started by earlier calls; those still running
+        are kept and collected next time (a key already running is not started twice)."""
+        workers = worker_count(workers)
+        started = time.perf_counter()
+        items = [(k, sp) for k, sp in items if k not in self._carry]
+        if workers <= 1:
+            outcomes = self.run([sp for _, sp in items], 1, timeout, progress)
+            return [(k, sp, o) for (k, sp), o in zip(items, outcomes) if o is not None]
+        try:
+            pool = self._pool(workers)
+            now = time.monotonic()
+            for k, (sp, fut, at) in list(self._carry.items()):
+                if now - at > self.max_carry_seconds:  # stuck: dropped, it will be started again
+                    fut.cancel()
+                    del self._carry[k]
+            for k, sp in items:
+                self._carry[k] = (sp, pool.submit(walk_forward, sp), time.monotonic())
+        except (BrokenProcessPool, OSError, RuntimeError) as exc:
+            log.warning("validation_pool_unavailable", error=type(exc).__name__)
+            self.close()
+            self._carry.clear()
+            outcomes = self._sequential_all([sp for _, sp in items], timeout, progress)
+            return [(k, sp, o) for (k, sp), o in zip(items, outcomes) if o is not None]
+        futures = {fut: k for k, (_, fut, _) in self._carry.items()}
+        done: list[tuple] = []
+        try:
+            for fut in as_completed(futures, timeout=timeout):
+                k = futures[fut]
+                sp = self._carry.pop(k)[0]
+                try:
+                    done.append((k, sp, fut.result()))
+                except BrokenProcessPool:
+                    self.close()
+                    self._carry.clear()
+                    break
+                except Exception as exc:  # this validation failed; the others carry on
+                    done.append((k, sp, exc))
+                if progress:
+                    progress(len(done), len(futures))
+        except TimeoutError:
+            pass  # the rest keep running and are collected next time
+        self.last = {"mode": "parallel", "workers": workers, "validations": len(futures), "finished": len(done),
+                     "still_running": len(self._carry), "seconds": round(time.perf_counter() - started, 2)}
+        return done
+
+    def _sequential_all(self, specs, timeout, progress):
+        results: list = [None] * len(specs)
+        self._sequential(specs, results, range(len(specs)), time.perf_counter(), timeout, progress)
+        return results
 
     def run(self, specs: list[WalkForwardSpec], workers: int = 0, timeout: float | None = None,
             progress: Callable[[int, int], None] | None = None) -> list[dict | Exception | None]:

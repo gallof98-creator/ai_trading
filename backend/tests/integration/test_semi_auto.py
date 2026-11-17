@@ -585,7 +585,7 @@ def test_orders_at_a_broker_are_followed_up_once_per_round_of_live_minutes_not_o
 
     rt = make_rt(tmp_path)
     working = Order(broker_id="alpaca-paper", instrument_id="CRYPTO:BTC/USD", side=Side.BUY, qty=1, status=OrderStatus.SUBMITTED, is_simulated=False)
-    rt.engine.orders[working.id] = working
+    rt.engine._record(working)
     calls = []
     rt.engine.poll_orders = lambda ts: calls.append(ts)
     rt.persist = lambda: None

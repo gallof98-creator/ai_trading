@@ -438,7 +438,13 @@ class Autopilot:
         if not todo and waiting:
             self._note("validation", f"nothing to validate yet: {len(waiting)} candidate series still have no complete history "
                                      f"({', '.join(sorted({tf for _, tf in waiting}))}). Add the 1d timeframe to validate on daily data meanwhile.", "warning")
-        batch = todo[: cfg.validations_per_cycle]
+        # Validations still running from an earlier cycle are not started again; new ones are added only while the cores
+        # have room for them (a few per core waiting), so work is never queued faster than it can be done.
+        from .parallel import worker_count
+
+        running = self.pool.running()
+        room = max(0, 3 * worker_count(cfg.validation_workers) - len(running))
+        batch = [t for t in todo if t not in running][: min(cfg.validations_per_cycle, room)]
         done = passed = failed = promising = 0
         # Read each series once, however many strategies are tested on it; then compute side by side; then record.
         specs, labels, datasets = [], [], {}
@@ -454,13 +460,12 @@ class Autopilot:
                     failed += 1
                     self._note("validation", f"{strategy} on {iid} {tf}: {str(exc)[:160]}", "warning")
         datasets.clear()
-        unfinished = 0
-        for (strategy, iid, tf), spec, outcome in zip(labels, specs, self.pool.run(
-                specs, cfg.validation_workers, timeout=self.validation_budget(),
-                progress=lambda done, total: self.state.update(step_progress=f"{done} of {total} validations done"))):
-            if outcome is None:
-                unfinished += 1  # out of time: it stays on the list for the next cycle
-            elif isinstance(outcome, Exception):  # e.g. too little history for this timeframe
+        # Results come back as they finish, including validations started in earlier cycles; those still running when the
+        # cycle's time is up carry on in the background (nothing is thrown away and started again).
+        for (strategy, iid, tf), spec, outcome in self.pool.run_keyed(
+                list(zip(labels, specs)), cfg.validation_workers, timeout=self.validation_budget(),
+                progress=lambda done, total: self.state.update(step_progress=f"{done} of {total} validations done")):
+            if isinstance(outcome, Exception):  # e.g. too little history for this timeframe
                 failed += 1
                 self._note("validation", f"{strategy} on {iid} {tf}: {str(outcome)[:160]}", "warning")
             else:
@@ -474,9 +479,11 @@ class Autopilot:
         if done or failed:
             speed = self.pool.last
             self._note("validation", f"{done} validations run: {passed} validated, {promising} candidates, {done - passed - promising} rejected; "
-                                     f"{remaining} still to do" + (f" ({speed['seconds']}s on {speed['workers']} core(s))" if speed else ""))
-        out = {"run": done, "passed": passed, "candidates": promising, "could_not_run": failed, "remaining": remaining}
-        if specs:
+                                     f"{len(self.pool.running())} still running in the background, {remaining} still to do"
+                                     + (f" ({speed['seconds']}s on {speed['workers']} core(s))" if speed else ""))
+        out = {"run": done, "passed": passed, "candidates": promising, "could_not_run": failed, "remaining": remaining,
+               "running_in_background": len(self.pool.running())}
+        if specs or done:
             out["speed"] = dict(self.pool.last)
             with self.rt.db.session() as session:
                 out["multiple_testing"] = opp.multiple_testing(session, now)
