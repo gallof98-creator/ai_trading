@@ -194,6 +194,9 @@ class AlpacaAdapter(BrokerAdapter):
         if self._snapshot is not None:
             self._snapshot = {**self._snapshot, "at": float("-inf")}
 
+    # A resting order reserves the shares it covers ("held for orders"): nothing else may sell them meanwhile, and a
+    # position cannot be turned the other way in one order.
+    orders_reserve_position = True
     whole_units_for_short = True  # stocks and ETFs: fractional quantities can be bought and sold, never sold short
 
     def map_instruments(self) -> int:
@@ -292,6 +295,8 @@ class AlpacaAdapter(BrokerAdapter):
         crypto = inst.asset_class is AssetClass.CRYPTO
         if order.side is Side.SELL and not order.reduce_only and (crypto or not asset.get("shortable", False)):
             reasons.append(f"{inst.symbol} cannot be sold short at Alpaca")
+        if order.side is Side.SELL and not order.reduce_only and not crypto and asset.get("shortable", False) and asset.get("easy_to_borrow") is False:
+            reasons.append(f"{inst.symbol} is not easy to borrow: Alpaca opens short sales only in easy-to-borrow stocks")
         if crypto and order.type is OrderType.STOP:
             reasons.append("Alpaca does not accept plain stop orders for crypto")
         if order.reduce_only and order.type is OrderType.LIMIT:

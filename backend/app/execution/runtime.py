@@ -1455,6 +1455,23 @@ class TradingRuntime:
                 audit.record(session, actor, "risk.kill_switch_on" if engage else "risk.kill_switch_off", reason=reason)
             self.persist()
 
+    def close_position(self, broker_id: str, instrument_id: str, strategy: str | None, actor: str) -> list[Order]:
+        """The user's own decision to close a position (all strategies' positions in the instrument when `strategy` is
+        None): a market close, after freeing the shares its stop and target reserve at the broker. Allowed in every
+        trading mode and on every account, since it only reduces risk."""
+        with self.lock:
+            ts = self.clock()
+            keys = [k for k, sl in self.portfolio.slices.items() if k[0] == broker_id and k[1] == instrument_id and sl.qty
+                    and (strategy is None or k[2] == strategy)]
+            if not keys:
+                raise RuntimeError_(f"No open position in {instrument_id} at {broker_id}")
+            out = [o for o in (self.engine._close_slice(k, "closed_by_user", ts) for k in keys) if o is not None]
+            with self.db.session() as session:
+                audit.record(session, actor, "position.close_requested", broker_id=broker_id, instrument_id=instrument_id, strategy=strategy,
+                             orders=[{"id": o.id, "status": o.status.value, "reason": o.reason} for o in out])
+            self.persist()
+            return out
+
     def reset_breaker(self, name: str, actor: str) -> None:
         with self.lock:
             if name not in self.risk.breakers:

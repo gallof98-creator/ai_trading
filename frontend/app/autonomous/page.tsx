@@ -206,6 +206,7 @@ function Autonomous({ user }: { user: User }) {
   const [liveId, setLiveId] = useState("");
   useNow();
   const canTrade = user.role !== "viewer";
+  const closeAct = useAction();
   if (!d.data) return <p className="text-sm text-dim">{d.error ?? "Loading…"}</p>;
   const { configuration: c, overview: ov, proposals, brokers, live, universes: u, validations, deployments, positions } = d.data;
   const halted = ov.risk?.halted;
@@ -308,12 +309,15 @@ function Autonomous({ user }: { user: User }) {
           <h3 className="mb-1 mt-3 text-xs text-dim">Closed trades by strategy</h3>
           <Table max="max-h-40" empty="No closed trade yet." head={["Strategy", "Trades", "Win rate", "P&L (quote currency)"]} rows={d.data.performance_by_strategy.map((x: Json) => [nice(x.strategy), x.trades, pct(x.win_rate, 0), <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Open positions</h3>
-          <Table max="max-h-48" empty="No open position." head={["Instrument", "Strategy", "Evidence", "Quantity", "Entry", "Last", "Return", "Stop", "Take profit", "Account"]}
+          <Table max="max-h-48" empty="No open position." head={["Instrument", "Strategy", "Evidence", "Quantity", "Entry", "Last", "Return", "Stop", "Take profit", "Account", ""]}
             rows={positions.map((x: Json) => [<Link key="s" className="text-accent hover:underline" href={chartHref(x.instrument_id)}>{sym(x.instrument_id)}</Link>, nice(x.strategy), x.evidence ?? "—",
               num(x.qty, Math.abs(x.qty) < 1 ? 5 : 0), num(x.avg_price), x.price ? num(x.price) : "—", <span key="r" className={tone(x.unrealized_return)}>{pct(x.unrealized_return)}</span>,
               x.stop_price ? <span key="st" title={`held by the ${x.stop_held_by}`}>{num(x.stop_price)}{x.stop_held_by === "platform" ? " ◦" : ""}</span> : "—",
               x.take_profit_price ? <span key="tp" title={`held by the ${x.take_profit_held_by}`}>{num(x.take_profit_price)}{x.take_profit_held_by === "platform" ? " ◦" : ""}</span>
-                : <span key="tp" className="text-dim" title={x.exit_rule}>none</span>, x.broker_id])} />
+                : <span key="tp" className="text-dim" title={x.exit_rule}>none</span>, x.broker_id,
+              canTrade ? <button key="c" className="text-down underline" onClick={() => window.confirm(`Close ${num(x.qty, Math.abs(x.qty) < 1 ? 5 : 0)} ${sym(x.instrument_id)} (${nice(x.strategy)}) at market now? Its stop and target are cancelled first so that the broker accepts the sale.`)
+                && closeAct.run(() => post("/api/positions/close", { broker_id: x.broker_id, instrument_id: x.instrument_id, strategy: x.strategy }), "Close sent.").then(refresh)}>Close</button> : ""])} />
+          <Msg msg={closeAct.msg} />
           <p className="mt-1 text-xs text-dim">◦ = watched by the platform on live prices and bar closes (the broker cannot hold it). &quot;none&quot;: the validation chose no take profit for that strategy, which then exits on its own signal or at the stop.</p>
         </Panel>
       </div>

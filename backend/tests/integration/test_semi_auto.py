@@ -176,6 +176,7 @@ class FakeAlpaca:
         self.equity, self.cash, self.buying_power = 100_000.0, 100_000.0, 200_000.0
         self.orders: dict[str, dict] = {}
         self.outside: list[dict] = []  # orders the user placed in Alpaca's own app (not through the platform)
+        self.strict = True  # Alpaca's own rules on reserved shares, position flips and borrowable stocks
         self.positions: list[dict] = []
         self.requests: list[tuple[str, str, dict | None]] = []
         self.fail: int | None = None
@@ -208,6 +209,10 @@ class FakeAlpaca:
         if path == "/v2/orders" and request.method == "POST":
             if any(o["client_order_id"] == body["client_order_id"] for o in self.orders.values()):
                 return httpx.Response(422, json={"message": "client_order_id must be unique"})
+            if self.strict:
+                refusal = self._refusal(body)
+                if refusal:
+                    return httpx.Response(403, json={"message": refusal})
             oid = f"alp-{len(self.orders) + 1}"
             self.orders[oid] = {"id": oid, "status": "accepted", "filled_qty": "0", "filled_avg_price": None, **body}
             return httpx.Response(200, json=self.orders[oid])
@@ -232,6 +237,24 @@ class FakeAlpaca:
                 order.update(body)
             return httpx.Response(200, json=order)
         return httpx.Response(404, json={"message": "not found"})
+
+    def _refusal(self, body: dict) -> str | None:
+        """What real Alpaca refuses: selling (or buying back) more than is free, because open orders on the same side
+        reserve the shares; turning a position the other way in one order; shorting what is not easy to borrow."""
+        sym, side, qty = body["symbol"], body["side"], float(body["qty"])
+        held = sum(float(p["qty"]) * (-1 if p.get("side") == "short" and float(p["qty"]) > 0 else 1) for p in self.positions if p["symbol"] == sym)
+        working = [o for o in self.orders.values() if o["symbol"] == sym and o["status"] in ("accepted", "new", "partially_filled", "pending_cancel")]
+        reserved = sum(float(o["qty"]) - float(o.get("filled_qty") or 0) for o in working if o["side"] == side)
+        if (side == "sell" and held > 0) or (side == "buy" and held < 0):
+            available = abs(held) - reserved
+            if qty > available + 1e-9:
+                return f"insufficient qty available for order (requested: {qty:g}, available: {max(available, 0):g})"
+            return None
+        if side == "sell":   # opening (or adding to) a short
+            asset = next((a for a in self.assets if a["symbol"] == sym), {})
+            if not (asset.get("shortable") and asset.get("easy_to_borrow", True)):
+                return "asset is not shortable"
+        return None
 
     def fill(self, oid: str, price: float, qty: float | None = None):
         o = self.orders[oid]
@@ -727,4 +750,68 @@ def test_the_positions_table_shows_each_exit_and_who_holds_it(tmp_path):
     prot.take_profit_distance = None
     assert _position_row(rt, *key, rt.portfolio.slices[key])["take_profit_price"] is None
     assert "no take profit was chosen" in _position_row(rt, *key, rt.portfolio.slices[key])["exit_rule"]
+    rt.live.stop()
+
+
+def test_the_close_button_frees_the_shares_the_stop_reserves_and_alpaca_accepts_the_sale(tmp_path):
+    """At Alpaca a resting stop reserves its shares: any other sale of them is refused ("insufficient qty available").
+    This is why a close, the platform's or one made in Alpaca's app, did not go through."""
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake, fractional=False)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    held = rt.portfolio.qty(key)
+    stop = next(o for o in fake.orders.values() if o["type"] == "stop")
+    assert fake._refusal({"symbol": "AAPL", "side": "sell", "qty": str(held)}).startswith("insufficient qty available")  # Alpaca's rule
+    [close] = rt.close_position("alpaca-paper", "STOCK:AAPL", None, "trader@example.com")
+    assert close.status.value == "submitted" and close.reason == "closed_by_user"
+    assert stop["status"] == "canceled"                       # freed first, then sold
+    sells = [o for o in fake.orders.values() if o["side"] == "sell" and o["type"] == "market"]
+    assert len(sells) == 1 and float(sells[0]["qty"]) == held
+    assert rt.engine.protections[key].soft_stop                # watched by the platform until the sale fills
+    fake.fill(sells[0]["id"], fill)
+    fake.positions = []
+    tick(rt, "AAPL", fill, minute)
+    assert rt.portfolio.qty(key) == 0 and rt.portfolio.trades[-1].exit_reason == "closed_by_user"
+    with pytest.raises(Exception, match="No open position"):
+        rt.close_position("alpaca-paper", "STOCK:AAPL", None, "trader@example.com")
+    rt.live.stop()
+
+
+def test_a_reversal_at_alpaca_closes_first_and_opens_the_short_once_the_long_is_gone(tmp_path):
+    from app.database.settings_store import save_settings
+    from app.domain.models import Signal, SignalAction, TradingMode
+
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake, fractional=False)
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"autopilot": rt.user_settings.autopilot.model_copy(update={"allow_short": True})}))
+        rt.reload_settings(s)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    held = rt.portfolio.qty(key)
+    dep = next(d for d in rt.deployments.values() if d.instrument_id == "STOCK:AAPL")
+    sig = Signal(ts=rt.clock(), instrument_id="STOCK:AAPL", timeframe="1m", strategy=dep.strategy.name, strategy_version="1.0.0",
+                 action=SignalAction.SELL, target=-1, price=fill, stop_distance=fill * 0.02, meta={"bar_open": "reverse-1"})
+    with rt.lock:
+        orders = rt.engine.on_signal(sig, dep, mode_override=TradingMode.AUTO)
+    assert [(o.side.value, o.reduce_only, o.status.value) for o in orders] == [("sell", True, "submitted")]   # the close only, for now
+    sells = [o for o in fake.orders.values() if o["side"] == "sell" and o["type"] == "market"]
+    assert len(sells) == 1 and float(sells[0]["qty"]) == held          # accepted: its stop was freed first
+    fake.fill(sells[0]["id"], fill)
+    fake.positions = []
+    tick(rt, "AAPL", fill, minute)
+    shorts = [o for o in fake.orders.values() if o["side"] == "sell" and o["type"] == "market" and o["id"] != sells[0]["id"]]
+    assert len(shorts) == 1 and float(shorts[0]["qty"]) == int(float(shorts[0]["qty"])) > 0, "the short was not sent once the long was gone"
+    rt.live.stop()
+
+
+def test_alpaca_opens_short_sales_only_in_easy_to_borrow_stocks(tmp_path):
+    from app.domain.models import Order, Side
+
+    fake = FakeAlpaca()
+    fake.assets[0]["easy_to_borrow"] = False
+    rt = alpaca_runtime(tmp_path, fake)
+    short = Order(broker_id="alpaca-paper", instrument_id="STOCK:AAPL", side=Side.SELL, qty=2)
+    assert any("easy to borrow" in r for r in rt.brokers.get("alpaca-paper").instrument_reasons(short))
     rt.live.stop()

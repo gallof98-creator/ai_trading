@@ -355,6 +355,22 @@ virtual capital, a position at Alpaca was sized on 2,000 EUR, and the account co
 and drawdown stay on all accounts together. For many small positions, the Settings page fills in a profile (0.5% risk per
 trade, 5% per instrument, 20 positions, 30% correlated); nothing changes until it is saved.
 
+## Shares reserved by a resting stop (Alpaca)
+
+At Alpaca an open order reserves the shares it covers ("held for orders"): while the platform's stop rests, any other sale
+of those shares is refused with "insufficient qty available", including a close made in Alpaca's own app. A position also
+cannot be turned the other way (long to short) in one order. The platform therefore:
+
+* frees the shares before every close at market (strategy exit, approved closing proposal, take profit or stop watched by
+  the platform, the Close button): it cancels the position's stop and target, waits for Alpaca to confirm, then sells.
+  Until the sale fills, it watches the stop itself; if the sale is refused, the stop is placed again;
+* on a reversal sends the close first and the new position only once the old one is closed (judged again by the risk
+  engine at that moment);
+* opens short sales only in stocks Alpaca marks easy to borrow, in whole shares.
+
+To close a position yourself, use **Close** in the Autonomous page's positions table. In Alpaca's app, cancel the
+position's stop order first (Orders), then close: otherwise Alpaca refuses the sale.
+
 ## Positions you close or open yourself at the broker
 
 You may close, reduce or open positions directly in the broker's own app or website (Alpaca). On every round of order

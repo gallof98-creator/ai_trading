@@ -230,6 +230,18 @@ def proposals(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtim
     return rt.proposals()
 
 
+class ClosePositionIn(BaseModel):
+    broker_id: str = Field(max_length=64)
+    instrument_id: str = Field(max_length=64)
+    strategy: str | None = Field(None, max_length=64)  # None: every strategy's position in the instrument
+
+
+@router.post("/positions/close")
+def close_position(body: ClosePositionIn, user: User = Depends(trader), rt: TradingRuntime = Depends(get_runtime)) -> list[dict]:
+    """Close a position now, at market, as the user's own decision (also frees the shares its stop reserves)."""
+    return [o.model_dump(mode="json") for o in guard(rt.close_position, body.broker_id, body.instrument_id, body.strategy, user.email)]
+
+
 class ApprovalDecision(BaseModel):
     approve: bool
 

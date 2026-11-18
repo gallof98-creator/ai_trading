@@ -123,6 +123,8 @@ class TradingEngine:
         self._entry_block: Callable[[Order], str | None] = lambda order: None
         self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
         self._rationale: dict = {}  # set while a signal is being turned into orders
+        self.cancel_checks, self.cancel_check_seconds = 6, 0.5  # waiting for a broker to confirm a cancellation
+        self._deferred: dict[Key, tuple] = {}  # reversal entries waiting for the close of the opposite position (Alpaca)
         self._open: dict[str, Order] = {}  # id -> order, for the orders still working (see _record)
         self._external_seen: dict[tuple[str, str], tuple[float, float, datetime]] = {}  # differences with the broker awaiting confirmation
         self._unconfirmed: dict[str, str] = {}  # order id -> when: sent, no answer, unknown whether the broker has it
@@ -265,6 +267,10 @@ class TradingEngine:
         if self.portfolio.qty(key) == 0 and key in self.protections:
             self._cancel_protection(key, fill.ts)
             del self.protections[key]
+        if self.portfolio.qty(key) == 0 and key in self._deferred:
+            entry, intent, protection, mode, rationale = self._deferred.pop(key)
+            self._rationale = rationale
+            self._route(entry, intent, protection, mode, fill.ts)  # the reversal's new position, now that the old one is gone
         if self.portfolio.qty(key) == 0:
             # A closing proposal still waiting for approval has nothing left to close (a stop or target got there first).
             for aid in [a.id for a in self.approvals.values() if a.order.reduce_only and (a.order.broker_id, a.order.instrument_id, a.order.strategy) == key]:
@@ -388,6 +394,36 @@ class TradingEngine:
             return self._reject(order, "risk engine refused a closing order", ts)
         return self._submit(order, ts)
 
+    def _free_reserved(self, key: Key, ts: datetime) -> bool:
+        """At brokers where a resting order reserves the shares it covers (Alpaca: "held for orders"), no other order may
+        sell them: a close sent while the stop rests is refused. The stop and target are cancelled first, and the
+        cancellation confirmed; until the close fills, the platform watches the stop itself. Returns whether it did."""
+        prot = self.protections.get(key)
+        if prot is None or not (prot.stop_order or prot.target_order):
+            return False
+        try:
+            adapter = self.brokers.get(key[0])
+        except BrokerError:
+            return False
+        if not getattr(adapter, "orders_reserve_position", False):
+            return False
+        for resting in (prot.stop_order, prot.target_order):
+            if resting is None:
+                continue
+            self._cancel(resting, ts)
+            for _ in range(self.cancel_checks):
+                current = self.orders.get(resting.id, resting)
+                if not current.is_open or current.status is OrderStatus.CANCELLED:
+                    break
+                self._sleep(self.cancel_check_seconds)
+                try:
+                    self._record(adapter.get_order_status(current))
+                except BrokerError:
+                    break
+        prot.stop_order = prot.target_order = None
+        prot.soft_stop = True  # watched on live prices until the close fills (or put back if it fails)
+        return True
+
     # ------------------------------------------------------------------ signals
     def on_signal(self, signal: Signal, dep: Deployment, mode_override: TradingMode | None = None) -> list[Order]:
         """Turn a strategy signal into orders according to the trading mode. Returns the orders created."""
@@ -448,6 +484,18 @@ class TradingEngine:
                                "description": dep.strategy.description, "params": dep.strategy.params.model_dump(), "timeframe": dep.timeframe,
                                "signal_time": signal.ts.isoformat(), "signal_price": signal.price, "regime": signal.regime, "confidence": signal.confidence,
                                "deployment": dep.id, **{k: v for k, v in signal.meta.items() if k in ("opportunity", "validation", "data", "fundamentals", "filters")}}
+            adapter = self.brokers.get(dep.broker_id)
+            close_failed = any(o.reduce_only and o.status is OrderStatus.REJECTED for o in created)
+            if close_failed and direction != 0 and getattr(adapter, "orders_reserve_position", False):
+                return created  # the old position is still there: no new one the other way
+            if direction != 0 and getattr(adapter, "orders_reserve_position", False) and self.portfolio.qty(key) != 0:
+                # Alpaca cannot turn a position the other way in one go, nor sell shares a close is already selling: the
+                # new entry waits for the close to fill, and is then judged by the risk engine on the book at that moment.
+                self._deferred[key] = (entry, intent, protection, mode, dict(self._rationale))
+                self._rationale = {}
+                self.journal.alert(ts, "execution", "info", f"Reversal of {inst.id}: the new {entry.side.value} waits for the close",
+                                   "it is sent as soon as the current position is closed")
+                return created
             created.append(self._route(entry, intent, protection, mode, ts, pending_close=direction != 0))
         return created
 
@@ -527,6 +575,14 @@ class TradingEngine:
 
     # ------------------------------------------------------------------ submission
     def _submit(self, order: Order, ts: datetime) -> Order:
+        sent = self._submit_inner(order, ts)
+        key: Key = (order.broker_id, order.instrument_id, order.strategy)
+        if (order.reduce_only and order.type is OrderType.MARKET and sent.status is OrderStatus.REJECTED and self.portfolio.qty(key) != 0
+                and key in self.protections and self.protections[key].stop_order is None and self.protections[key].target_order is None):
+            self._place_protection(key, self.protections[key], ts)  # the close failed: the position gets its stop back
+        return sent
+
+    def _submit_inner(self, order: Order, ts: datetime) -> Order:
         """Send to the broker exactly once. Transient failures are retried with the same client id,
         after first asking the broker whether the earlier attempt actually arrived."""
         if order.client_order_id in self._client_ids:
@@ -537,6 +593,12 @@ class TradingEngine:
             adapter = self.brokers.get(order.broker_id)
         except BrokerError as exc:
             return self._reject(order, str(exc), ts)
+        key: Key = (order.broker_id, order.instrument_id, order.strategy)
+        # A close at market (strategy exit, approved closing proposal, take profit or stop watched by the platform, the
+        # user's Close button) first frees the shares its own stop and target reserve at the broker, at the moment it is
+        # actually sent (a proposal waiting for approval keeps its stop).
+        if order.reduce_only and order.type is OrderType.MARKET:
+            self._free_reserved(key, ts)
         if order.reduce_only:
             covered = self._broker_holding(order, adapter, ts)
             if covered is not None and covered <= 0:
