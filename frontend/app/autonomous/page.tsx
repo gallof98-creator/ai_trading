@@ -306,6 +306,9 @@ function Autonomous({ user }: { user: User }) {
           <Table max="max-h-40" empty="No strategy is active." head={["Strategy", "Instrument", "Timeframe", "Account"]} rows={deployments.map((x: Json) => [nice(x.strategy), sym(x.instrument_id), x.timeframe, x.broker_id])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Closed trades by evidence level (exploration is kept apart: it measures setups that failed validation)</h3>
           <Table max="max-h-40" empty="No closed trade yet." head={["Evidence", "Trades", "Win rate", "P&L"]} rows={(d.data.performance_by_evidence ?? []).map((x: Json) => [<Badge key="l" kind={x.level === "exploration" ? "down" : x.level === "candidate" ? "warn" : "up"}>{x.level}</Badge>, x.trades, pct(x.win_rate, 0), <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
+          <h3 className="mb-1 mt-3 text-xs text-dim">How positions ended</h3>
+          <Table max="max-h-40" empty="No closed trade yet." head={["Exit", "Trades", "P&L"]} rows={(d.data.exits_by_reason ?? []).map((x: Json) => [nice(x.exit_reason), x.trades,
+            <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Closed trades by strategy</h3>
           <Table max="max-h-40" empty="No closed trade yet." head={["Strategy", "Trades", "Win rate", "P&L (quote currency)"]} rows={d.data.performance_by_strategy.map((x: Json) => [nice(x.strategy), x.trades, pct(x.win_rate, 0), <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Open positions</h3>

@@ -366,7 +366,13 @@ cannot be turned the other way (long to short) in one order. The platform theref
   Until the sale fills, it watches the stop itself; if the sale is refused, the stop is placed again;
 * on a reversal sends the close first and the new position only once the old one is closed (judged again by the risk
   engine at that moment);
-* opens short sales only in stocks Alpaca marks easy to borrow, in whole shares.
+* opens short sales only in stocks Alpaca marks easy to borrow, in whole shares;
+* for whole shares of stocks and ETFs, rests the take profit AND the stop at Alpaca as one "one-cancels-other" order: the
+  take profit is a real order there (visible in Alpaca's order list, executed even with the platform off), the shares are
+  reserved once, and Alpaca cancels the other leg when one executes. Whichever executed gives the exit's reason and price.
+  If Alpaca refuses it, the stop alone rests and the take profit is watched by the platform, as for fractional shares and
+  crypto (which Alpaca cannot hold that way). The Autonomous page shows how positions ended (take profit, stop, strategy
+  exit, the user, the broker).
 
 To close a position yourself, use **Close** in the Autonomous page's positions table. In Alpaca's app, cancel the
 position's stop order first (Orders), then close: otherwise Alpaca refuses the sale.

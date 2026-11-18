@@ -296,7 +296,8 @@ class TradingEngine:
         self._cancel(prot.target_order, ts)
         prot.stop_order = prot.target_order = None
 
-    def _protective_order(self, key: Key, prot: Protection, kind: OrderType, price: float, reason: str, qty: float, ts: datetime) -> Order | None:
+    def _protective_order(self, key: Key, prot: Protection, kind: OrderType, price: float, reason: str, qty: float, ts: datetime,
+                          oco_stop: float | None = None) -> Order | None:
         broker_id, instrument_id, strategy = key
         inst = self.registry.get(instrument_id)
         qty = inst.round_qty(qty)  # a venue cannot hold an order for a fraction of a lot
@@ -306,8 +307,9 @@ class TradingEngine:
         oid = self._new_id()
         order = Order(id=oid, client_order_id=f"{oid}:{reason}", broker_id=broker_id, instrument_id=instrument_id,
                       side=Side.SELL if prot.direction > 0 else Side.BUY, qty=qty, type=kind, reduce_only=True, strategy=strategy,
-                      stop_price=inst.round_price(price) if kind is OrderType.STOP else None,
-                      limit_price=inst.round_price(price) if kind is OrderType.LIMIT else None, reason=reason, created_at=ts, updated_at=ts)
+                      stop_price=inst.round_price(price) if kind is OrderType.STOP else (inst.round_price(oco_stop) if oco_stop else None),
+                      limit_price=inst.round_price(price) if kind is OrderType.LIMIT else None, reason=reason, created_at=ts, updated_at=ts,
+                      oco=oco_stop is not None)
         adapter = self.brokers.get(broker_id)
         if adapter.unsupported_reasons(self._for_broker(order, adapter)):
             return None
@@ -326,6 +328,15 @@ class TradingEngine:
         qty = abs(s.qty)
         base_stop = s.avg_price - prot.direction * prot.stop_distance
         prot.stop_price = base_stop if prot.stop_price is None else (max if prot.direction > 0 else min)(prot.stop_price, base_stop)
+        if prot.take_profit_distance and getattr(self.brokers.get(key[0]), "supports_oco", False):
+            # Where the broker can hold both exits as one order (Alpaca OCO), the take profit rests there too, instead of
+            # depending on the platform watching prices. If the broker refuses it, the stop alone rests (below).
+            oco = self._protective_order(key, prot, OrderType.LIMIT, s.avg_price + prot.direction * prot.take_profit_distance,
+                                         "take_profit_or_stop", qty, ts, oco_stop=prot.stop_price)
+            if oco is not None and oco.status is not OrderStatus.REJECTED:
+                prot.stop_order = prot.target_order = oco
+                prot.soft_stop = False
+                return
         prot.stop_order = self._protective_order(key, prot, OrderType.STOP, prot.stop_price, "stop_loss" if prot.stop_price == base_stop else "trailing_stop", qty, ts)
         prot.soft_stop = prot.stop_order is None or prot.stop_order.status is OrderStatus.REJECTED
         if prot.soft_stop:
@@ -344,7 +355,9 @@ class TradingEngine:
             candidate = close - prot.direction * prot.trailing_distance
             if (candidate - prot.stop_price) * prot.direction > 0:
                 prot.stop_price = candidate
-                if not prot.soft_stop:
+                if not prot.soft_stop and prot.stop_order is not None and prot.stop_order is prot.target_order:
+                    self._place_protection(key, prot, ts)  # one order holds both exits: it is replaced as a whole
+                elif not prot.soft_stop:
                     self._cancel(prot.stop_order, ts)
                     prot.stop_order = self._protective_order(key, prot, OrderType.STOP, candidate, "trailing_stop", abs(self.portfolio.qty(key)), ts)
                     if prot.stop_order is None:

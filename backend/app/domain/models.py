@@ -147,6 +147,9 @@ class Order(BaseModel):
     signal_id: str | None = None
     strategy: str | None = None
     reduce_only: bool = False
+    # An exit held by the broker as ONE order with two triggers: a take-profit limit (limit_price) and a stop (stop_price);
+    # when one executes the broker cancels the other ("one cancels the other"). It reserves the position's shares once.
+    oco: bool = False
     is_simulated: bool = True  # False only for orders accepted by a real broker
     reason: str | None = None
     created_at: datetime = Field(default_factory=utcnow)

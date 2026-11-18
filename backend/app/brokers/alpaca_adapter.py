@@ -197,6 +197,7 @@ class AlpacaAdapter(BrokerAdapter):
     # A resting order reserves the shares it covers ("held for orders"): nothing else may sell them meanwhile, and a
     # position cannot be turned the other way in one order.
     orders_reserve_position = True
+    supports_oco = True  # stocks and ETFs, whole shares: take profit and stop held together by Alpaca
     whole_units_for_short = True  # stocks and ETFs: fractional quantities can be bought and sold, never sold short
 
     def map_instruments(self) -> int:
@@ -299,6 +300,12 @@ class AlpacaAdapter(BrokerAdapter):
             reasons.append(f"{inst.symbol} is not easy to borrow: Alpaca opens short sales only in easy-to-borrow stocks")
         if crypto and order.type is OrderType.STOP:
             reasons.append("Alpaca does not accept plain stop orders for crypto")
+        if order.oco:
+            if crypto:
+                reasons.append("Alpaca does not hold one-cancels-other exits for crypto")
+            if abs(order.qty - round(order.qty)) > 1e-9:
+                reasons.append("Alpaca holds one-cancels-other exits for whole shares only")
+            return reasons
         if order.reduce_only and order.type is OrderType.LIMIT:
             # Alpaca reserves the shares for the first resting sell order, so a target cannot rest next to the stop.
             reasons.append("a take-profit cannot rest at Alpaca next to the stop on the same shares; the platform watches the target itself")
@@ -324,6 +331,23 @@ class AlpacaAdapter(BrokerAdapter):
         return {"is_open": bool(c.get("is_open")), "next_open": c.get("next_open"), "next_close": c.get("next_close")}
 
     def _to_order(self, raw: dict, base: Order) -> Order:
+        legs = raw.get("legs") or []
+        if legs:
+            # A one-cancels-other exit: the take-profit limit (the order itself) and its stop leg. Whichever executed gives
+            # the fill, its price and the exit's reason.
+            parts = [raw, *legs]
+            filled_parts = [(float(p.get("filled_qty") or 0), float(p["filled_avg_price"]) if p.get("filled_avg_price") else None, p) for p in parts]
+            filled = sum(q for q, _, _ in filled_parts)
+            price = (sum(q * (px or 0) for q, px, _ in filled_parts) / filled) if filled else None
+            if any(p.get("status") == "filled" for p in parts):
+                status = OrderStatus.FILLED
+            elif all(p.get("status") in ("canceled", "expired", "rejected", "replaced") for p in parts):
+                status = OrderStatus.CANCELLED
+            else:
+                status = OrderStatus.PARTIALLY_FILLED if filled > 0 else OrderStatus.SUBMITTED
+            which = next((("stop_loss" if p is not raw else "take_profit") for q, _, p in filled_parts if q > 0), None)
+            return base.model_copy(update={"status": status, "filled_qty": filled, "avg_fill_price": price, "broker_order_id": raw.get("id"),
+                                           "is_simulated": False, "updated_at": datetime.now(timezone.utc), "reason": which or base.reason})
         filled = float(raw.get("filled_qty") or 0)
         status = _STATUS.get(raw.get("status", ""), OrderStatus.SUBMITTED)
         if status is OrderStatus.SUBMITTED and filled > 0:
@@ -341,6 +365,11 @@ class AlpacaAdapter(BrokerAdapter):
                       "type": _TYPE[order.type], "client_order_id": order.client_order_id,
                       # Stocks: market orders are for today's session; resting stops and limits stay until cancelled.
                       "time_in_force": "gtc" if crypto or order.type is not OrderType.MARKET else "day"}
+        if order.oco:
+            # One exit order with two triggers; Alpaca cancels the other when one executes.
+            body.update(type="limit", time_in_force="gtc", order_class="oco", take_profit={"limit_price": str(order.limit_price)},
+                        stop_loss={"stop_price": str(order.stop_price)})
+            return self._to_order(self._trading("POST", "/v2/orders", json=body), order)
         if order.limit_price is not None:
             body["limit_price"] = str(order.limit_price)
         if order.stop_price is not None:
@@ -375,7 +404,7 @@ class AlpacaAdapter(BrokerAdapter):
                 raise BrokerError(f"Order {order.id} is unknown to Alpaca")
             return found.model_copy(update={"id": order.id, "strategy": order.strategy, "signal_id": order.signal_id, "reason": order.reason,
                                             "reduce_only": order.reduce_only, "created_at": order.created_at})
-        return self._to_order(self._trading("GET", f"/v2/orders/{order.broker_order_id}"), order)
+        return self._to_order(self._trading("GET", f"/v2/orders/{order.broker_order_id}", params={"nested": "true"}), order)
 
     def find_order(self, client_order_id: str, instrument_id: str) -> Order | None:
         try:

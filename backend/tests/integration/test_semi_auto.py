@@ -177,6 +177,7 @@ class FakeAlpaca:
         self.orders: dict[str, dict] = {}
         self.outside: list[dict] = []  # orders the user placed in Alpaca's own app (not through the platform)
         self.strict = True  # Alpaca's own rules on reserved shares, position flips and borrowable stocks
+        self.oco = True     # Alpaca holds one-cancels-other exits (take profit + stop as one order)
         self.positions: list[dict] = []
         self.requests: list[tuple[str, str, dict | None]] = []
         self.fail: int | None = None
@@ -214,6 +215,15 @@ class FakeAlpaca:
                 if refusal:
                     return httpx.Response(403, json={"message": refusal})
             oid = f"alp-{len(self.orders) + 1}"
+            if body.get("order_class") == "oco":
+                if not self.oco or body.get("type") != "limit" or "take_profit" not in body or "stop_loss" not in body:
+                    return httpx.Response(422, json={"message": "invalid order class"})
+                rest = {k: v for k, v in body.items() if k not in ("take_profit", "stop_loss")}
+                self.orders[oid] = {"id": oid, "status": "new", "filled_qty": "0", "filled_avg_price": None, **rest,
+                                    "limit_price": body["take_profit"]["limit_price"],
+                                    "legs": [{"id": f"{oid}-sl", "symbol": body["symbol"], "side": body["side"], "type": "stop", "qty": body["qty"],
+                                              "stop_price": body["stop_loss"]["stop_price"], "status": "held", "filled_qty": "0", "filled_avg_price": None}]}
+                return httpx.Response(200, json=self.orders[oid])
             self.orders[oid] = {"id": oid, "status": "accepted", "filled_qty": "0", "filled_avg_price": None, **body}
             return httpx.Response(200, json=self.orders[oid])
         if path == "/v2/orders" and request.method == "GET":
@@ -232,6 +242,8 @@ class FakeAlpaca:
                 if order["status"] == "filled":
                     return httpx.Response(422, json={"message": "order is not cancelable"})
                 order["status"] = "canceled"
+                for leg in order.get("legs", []):
+                    leg["status"] = "canceled"
                 return httpx.Response(204)
             if request.method == "PATCH":
                 order.update(body)
@@ -255,6 +267,13 @@ class FakeAlpaca:
             if not (asset.get("shortable") and asset.get("easy_to_borrow", True)):
                 return "asset is not shortable"
         return None
+
+    def fill_stop_leg(self, oid: str, price: float):
+        """The stop leg of a one-cancels-other exit executes; Alpaca cancels the take-profit limit."""
+        o = self.orders[oid]
+        leg = o["legs"][0]
+        leg.update(status="filled", filled_qty=leg["qty"], filled_avg_price=str(price))
+        o["status"] = "canceled"
 
     def fill(self, oid: str, price: float, qty: float | None = None):
         o = self.orders[oid]
@@ -413,8 +432,9 @@ def test_semi_automatic_flow_through_alpaca_paper_with_a_virtual_eur_ledger(tmp_
     tick(rt, "AAPL", price * 1.0003, minute + 1)   # the next live minute polls the broker: the fill is booked and the stop placed
     tick(rt, "AAPL", price * 1.0004, minute + 2)
     assert rt.portfolio.qty(("alpaca-paper", "STOCK:AAPL", "ema_crossover")) == p["qty"]
-    stops = [o for o in fake.orders.values() if o["type"] == "stop"]
-    assert len(stops) == 1 and stops[0]["side"] == "sell" and float(stops[0]["qty"]) == p["qty"] and float(stops[0]["stop_price"]) < price
+    exits = [o for o in fake.orders.values() if o.get("order_class") == "oco"]   # take profit and stop, held by Alpaca as one order
+    assert len(exits) == 1 and exits[0]["side"] == "sell" and float(exits[0]["qty"]) == p["qty"]
+    assert float(exits[0]["legs"][0]["stop_price"]) < price < float(exits[0]["limit_price"])
     assert rt.portfolio.reconcile() == []  # the platform's books agree with the broker's positions
 
     # Restart: the virtual ledger baseline is restored, not re-created from today's broker equity.
@@ -546,8 +566,9 @@ def test_fractional_position_at_alpaca_is_protected_by_the_platform_on_live_pric
     rt.live.stop()
 
 
-def test_take_profit_at_alpaca_is_watched_by_the_platform_and_whole_shares_keep_a_resting_stop(tmp_path):
+def test_take_profit_at_alpaca_is_watched_by_the_platform_when_alpaca_refuses_a_one_cancels_other_exit(tmp_path):
     fake = FakeAlpaca()
+    fake.oco = False   # an account or symbol where Alpaca refuses the combined exit: the stop alone rests there
     rt = alpaca_runtime(tmp_path, fake, fractional=False)
     p, fill, minute = open_position_at_alpaca(rt, fake)
     key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
@@ -565,6 +586,32 @@ def test_take_profit_at_alpaca_is_watched_by_the_platform_and_whole_shares_keep_
     tick(rt, "AAPL", target, minute + 2)
     assert rt.portfolio.qty(key) == 0 and rt.portfolio.trades[-1].exit_reason == "take_profit" and rt.portfolio.trades[-1].pnl > 0
     assert next(o for o in fake.orders.values() if o["type"] == "stop")["status"] == "canceled"   # the resting stop is withdrawn with the position
+    rt.live.stop()
+
+
+@pytest.mark.parametrize("leg", ["take_profit", "stop_loss"])
+def test_whole_shares_at_alpaca_rest_take_profit_and_stop_as_one_order_and_either_closes_the_position(tmp_path, leg):
+    """The take profit is a real order at Alpaca (visible there, executed even with the platform off), held together with
+    the stop as one-cancels-other: it reserves the shares once, and Alpaca cancels the other leg when one executes."""
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake, fractional=False)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    prot = rt.engine.protections[key]
+    [oco] = [o for o in fake.orders.values() if o.get("order_class") == "oco"]
+    assert prot.stop_order is prot.target_order and prot.stop_order.oco and not prot.soft_stop
+    assert rt.engine.unwatched_positions() == []                  # nothing depends on the platform watching prices
+    assert float(oco["limit_price"]) == pytest.approx(fill + prot.take_profit_distance, rel=1e-3)
+    assert float(oco["legs"][0]["stop_price"]) == pytest.approx(prot.stop_price, rel=1e-3)
+    if leg == "take_profit":
+        fake.fill(oco["id"], float(oco["limit_price"]))
+    else:
+        fake.fill_stop_leg(oco["id"], float(oco["legs"][0]["stop_price"]))
+    fake.positions = []
+    tick(rt, "AAPL", fill, minute)
+    t = rt.portfolio.trades[-1]
+    assert rt.portfolio.qty(key) == 0 and t.exit_reason == leg and (t.pnl > 0) == (leg == "take_profit")
+    assert [o for o in fake.orders.values() if o["side"] == "sell" and o["type"] == "market"] == []   # Alpaca closed it, not the platform
     rt.live.stop()
 
 
@@ -761,7 +808,7 @@ def test_the_close_button_frees_the_shares_the_stop_reserves_and_alpaca_accepts_
     p, fill, minute = open_position_at_alpaca(rt, fake)
     key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
     held = rt.portfolio.qty(key)
-    stop = next(o for o in fake.orders.values() if o["type"] == "stop")
+    stop = next(o for o in fake.orders.values() if o.get("order_class") == "oco")   # take profit + stop, reserving the shares
     assert fake._refusal({"symbol": "AAPL", "side": "sell", "qty": str(held)}).startswith("insufficient qty available")  # Alpaca's rule
     [close] = rt.close_position("alpaca-paper", "STOCK:AAPL", None, "trader@example.com")
     assert close.status.value == "submitted" and close.reason == "closed_by_user"

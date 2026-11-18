@@ -75,7 +75,11 @@ def dashboard(_: User = Depends(viewer), session: Session = Depends(get_session)
     capital = s.initial_paper_capital
     by_strategy: dict[str, dict] = {}
     by_level: dict[str, dict] = {}
+    by_exit: dict[str, dict] = {}
     for t in rt.portfolio.trades:
+        row = by_exit.setdefault(t.exit_reason or "unknown", {"exit_reason": t.exit_reason or "unknown", "trades": 0, "pnl_quote": 0.0})
+        row["trades"] += 1
+        row["pnl_quote"] += t.pnl
         level = rt.evidence_of(t.broker_id, t.instrument_id, t.strategy)
         for table, key, extra in ((by_strategy, t.strategy or "manual", {"strategy": t.strategy or "manual"}), (by_level, level, {"level": level})):
             row = table.setdefault(key, {**extra, "trades": 0, "wins": 0, "pnl_quote": 0.0})
@@ -95,6 +99,8 @@ def dashboard(_: User = Depends(viewer), session: Session = Depends(get_session)
         "deployments": [{"id": k, "strategy": d.strategy.name, "instrument_id": d.instrument_id, "timeframe": d.timeframe, "broker_id": d.broker_id}
                         for k, d in rt.deployments.items()],
         "performance_by_strategy": sorted(by_strategy.values(), key=lambda r: -r["pnl_quote"]),
+        # How positions actually ended: take profit, stop, the strategy's own exit, the user, the broker.
+        "exits_by_reason": sorted(by_exit.values(), key=lambda r: -r["trades"]),
         # Exploratory trades are kept apart: their result says whether the rejected setups really had nothing.
         "performance_by_evidence": [by_level[k] for k in ("validated", "candidate", "exploration") if k in by_level],
         "positions": [_position_row(rt, b, i, st, sl) for (b, i, st), sl in rt.portfolio.slices.items() if sl.qty],
