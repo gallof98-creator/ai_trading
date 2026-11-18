@@ -444,40 +444,50 @@ class Autopilot:
         # have room for them (a few per core waiting), so work is never queued faster than it can be done.
         from .parallel import worker_count
 
-        running = self.pool.running()
-        room = max(0, 3 * worker_count(cfg.validation_workers) - len(running))
-        batch = [t for t in todo if t not in running][: min(cfg.validations_per_cycle, room)]
-        done = passed = failed = promising = 0
-        # Read each series once, however many strategies are tested on it; then compute side by side; then record.
-        specs, labels, datasets = [], [], {}
-        with self.rt.db.session() as session:
-            for strategy, iid, tf in batch:
-                try:
-                    bars = cfg.validation_bars if tf_delta(tf) >= pd.Timedelta(days=1) else cfg.intraday_validation_bars
-                    if (iid, tf) not in datasets:
-                        datasets[(iid, tf)] = opp.bt.load_dataset(session, iid, tf, last=bars)
-                    specs.append(opp.prepare(session, self.rt, strategy, iid, tf, allow_short=cfg.allow_short, max_bars=bars, data=datasets[(iid, tf)],
-                                             always_take_profit=cfg.always_take_profit))
-                    labels.append((strategy, iid, tf))
-                except Exception as exc:  # e.g. an unknown strategy name
+        workers = worker_count(cfg.validation_workers)
+        queue = [t for t in todo if t not in self.pool.running()][: cfg.validations_per_cycle]
+        deadline = time.perf_counter() + self.validation_budget()
+        done = passed = failed = promising = submitted = 0
+        datasets: dict = {}
+        # Keep every core busy for the whole time the cycle gives the validation: start a few per core, collect them as
+        # they finish, and top up with the next ones, until the time is up or nothing is left. What is still running then
+        # carries on in the background and is collected by a later cycle.
+        while True:
+            running = self.pool.running()
+            room = max(0, 3 * workers - len(running))
+            chunk, queue = queue[:room], queue[room:]
+            specs, labels = [], []
+            with self.rt.db.session() as session:
+                for strategy, iid, tf in chunk:
+                    try:
+                        bars = cfg.validation_bars if tf_delta(tf) >= pd.Timedelta(days=1) else cfg.intraday_validation_bars
+                        if (iid, tf) not in datasets:  # read each series once, however many strategies are tested on it
+                            datasets[(iid, tf)] = opp.bt.load_dataset(session, iid, tf, last=bars)
+                        specs.append(opp.prepare(session, self.rt, strategy, iid, tf, allow_short=cfg.allow_short, max_bars=bars,
+                                                 data=datasets[(iid, tf)], always_take_profit=cfg.always_take_profit))
+                        labels.append((strategy, iid, tf))
+                    except Exception as exc:  # e.g. an unknown strategy name
+                        failed += 1
+                        self._note("validation", f"{strategy} on {iid} {tf}: {str(exc)[:160]}", "warning")
+            submitted += len(specs)
+            left = deadline - time.perf_counter()
+            results = self.pool.run_keyed(list(zip(labels, specs)), cfg.validation_workers, timeout=max(left, 0.01),
+                                          min_done=workers if queue else None)
+            for (strategy, iid, tf), spec, outcome in results:
+                if isinstance(outcome, Exception):  # e.g. too little history for this timeframe
                     failed += 1
-                    self._note("validation", f"{strategy} on {iid} {tf}: {str(exc)[:160]}", "warning")
+                    self._note("validation", f"{strategy} on {iid} {tf}: {str(outcome)[:160]}", "warning")
+                else:
+                    tier, payload = opp.judge(spec, outcome, ACTOR, now)
+                    with self.rt.db.session() as session:
+                        opp.record(session, tier, payload, now)
+                    done += 1
+                    passed += tier == "validated"
+                    promising += tier == "candidate"
+            self.state.update(step_progress=f"{done} validations done this cycle, {len(self.pool.running())} running, {len(queue)} more queued")
+            if time.perf_counter() >= deadline or (not queue and not self.pool.running()):
+                break
         datasets.clear()
-        # Results come back as they finish, including validations started in earlier cycles; those still running when the
-        # cycle's time is up carry on in the background (nothing is thrown away and started again).
-        for (strategy, iid, tf), spec, outcome in self.pool.run_keyed(
-                list(zip(labels, specs)), cfg.validation_workers, timeout=self.validation_budget(),
-                progress=lambda done, total: self.state.update(step_progress=f"{done} of {total} validations done")):
-            if isinstance(outcome, Exception):  # e.g. too little history for this timeframe
-                failed += 1
-                self._note("validation", f"{strategy} on {iid} {tf}: {str(outcome)[:160]}", "warning")
-            else:
-                tier, payload = opp.judge(spec, outcome, ACTOR, now)
-                with self.rt.db.session() as session:
-                    opp.record(session, tier, payload, now)
-                done += 1
-                passed += tier == "validated"
-                promising += tier == "candidate"
         remaining = max(0, len(todo) - done - failed)
         if done or failed:
             speed = self.pool.last
@@ -486,7 +496,7 @@ class Autopilot:
                                      + (f" ({speed['seconds']}s on {speed['workers']} core(s))" if speed else ""))
         out = {"run": done, "passed": passed, "candidates": promising, "could_not_run": failed, "remaining": remaining,
                "running_in_background": len(self.pool.running())}
-        if specs or done:
+        if submitted or done:
             out["speed"] = dict(self.pool.last)
             with self.rt.db.session() as session:
                 out["multiple_testing"] = opp.multiple_testing(session, now)

@@ -92,7 +92,9 @@ class AutopilotSettings(BaseModel):
     stream_symbol_limit: int = Field(30, ge=1, le=10_000)
     min_price: float = Field(5.0, ge=0)
     min_traded_value: float = Field(20_000_000.0, ge=0)  # 20-day average traded value, quote currency
-    validations_per_cycle: int = Field(60, ge=1, le=500)
+    # The most validations started in one cycle. The cycle's validation time is the real limit: within it, the cores are
+    # kept busy until this many have been started.
+    validations_per_cycle: int = Field(500, ge=1, le=2000)
     validation_bars: int = Field(1500, ge=450, le=10_000)  # validate on the most recent bars (about six years of daily data)
     # Intraday timeframes are validated on this many recent bars (20,000 five-minute bars are about a year of sessions).
     intraday_validation_bars: int = Field(20_000, ge=2_000, le=30_000)

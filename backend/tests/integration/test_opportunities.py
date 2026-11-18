@@ -389,3 +389,18 @@ def test_always_take_profit_removes_the_no_target_choice_and_holds_back_setups_v
     with rt.db.session() as s:
         free_scan = opp.scan(s, rt, "paper-main", "admin", include_candidates=True)
     assert not any("now required" in x["reason"] for x in free_scan["skipped"])
+
+
+def test_the_validation_keeps_every_core_busy_until_its_time_is_up_not_one_batch_per_cycle(rt):
+    """With 1 core and room for 3 at a time, a cycle used to start 3 validations and leave the core idle afterwards.
+    All 6 must be done in one cycle when the time allows."""
+    from app.database.settings_store import AutopilotSettings, save_settings
+
+    names = ["ema_crossover", "macd", "donchian_breakout", "momentum_breakout", "rsi_reversion", "volatility_expansion"]
+    cfg = AutopilotSettings(enabled=True, strategies=names, timeframes=["1d"], validation_workers=1, crypto_pairs=[], etfs=[],
+                            seed_most_active=False, min_traded_value=0, validations_per_cycle=500)
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"autopilot": cfg}))
+        rt.reload_settings(s)
+    out = rt.autopilot._validate({"_candidates": [CYC]})
+    assert out["run"] + out["could_not_run"] == 6 and out["remaining"] == 0

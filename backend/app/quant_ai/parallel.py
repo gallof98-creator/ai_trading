@@ -57,7 +57,7 @@ class ValidationPool:
         return set(self._carry)
 
     def run_keyed(self, items: list[tuple], workers: int = 0, timeout: float | None = None,
-                  progress: Callable[[int, int], None] | None = None) -> list[tuple]:
+                  progress: Callable[[int, int], None] | None = None, min_done: int | None = None) -> list[tuple]:
         """Like `run`, but nothing is lost when time runs out. `items` are (key, spec). Returns (key, spec, outcome) for
         every validation that finished during this call, including ones started by earlier calls; those still running
         are kept and collected next time (a key already running is not started twice)."""
@@ -98,6 +98,8 @@ class ValidationPool:
                     done.append((k, sp, exc))
                 if progress:
                     progress(len(done), len(futures))
+                if min_done and len(done) >= min_done:
+                    break  # back to the caller, which hands the freed cores new work
         except TimeoutError:
             pass  # the rest keep running and are collected next time
         self.last = {"mode": "parallel", "workers": workers, "validations": len(futures), "finished": len(done),

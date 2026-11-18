@@ -47,7 +47,7 @@ Off by default; switched on from the Autonomous Quant page. Every cycle (15 minu
 
 The scan runs before the validation, so a cycle busy re-validating never delays an entry. A validation still running when
 the cycle's validation time is up keeps running in the background and is collected by a later cycle (it is never thrown
-away and started again); new ones are started only while the cores have room (three waiting per core). One validation
+away and started again); the cores are kept busy for the whole validation time: a few per core, topped up as they finish. One validation
 runs 70–100 complete backtests: about 10 seconds on daily data and well over a minute on 20,000 intraday bars
 ("Intraday validation bars" in the settings). The panel shows how long each
 step took.
