@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
 import { EquityChart } from "@/components/charts/Charts";
+import { ReturnTiles } from "@/components/Returns";
 import { Shell } from "@/components/Shell";
 import { Badge, Button, money, Notice, num, Panel, pct, post, signed, SimBadge, Stat, Table, tone, useApi, when } from "@/components/ui";
 
@@ -59,6 +60,7 @@ function Overview() {
         <Stat label="Available balance" value={money(ov.available_capital, ccy)} />
         <Stat label="Daily P&L" value={signed(ov.daily_pnl)} cls={tone(ov.daily_pnl)} />
         <Stat label="Total P&L" value={signed(ov.total_pnl)} cls={tone(ov.total_pnl)} />
+        <ReturnTiles />
         <Stat label="Win rate" value={pct(ov.win_rate, 1)} hint={`${ov.number_of_trades} closed trades`} />
         <Stat label="Max drawdown" value={pct(ov.max_drawdown)} cls={ov.max_drawdown > 0.1 ? "text-warn" : ""} />
         <Stat label="Open positions" value={ov.positions.length} />

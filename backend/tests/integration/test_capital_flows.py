@@ -114,3 +114,35 @@ def test_positions_are_sized_on_the_capital_of_the_account_that_trades_not_on_al
 
     state.exposures.append(Exposure("paper-2", iid, "s", "crypto", "USD", 240.0, 240.0))
     assert rt.risk.headroom("paper-main", inst, "s", state) == pytest.approx(250.0, rel=1e-3)
+
+
+def test_portfolio_returns_day_by_day_weekly_and_monthly_exclude_capital_moves(tmp_path):
+    rt = make_rt(tmp_path)
+    pf = rt.portfolio
+    acct = ExternalAccount("alpaca-paper", 1_000.0)
+    paper = rt.brokers.get("paper-main")
+    day0 = T0.replace(hour=12)
+
+    def at(day):
+        rt.now[0] = day0 + timedelta(days=day)
+        pf.revalue(rt.clock())
+
+    at(0)                                    # 1,000 (internal paper)
+    paper.cash += 20.0; at(1)                # +2%
+    rt.brokers.register(acct); at(2)         # an account of 1,000 joins: a capital move, not +100%
+    acct.equity = 1_000.0 - 40.6; at(3)       # -40.6 on 2,020 (1,020 + 1,000)
+    r = pf.returns()
+    by_day = {d["period"]: d["return"] for d in r["daily"]}
+    days = sorted(by_day)
+    assert by_day[days[0]] == pytest.approx(0.0)
+    assert by_day[days[1]] == pytest.approx(0.02)
+    assert by_day[days[2]] == pytest.approx(0.0), "linking an account was counted as a gain"
+    assert by_day[days[3]] == pytest.approx(-40.6 / 2_020)
+    assert r["since_start"] == pytest.approx(1.02 * (1 - 40.6 / 2_020) - 1)
+    assert r["today"] == by_day[days[3]] and r["month_to_date"] is not None and r["week_to_date"] is not None
+    assert sum(w["days"] for w in r["weekly"]) == 4 and sum(m["days"] for m in r["monthly"]) == 4
+    # Kept across a restart.
+    state = pf.to_state()
+    pf.daily = {}
+    pf.load_state(state)
+    assert pf.returns()["since_start"] == pytest.approx(r["since_start"])

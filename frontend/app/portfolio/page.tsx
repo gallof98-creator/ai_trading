@@ -1,5 +1,6 @@
 "use client";
 import { EquityChart, PlainBars } from "@/components/charts/Charts";
+import { ReturnsPanel } from "@/components/Returns";
 import { Shell } from "@/components/Shell";
 import { type Json, money, Notice, num, Panel, pct, signed, SimBadge, Stat, Table, tone, useApi, when } from "@/components/ui";
 
@@ -29,6 +30,7 @@ function Portfolio() {
         <Stat label="Gross / net exposure" value={`${pct(ov.gross_exposure / ov.equity, 0)} / ${pct(ov.net_exposure / ov.equity, 0)}`} />
         <Stat label="Drawdown / volatility" value={`${pct(ov.drawdown)} / ${pct(ov.volatility, 0)}`} hint="volatility: annualised, from daily equity" />
       </div>
+      <ReturnsPanel />
       <Panel title="Broker balances">
         <Table head={["Account", "", "Currency", "Cash", "Equity", `Equity (${ccy})`, "Margin used", "FX rate", "Rate source / time"]}
           rows={ov.brokers.map((b: Json) => [b.broker_id, <SimBadge key="s" simulated={b.is_simulated} />, b.currency, num(b.cash), num(b.equity), num(b.equity_base), num(b.margin_used), num(b.fx_rate, 5), `${b.fx_source} · ${when(b.fx_ts)}`])} />

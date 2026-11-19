@@ -43,6 +43,13 @@ def equity(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime))
     return rt.equity_history()
 
 
+@router.get("/portfolio/returns")
+def portfolio_returns(_: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> dict:
+    """Portfolio return in % day by day, per week and per month (time-weighted, capital moves excluded)."""
+    with rt.lock:
+        return rt.portfolio.returns()
+
+
 @router.get("/trades")
 def trades(limit: int = 200, _: User = Depends(viewer), rt: TradingRuntime = Depends(get_runtime)) -> list[dict]:
     with rt.lock:

@@ -346,6 +346,15 @@ and no short is opened when not even one share fits the risk limits. Crypto cann
 In semi-automatic mode a strategy's exit signal is a proposal waiting for approval, unless "close positions on the
 strategy's exit signal" is on (paper accounts): a position whose strategy turned bearish stays open until then.
 
+## Portfolio returns
+
+The Portfolio page shows the return of all accounts together, in the base currency and after costs: today, this week, this
+month, since the first recorded day, and tables day by day, per ISO week and per month (the Overview shows the first three).
+Each UTC day is recorded for good with its starting and closing equity and the capital moved in or out that day (an
+account linked or removed, virtual capital changed); that capital is not counted as a gain or a loss (time-weighted
+return: (end − start − moved) / (start + moved)). Weeks and months compound their days. The record starts with the
+update that introduced it; earlier days are not reconstructed. API: `GET /api/portfolio/returns`.
+
 ## Each account on its own capital
 
 Position size and the exposure limits (per instrument, per strategy, per account, leverage, margin, number of positions,

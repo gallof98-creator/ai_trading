@@ -79,6 +79,10 @@ class PortfolioEngine:
         # leaves or changes its capital basis (virtual capital set, deposit, withdrawal) is a flow of capital, not a gain
         # or a loss: the daily and peak reference levels move with it. None until the first observation.
         self._contrib: dict[str, list] | None = None
+        # One row per UTC day, kept for good: equity at the start and end of the day and the capital that came in (+) or
+        # went out (-) that day (accounts linked or removed, virtual capital changed). Returns are computed from it,
+        # so that a deposit is never mistaken for a gain.
+        self.daily: dict[str, dict] = {}
         self.discrepancies: list[str] = []
 
     # ------------------------------------------------------------------ fills and marks
@@ -208,10 +212,12 @@ class PortfolioEngine:
         if self._day != ts.date():
             self._day = ts.date()
             self.day_start_equity = self.equity_curve[-1][1] if self.equity_curve else equity
+        flow = 0.0
         if self._contrib is None:
             # First observation with this bookkeeping (a new installation, or one updated from a version without it):
             # earlier reference levels may include accounts valued on another basis, so they start again from here.
             self.day_start_equity = self.peak_equity = equity
+            self._daily_restart(ts, equity)
         else:
             flow = 0.0
             for broker_id, (value, basis) in current.items():
@@ -226,9 +232,65 @@ class PortfolioEngine:
                     self.day_start_equity = self.peak_equity = equity
         self._contrib = current
         self.peak_equity = max(self.peak_equity or equity, equity)
+        self._daily_record(ts, equity, flow)
         self.equity_curve.append((ts, equity))
         self.exposure_curve.append(bool(self.slices))
         return self.state(ts, balances)  # the figures just read, not a second reading of every account
+
+    # ------------------------------------------------------------------ returns
+    def _daily_record(self, ts: datetime, equity: float, flow: float) -> None:
+        day = ts.date().isoformat()
+        row = self.daily.get(day)
+        if row is None:
+            last = self.daily[max(self.daily)] if self.daily else None
+            row = self.daily[day] = {"start": last["end"] if last else equity, "end": equity, "flows": 0.0}
+        row["end"] = equity
+        row["flows"] += flow
+
+    def _daily_restart(self, ts: datetime, equity: float) -> None:
+        """The day's measurement starts again at `equity` (the reference basis of the accounts changed)."""
+        self.daily[ts.date().isoformat()] = {"start": equity, "end": equity, "flows": 0.0}
+
+    @staticmethod
+    def _day_return(row: dict) -> float | None:
+        base = row["start"] + row["flows"]  # capital moved during the day counts as present from its start
+        return (row["end"] - row["start"] - row["flows"]) / base if base > 0 else None
+
+    def returns(self, days: int = 31, weeks: int = 13, months: int = 12) -> dict:
+        """Time-weighted portfolio returns in the base currency, net of costs: per day, compounded per ISO week and per
+        calendar month (UTC), with capital moved in or out excluded. Only days the platform observed are counted."""
+        import math
+
+        rows = sorted((d, r, self._day_return(r)) for d, r in self.daily.items())
+        rows = [(d, r, x) for d, r, x in rows if x is not None]
+
+        def compound(values: list[float]) -> float | None:
+            return math.prod(1 + v for v in values) - 1 if values else None
+
+        def grouped(key) -> list[dict]:
+            out: dict[str, list] = {}
+            for d, _, x in rows:
+                out.setdefault(key(d), []).append(x)
+            return [{"period": k, "return": compound(v), "days": len(v)} for k, v in sorted(out.items())]
+
+        from datetime import date as _date
+
+        def iso_week(d: str) -> str:
+            y, w, _ = _date.fromisoformat(d).isocalendar()
+            return f"{y}-W{w:02d}"
+
+        weekly, monthly = grouped(iso_week), grouped(lambda d: d[:7])
+        today = rows[-1] if rows else None
+        return {
+            "base_currency": self.base, "first_day": rows[0][0] if rows else None, "last_day": today[0] if today else None,
+            "today": today[2] if today else None,
+            "week_to_date": weekly[-1]["return"] if weekly else None, "month_to_date": monthly[-1]["return"] if monthly else None,
+            "since_start": compound([x for _, _, x in rows]),
+            "daily": [{"period": d, "return": x, "start": r["start"], "end": r["end"], "flows": r["flows"]} for d, r, x in rows[-days:]],
+            "weekly": weekly[-weeks:], "monthly": monthly[-months:],
+            "meaning": "Time-weighted returns of all accounts together in the base currency, after costs. Capital added or removed "
+                       "(an account linked or removed, virtual capital changed) is not counted as a gain or a loss. Days are UTC.",
+        }
 
     # ------------------------------------------------------------------ reconciliation
     def reconcile(self, pending: set[tuple[str, str]] | frozenset = frozenset()) -> list[str]:
@@ -289,7 +351,7 @@ class PortfolioEngine:
             "equity_curve": [[t.isoformat(), e] for t, e in self.equity_curve[-curve_tail:]],
             "exposure_curve": self.exposure_curve[-curve_tail:], "day_start_equity": self.day_start_equity, "peak_equity": self.peak_equity,
             "day": self._day.isoformat() if self._day else None, "reconciled": self.reconciled, "discrepancies": self.discrepancies,
-            "contributions": self._contrib,
+            "contributions": self._contrib, "daily": self.daily,
         }
 
     def load_state(self, state: dict) -> None:
@@ -305,6 +367,7 @@ class PortfolioEngine:
         self._day = date.fromisoformat(state["day"]) if state["day"] else None
         self.reconciled, self.discrepancies = state["reconciled"], list(state["discrepancies"])
         self._contrib = state.get("contributions")
+        self.daily = dict(state.get("daily") or {})
 
     # ------------------------------------------------------------------ analytics
     @staticmethod
