@@ -520,6 +520,7 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
             "fundamentals": (company.fundamentals_now(iid, now).to_dict() if company and company.fundamentals_now(iid, now) else None),
             "filters": {**(v.get("filters") or {}), "news_checked": bool(company and company.settings().news)}})
         before = set(rt.engine.approvals)
+        orders_before = set(rt.engine.orders)
         # Recorded before the order is created: the engine refuses weaker evidence on a real-money account, and results
         # are reported per level.
         rt.evidence[rt.evidence_key(broker_id, iid, strategy)] = level
@@ -528,15 +529,24 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
             orders = rt.engine.on_signal(signal, dep, mode_override=None if automatic else TradingMode.SEMI_AUTO)
             rt.persist()
         new = [a for a in rt.engine.approvals if a not in before]
-        submitted = [o for o in orders if o.status.value in ("submitted", "filled", "partially_filled")]
+        # Only orders created now count as sent: the same entry signalled again returns the order already sent for it
+        # (the engine never sends a client order id twice), which is not a new order.
+        created = [o for o in orders if o.id not in orders_before]
+        submitted = [o for o in created if o.status.value in ("submitted", "filled", "partially_filled")]
+        earlier = [o for o in orders if o.id in orders_before and not o.reduce_only]
         if new:
             proposed.append({**label, "proposal_ids": new, "regime": regime, "level": level})
             funnel["proposed"] = funnel.get("proposed", 0) + 1
         elif submitted:
             sent.append({**label, "order_ids": [o.id for o in submitted], "regime": regime, "level": level})
             funnel["sent"] = funnel.get("sent", 0) + 1
+        elif earlier:
+            o = earlier[0]
+            skip("already", f"this entry was already acted on: order {o.id} {o.status.value}"
+                            + (f" ({(o.reason or '').split(' | ')[-1][:120]})" if o.status.value in ("rejected", "cancelled") else "")
+                            + "; nothing new was sent")
         else:
-            reason = next((o.reason for o in orders if o.status.value == "rejected"), None)
+            reason = next((o.reason for o in created if o.status.value == "rejected"), None)
             skip("risk" if reason else "already", f"refused by the risk engine: {reason}" if reason else "already proposed for this entry (it was rejected or lapsed)")
     return {"scanned_at": now.isoformat(), "broker_id": broker_id, "proposed": proposed, "sent": sent, "skipped": skipped, "funnel": funnel,
             "validated": sum(1 for v in validations(session, now) if v["status"] == "validated"),

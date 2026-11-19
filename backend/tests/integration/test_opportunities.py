@@ -404,3 +404,24 @@ def test_the_validation_keeps_every_core_busy_until_its_time_is_up_not_one_batch
         rt.reload_settings(s)
     out = rt.autopilot._validate({"_candidates": [CYC]})
     assert out["run"] + out["could_not_run"] == 6 and out["remaining"] == 0
+
+
+def test_an_entry_signalled_again_is_not_reported_as_a_new_order_sent(rt):
+    """The same entry stays in its window for a few bars. The engine never sends its client order id twice; the scan must
+    not report the order it returns as a new one at every cycle."""
+    from app.database.settings_store import save_settings
+
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"trading_mode": "auto", "safety_limits_confirmed": True}))
+        rt.reload_settings(s)
+        opp.validate(s, rt, "ema_crossover", CYC, "1d", "admin", allow_short=True)
+    with rt.db.session() as s:
+        first = opp.scan(s, rt, "paper-main", "admin")
+    assert len(first["sent"]) == 1
+    [oid] = first["sent"][0]["order_ids"]
+    with rt.lock:   # the order no longer works (e.g. cancelled), and no position was opened
+        rt.engine._record(rt.engine.orders[oid].model_copy(update={"status": OrderStatus.CANCELLED}))
+    with rt.db.session() as s:
+        again = opp.scan(s, rt, "paper-main", "admin")
+    assert again["sent"] == [] and any(f"order {oid} cancelled" in x["reason"] for x in again["skipped"])
+    assert len([o for o in rt.engine.orders.values() if not o.reduce_only and o.instrument_id == CYC]) == 1   # nothing new was created

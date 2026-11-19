@@ -121,7 +121,7 @@ def test_a_cycle_goes_from_an_empty_universe_to_a_proposal_without_a_click(rt):
     # A proposal from a daily bar lives twelve hours. Once it has lapsed, the same entry is not proposed a second time.
     rt.now[0] += timedelta(hours=13)
     later = rt.autopilot.tick()
-    assert rt.proposals() == [] and later["scan"]["proposed"] == 0 and any("lapsed" in r for r in later["scan"]["reasons"])
+    assert rt.proposals() == [] and later["scan"]["proposed"] == 0 and any("cancelled (proposal expired)" in r for r in later["scan"]["reasons"])
 
 
 def test_prices_are_refreshed_daily_and_expired_validations_are_redone(rt):
