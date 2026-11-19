@@ -174,15 +174,15 @@ def exit_variants(trade: dict, bars: pd.DataFrame, target: pd.Series, a: Assumpt
     after = bars[bars.index >= entry_ts]
     per_side = a.taker_fee + (a.spread_bps / 2 + a.slippage_bps) / 10_000
 
-    def r_of(exit_price: float) -> float:
-        cost = (entry + exit_price) * per_side
+    def r_of(exit_price: float, gross: bool = False) -> float:
+        cost = 0.0 if gross else (entry + exit_price) * per_side
         return ((exit_price - entry) * d - cost) / stop_d
 
     full = simulate_exit(after, entry_ts, d, stop, tp, None, target, delta, max_days=60)
     if full.reason is None or full.price is None:
         return None
     morning = next_morning(entry_ts, a)
-    out = {"1 system exits only": (r_of(full.price), full.ts)}
+    out = {"1 system exits only": (r_of(full.price), full.ts, r_of(full.price, True))}
     if full.ts is not None and full.ts <= morning:   # the system had already closed it before the morning: same in every variant
         out["2 time stop next morning (all)"] = out["3 winners closed next morning"] = out["4 half next morning + ATR trail"] = out["1 system exits only"]
         return out
@@ -190,15 +190,16 @@ def exit_variants(trade: dict, bars: pd.DataFrame, target: pd.Series, a: Assumpt
     if at.empty:
         return None
     m_ts, m_px = at.index[0], float(at["open"].iloc[0])
-    out["2 time stop next morning (all)"] = (r_of(m_px), m_ts)
+    out["2 time stop next morning (all)"] = (r_of(m_px), m_ts, r_of(m_px, True))
     if (m_px - entry) * d > 0:
-        out["3 winners closed next morning"] = (r_of(m_px), m_ts)
+        out["3 winners closed next morning"] = (r_of(m_px), m_ts, r_of(m_px, True))
     else:
         out["3 winners closed next morning"] = out["1 system exits only"]
     rest = simulate_exit(after, m_ts, d, stop, None, a.trailing_atr * a_entry, target, delta, max_days=60)
     if rest.reason is None or rest.price is None:
         return None
-    out["4 half next morning + ATR trail"] = (0.5 * r_of(m_px) + 0.5 * r_of(rest.price), max(m_ts, rest.ts))
+    out["4 half next morning + ATR trail"] = (0.5 * r_of(m_px) + 0.5 * r_of(rest.price), max(m_ts, rest.ts),
+                                              0.5 * r_of(m_px, True) + 0.5 * r_of(rest.price, True))
     return out
 
 
@@ -206,11 +207,14 @@ def table_variants(rows: dict[str, list[tuple[float, pd.Timestamp]]], a: Assumpt
     eur_per_r = a.capital_eur * a.risk_per_trade
     out = []
     for name in sorted(rows):
-        seq = [r for r, _ in sorted(rows[name], key=lambda x: x[1])]
+        ordered = sorted(rows[name], key=lambda x: x[1])
+        seq = [x[0] for x in ordered]
+        gross = [x[2] for x in ordered]
         wins, losses = [r for r in seq if r > 0], [r for r in seq if r < 0]
         out.append({"variant": name, "trades": len(seq), "expectancy_r": _mean(seq), "expectancy_eur": (_mean(seq) or 0) * eur_per_r,
                     "pf": (sum(wins) / -sum(losses)) if losses else None, "max_dd_r": _max_drawdown(seq), "max_dd_eur": _max_drawdown(seq) * eur_per_r,
-                    "total_r": sum(seq)})
+                    "total_r": sum(seq), "expectancy_gross_r": _mean(gross), "cost_r": (_mean(gross) or 0) - (_mean(seq) or 0),
+                    "win_rate": len(wins) / len(seq) if seq else None})
     return out
 
 
@@ -275,13 +279,14 @@ def markdown(res: dict) -> str:
     lines += ["", "## Step 4: four exit rules on the same out-of-sample entries", "",
               f"Entries: every out-of-sample trade of the walk-forward of the five strategies on the six pairs (strategies as they are, long-only). "
               f"R after costs; EUR at {a['risk_per_trade']:.0%} of {a['capital_eur']:.0f} EUR per R ({a['capital_eur'] * a['risk_per_trade']:.0f} EUR).", "",
-              "| Rule | Trades | Expectancy (R) | Expectancy (EUR) | Profit factor | Max DD (R) | Max DD (EUR) | Total (R) |", "|---|---|---|---|---|---|---|---|"]
-    lines += [f"| {v['variant']} | {v['trades']} | {f(v['expectancy_r'], 3)} | {f(v['expectancy_eur'])} | {f(v['pf'])} | {f(v['max_dd_r'])} | {f(v['max_dd_eur'])} | {f(v['total_r'])} |"
-              for v in res["exit_variants"]]
+              "| Rule | Trades | Expectancy before costs (R) | Costs (R) | Expectancy (R) | Expectancy (EUR) | Profit factor | Max DD (R) | Total (R) |",
+              "|---|---|---|---|---|---|---|---|---|"]
+    lines += [f"| {v['variant']} | {v['trades']} | {f(v['expectancy_gross_r'], 3)} | {f(v['cost_r'], 3)} | {f(v['expectancy_r'], 3)} | {f(v['expectancy_eur'])} | "
+              f"{f(v['pf'])} | {f(v['max_dd_r'])} | {f(v['total_r'])} |" for v in res["exit_variants"]]
     lines += ["", "### By strategy", ""]
     for s, rows in sorted(res["exit_variants_by_strategy"].items()):
-        lines += [f"**{s}**", "", "| Rule | Trades | Expectancy (R) | PF | Max DD (R) |", "|---|---|---|---|---|"]
-        lines += [f"| {v['variant']} | {v['trades']} | {f(v['expectancy_r'], 3)} | {f(v['pf'])} | {f(v['max_dd_r'])} |" for v in rows] + [""]
+        lines += [f"**{s}**", "", "| Rule | Trades | Before costs (R) | Expectancy (R) | PF | Max DD (R) |", "|---|---|---|---|---|---|"]
+        lines += [f"| {v['variant']} | {v['trades']} | {f(v['expectancy_gross_r'], 3)} | {f(v['expectancy_r'], 3)} | {f(v['pf'])} | {f(v['max_dd_r'])} |" for v in rows] + [""]
     lines += ["## Step 5: walk-forward before / after the crypto profile (out of sample apart from in sample)", "",
               "| Strategy | Profile | IS trades | IS mean return | IS mean PF | OOS trades | OOS mean return | OOS expectancy (R) | OOS expectancy (EUR) | OOS PF | OOS max DD (EUR) | Cost / trade (EUR) |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|"]

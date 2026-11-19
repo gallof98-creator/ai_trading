@@ -1,0 +1,598 @@
+{
+ "pairs": [
+  "BTC/USD",
+  "ETH/USD",
+  "SOL/USD",
+  "LTC/USD",
+  "LINK/USD",
+  "AVAX/USD"
+ ],
+ "strategies": [
+  "zscore_reversion",
+  "rsi_reversion",
+  "bollinger_reversion",
+  "ema_crossover",
+  "volume_breakout"
+ ],
+ "timeframe": "1h",
+ "assumptions": {
+  "taker_fee": 0.0025,
+  "maker_fee": 0.0015,
+  "spread_bps": 10.0,
+  "slippage_bps": 5.0,
+  "usd_eur": 0.92,
+  "capital_eur": 1000.0,
+  "risk_per_trade": 0.02,
+  "funding_rate_8h": 0.0,
+  "morning": "09:00",
+  "morning_tz": "Europe/Rome",
+  "trailing_atr": 2.0,
+  "history_days": 365,
+  "folds": 4
+ },
+ "profile_after": {
+  "enabled": true,
+  "regime_filter": "trend_only",
+  "regime_ema": 200,
+  "regime_adx_min": 25.0,
+  "vol_entry": true,
+  "vol_entry_atr": 1.0,
+  "reversion_exit_at_mean": true,
+  "time_stop_bars": 48,
+  "trend_partial": true,
+  "partial_fraction": 0.5,
+  "partial_at_r": 1.0,
+  "trailing_atr": 2.0,
+  "breakout_confirm": true,
+  "breakout_volume_mult": 1.5,
+  "breakout_lookback": 20,
+  "maker_entries": false
+ },
+ "data": {
+  "BTC/USD": {
+   "bars": 8760,
+   "from": "2025-11-19 14:00:00+00:00",
+   "to": "2026-11-19 14:00:00+00:00"
+  },
+  "ETH/USD": {
+   "bars": 8760,
+   "from": "2025-11-19 14:00:00+00:00",
+   "to": "2026-11-19 14:00:00+00:00"
+  },
+  "SOL/USD": {
+   "bars": 8760,
+   "from": "2025-11-19 14:00:00+00:00",
+   "to": "2026-11-19 14:00:00+00:00"
+  },
+  "LTC/USD": {
+   "bars": 8760,
+   "from": "2025-11-19 14:00:00+00:00",
+   "to": "2026-11-19 14:00:00+00:00"
+  },
+  "LINK/USD": {
+   "bars": 8760,
+   "from": "2025-11-19 14:00:00+00:00",
+   "to": "2026-11-19 14:00:00+00:00"
+  },
+  "AVAX/USD": {
+   "bars": 8760,
+   "from": "2025-11-19 14:00:00+00:00",
+   "to": "2026-11-19 14:00:00+00:00"
+  }
+ },
+ "walk_forward": {
+  "zscore_reversion": {
+   "before": {
+    "is_trades": 1496,
+    "is_mean_return": -0.05709485269929373,
+    "is_mean_pf": 0.6222336702801662,
+    "oos_trades": 431,
+    "oos_mean_return": -0.03219576661100124,
+    "oos_expectancy_r": -0.46291051197511973,
+    "oos_expectancy_eur": -1.7928037091972855,
+    "oos_pf": 0.3597967794144626,
+    "oos_max_dd_eur": 787.8429226203867,
+    "oos_cost_eur_per_trade": 1.6914788017579536,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   },
+   "after": {
+    "is_trades": 624,
+    "is_mean_return": -0.03302008365973983,
+    "is_mean_pf": 0.4194692587395037,
+    "oos_trades": 313,
+    "oos_mean_return": -0.025387332316270893,
+    "oos_expectancy_r": -0.4628884061634773,
+    "oos_expectancy_eur": -1.9466325098738055,
+    "oos_pf": 0.2764086044228923,
+    "oos_max_dd_eur": 612.3482309635705,
+    "oos_cost_eur_per_trade": 1.6841163453536472,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   }
+  },
+  "rsi_reversion": {
+   "before": {
+    "is_trades": 741,
+    "is_mean_return": -0.037021324554155285,
+    "is_mean_pf": 0.649883418957038,
+    "oos_trades": 210,
+    "oos_mean_return": -0.009616813636994454,
+    "oos_expectancy_r": -0.2849024502485108,
+    "oos_expectancy_eur": -1.0990644156565117,
+    "oos_pf": 0.5823438058913002,
+    "oos_max_dd_eur": 236.88411691287521,
+    "oos_cost_eur_per_trade": 1.6799787336799403,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   },
+   "after": {
+    "is_trades": 288,
+    "is_mean_return": -0.015470553366668435,
+    "is_mean_pf": 0.4972207670050068,
+    "oos_trades": 162,
+    "oos_mean_return": -0.007787852394455415,
+    "oos_expectancy_r": -0.2859448246484172,
+    "oos_expectancy_eur": -1.1537559102896915,
+    "oos_pf": 0.510719983073526,
+    "oos_max_dd_eur": 216.51846256461405,
+    "oos_cost_eur_per_trade": 1.6647402531079678,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   }
+  },
+  "bollinger_reversion": {
+   "before": {
+    "is_trades": 1881,
+    "is_mean_return": -0.06721813798495162,
+    "is_mean_pf": 0.6320619143292572,
+    "oos_trades": 503,
+    "oos_mean_return": -0.03640635417294424,
+    "oos_expectancy_r": -0.4212949900039691,
+    "oos_expectancy_eur": -1.7370825052697039,
+    "oos_pf": 0.3570895457039462,
+    "oos_max_dd_eur": 897.6033786596992,
+    "oos_cost_eur_per_trade": 1.6709996788931507,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   },
+   "after": {
+    "is_trades": 749,
+    "is_mean_return": -0.04873356950448032,
+    "is_mean_pf": 0.3237629294084358,
+    "oos_trades": 354,
+    "oos_mean_return": -0.028799179121735324,
+    "oos_expectancy_r": -0.4573838636906683,
+    "oos_expectancy_eur": -1.952486720117645,
+    "oos_pf": 0.2789197751908053,
+    "oos_max_dd_eur": 700.4362585311729,
+    "oos_cost_eur_per_trade": 1.675043542506187,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   }
+  },
+  "ema_crossover": {
+   "before": {
+    "is_trades": 1070,
+    "is_mean_return": -0.03297465942134897,
+    "is_mean_pf": 0.7723603331627361,
+    "oos_trades": 249,
+    "oos_mean_return": -0.022853280186612007,
+    "oos_expectancy_r": -0.6502339796454788,
+    "oos_expectancy_eur": -2.2308171476121106,
+    "oos_pf": 0.4036536778487397,
+    "oos_max_dd_eur": 555.4734697554154,
+    "oos_cost_eur_per_trade": 1.667525279644367,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   },
+   "after": {
+    "is_trades": 1284,
+    "is_mean_return": -0.05224083853615238,
+    "is_mean_pf": 0.601675732309812,
+    "oos_trades": 302,
+    "oos_mean_return": -0.020324335604575194,
+    "oos_expectancy_r": -0.36560903374797243,
+    "oos_expectancy_eur": -1.6190137777778373,
+    "oos_pf": 0.3572396783976317,
+    "oos_max_dd_eur": 488.94216088890727,
+    "oos_cost_eur_per_trade": 1.4097684411284583,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   }
+  },
+  "volume_breakout": {
+   "before": {
+    "is_trades": 883,
+    "is_mean_return": -0.04273498697131334,
+    "is_mean_pf": 0.6179975043147962,
+    "oos_trades": 219,
+    "oos_mean_return": -0.016935448866791925,
+    "oos_expectancy_r": -0.5313556965211651,
+    "oos_expectancy_eur": -2.001307280863657,
+    "oos_pf": 0.41122957366182783,
+    "oos_max_dd_eur": 438.28629450914093,
+    "oos_cost_eur_per_trade": 1.673983782930572,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   },
+   "after": {
+    "is_trades": 1021,
+    "is_mean_return": -0.05449399033358915,
+    "is_mean_pf": 0.5144418646219949,
+    "oos_trades": 255,
+    "oos_mean_return": -0.0192843638688153,
+    "oos_expectancy_r": -0.31491829631791546,
+    "oos_expectancy_eur": -1.8149989523590833,
+    "oos_pf": 0.3437568546072675,
+    "oos_max_dd_eur": 462.8247328515664,
+    "oos_cost_eur_per_trade": 1.4565822773738637,
+    "combinations": 8,
+    "runs": 6,
+    "errors": []
+   }
+  }
+ },
+ "combinations_tested": {
+  "zscore_reversion": {
+   "per_run": 8,
+   "runs": 12,
+   "folds": 4
+  },
+  "rsi_reversion": {
+   "per_run": 8,
+   "runs": 12,
+   "folds": 4
+  },
+  "bollinger_reversion": {
+   "per_run": 8,
+   "runs": 12,
+   "folds": 4
+  },
+  "ema_crossover": {
+   "per_run": 8,
+   "runs": 12,
+   "folds": 4
+  },
+  "volume_breakout": {
+   "per_run": 8,
+   "runs": 12,
+   "folds": 4
+  }
+ },
+ "exit_variants": [
+  {
+   "variant": "1 system exits only",
+   "trades": 1612,
+   "expectancy_r": -0.5576244541156237,
+   "expectancy_eur": -11.152489082312474,
+   "pf": 0.2616827244131905,
+   "max_dd_r": 901.2421715065406,
+   "max_dd_eur": 18024.84343013081,
+   "total_r": -898.8906200343853,
+   "expectancy_gross_r": -0.10705658357552979,
+   "cost_r": 0.4505678705400939,
+   "win_rate": 0.36352357320099254
+  },
+  {
+   "variant": "2 time stop next morning (all)",
+   "trades": 1612,
+   "expectancy_r": -0.5519378392341878,
+   "expectancy_eur": -11.038756784683756,
+   "pf": 0.24310371495215186,
+   "max_dd_r": 892.075348317666,
+   "max_dd_eur": 17841.50696635332,
+   "total_r": -889.7237968455107,
+   "expectancy_gross_r": -0.1013499956363067,
+   "cost_r": 0.4505878435978811,
+   "win_rate": 0.3511166253101737
+  },
+  {
+   "variant": "3 winners closed next morning",
+   "trades": 1612,
+   "expectancy_r": -0.5483242142868879,
+   "expectancy_eur": -10.966484285737758,
+   "pf": 0.25046322018476785,
+   "max_dd_r": 886.250184902619,
+   "max_dd_eur": 17725.00369805238,
+   "total_r": -883.8986334304634,
+   "expectancy_gross_r": -0.09772367857930735,
+   "cost_r": 0.4506005357075806,
+   "win_rate": 0.36538461538461536
+  },
+  {
+   "variant": "4 half next morning + ATR trail",
+   "trades": 1612,
+   "expectancy_r": -0.5492403315448854,
+   "expectancy_eur": -10.984806630897708,
+   "pf": 0.25148170123940333,
+   "max_dd_r": 887.7269659225104,
+   "max_dd_eur": 17754.53931845021,
+   "total_r": -885.3754144503552,
+   "expectancy_gross_r": -0.0986430135095606,
+   "cost_r": 0.45059731803532477,
+   "win_rate": 0.3542183622828784
+  }
+ ],
+ "exit_variants_by_strategy": {
+  "zscore_reversion": [
+   {
+    "variant": "1 system exits only",
+    "trades": 431,
+    "expectancy_r": -0.5553885972487234,
+    "expectancy_eur": -11.107771944974466,
+    "pf": 0.21139830701069573,
+    "max_dd_r": 241.0504903098379,
+    "max_dd_eur": 4821.009806196758,
+    "total_r": -239.3724854141998,
+    "expectancy_gross_r": -0.10122985371363263,
+    "cost_r": 0.4541587435350907,
+    "win_rate": 0.3990719257540603
+   },
+   {
+    "variant": "2 time stop next morning (all)",
+    "trades": 431,
+    "expectancy_r": -0.5623346289902432,
+    "expectancy_eur": -11.246692579804865,
+    "pf": 0.20400151620415746,
+    "max_dd_r": 244.04422999043297,
+    "max_dd_eur": 4880.884599808659,
+    "total_r": -242.36622509479483,
+    "expectancy_gross_r": -0.1082002819539937,
+    "cost_r": 0.45413434703624955,
+    "win_rate": 0.37819025522041766
+   },
+   {
+    "variant": "3 winners closed next morning",
+    "trades": 431,
+    "expectancy_r": -0.5589562311026725,
+    "expectancy_eur": -11.179124622053449,
+    "pf": 0.20704373457788364,
+    "max_dd_r": 242.58814050089,
+    "max_dd_eur": 4851.7628100178,
+    "total_r": -240.9101356052518,
+    "expectancy_gross_r": -0.10481001814308473,
+    "cost_r": 0.45414621295958774,
+    "win_rate": 0.3874709976798144
+   },
+   {
+    "variant": "4 half next morning + ATR trail",
+    "trades": 431,
+    "expectancy_r": -0.5586381660206199,
+    "expectancy_eur": -11.172763320412397,
+    "pf": 0.20620816454927218,
+    "max_dd_r": 242.4510544505254,
+    "max_dd_eur": 4849.021089010508,
+    "total_r": -240.77304955488717,
+    "expectancy_gross_r": -0.10449083592326282,
+    "cost_r": 0.4541473300973571,
+    "win_rate": 0.3874709976798144
+   }
+  ],
+  "rsi_reversion": [
+   {
+    "variant": "1 system exits only",
+    "trades": 210,
+    "expectancy_r": -0.3659581790188392,
+    "expectancy_eur": -7.3191635803767845,
+    "pf": 0.38747021918151936,
+    "max_dd_r": 77.76232673366917,
+    "max_dd_eur": 1555.2465346733834,
+    "total_r": -76.85121759395624,
+    "expectancy_gross_r": 0.034262135152051204,
+    "cost_r": 0.40022031417089043,
+    "win_rate": 0.48095238095238096
+   },
+   {
+    "variant": "2 time stop next morning (all)",
+    "trades": 210,
+    "expectancy_r": -0.4286031931641503,
+    "expectancy_eur": -8.572063863283006,
+    "pf": 0.3165463919455864,
+    "max_dd_r": 90.9177797041845,
+    "max_dd_eur": 1818.35559408369,
+    "total_r": -90.00667056447156,
+    "expectancy_gross_r": -0.028602906639530398,
+    "cost_r": 0.4000002865246199,
+    "win_rate": 0.4142857142857143
+   },
+   {
+    "variant": "3 winners closed next morning",
+    "trades": 210,
+    "expectancy_r": -0.3997484371015508,
+    "expectancy_eur": -7.994968742031015,
+    "pf": 0.3385009782667311,
+    "max_dd_r": 84.85828093103864,
+    "max_dd_eur": 1697.1656186207726,
+    "total_r": -83.94717179132566,
+    "expectancy_gross_r": 0.0003531957815429263,
+    "cost_r": 0.4001016328830937,
+    "win_rate": 0.4380952380952381
+   },
+   {
+    "variant": "4 half next morning + ATR trail",
+    "trades": 210,
+    "expectancy_r": -0.4115071937841608,
+    "expectancy_eur": -8.230143875683215,
+    "pf": 0.3365330497627736,
+    "max_dd_r": 87.32761983438671,
+    "max_dd_eur": 1746.5523966877342,
+    "total_r": -86.41651069467376,
+    "expectancy_gross_r": -0.011446861100153034,
+    "cost_r": 0.40006033268400776,
+    "win_rate": 0.44285714285714284
+   }
+  ],
+  "bollinger_reversion": [
+   {
+    "variant": "1 system exits only",
+    "trades": 503,
+    "expectancy_r": -0.5034690531099496,
+    "expectancy_eur": -10.069381062198993,
+    "pf": 0.21683414966775963,
+    "max_dd_r": 256.56157758884575,
+    "max_dd_eur": 5131.231551776915,
+    "total_r": -253.24493371430464,
+    "expectancy_gross_r": -0.08548102834815632,
+    "cost_r": 0.4179880247617933,
+    "win_rate": 0.3797216699801193
+   },
+   {
+    "variant": "2 time stop next morning (all)",
+    "trades": 503,
+    "expectancy_r": -0.5044213856853218,
+    "expectancy_eur": -10.088427713706436,
+    "pf": 0.2151265029942227,
+    "max_dd_r": 257.04060087425796,
+    "max_dd_eur": 5140.812017485159,
+    "total_r": -253.72395699971688,
+    "expectancy_gross_r": -0.0864367057945911,
+    "cost_r": 0.4179846798907307,
+    "win_rate": 0.3717693836978131
+   },
+   {
+    "variant": "3 winners closed next morning",
+    "trades": 503,
+    "expectancy_r": -0.5029706086482257,
+    "expectancy_eur": -10.059412172964514,
+    "pf": 0.2163519165063713,
+    "max_dd_r": 256.3108600245987,
+    "max_dd_eur": 5126.217200491974,
+    "total_r": -252.99421615005755,
+    "expectancy_gross_r": -0.08498083320342595,
+    "cost_r": 0.41798977544479976,
+    "win_rate": 0.37773359840954274
+   },
+   {
+    "variant": "4 half next morning + ATR trail",
+    "trades": 503,
+    "expectancy_r": -0.5033396747005849,
+    "expectancy_eur": -10.066793494011698,
+    "pf": 0.21576458149732833,
+    "max_dd_r": 256.49650024893526,
+    "max_dd_eur": 5129.930004978705,
+    "total_r": -253.1798563743942,
+    "expectancy_gross_r": -0.08535119552390674,
+    "cost_r": 0.4179884791766782,
+    "win_rate": 0.37375745526838966
+   }
+  ],
+  "ema_crossover": [
+   {
+    "variant": "1 system exits only",
+    "trades": 249,
+    "expectancy_r": -0.7589165641434801,
+    "expectancy_eur": -15.178331282869602,
+    "pf": 0.2817482075485509,
+    "max_dd_r": 188.9702244717265,
+    "max_dd_eur": 3779.40448943453,
+    "total_r": -188.97022447172654,
+    "expectancy_gross_r": -0.24851960652290414,
+    "cost_r": 0.5103969576205759,
+    "win_rate": 0.25301204819277107
+   },
+   {
+    "variant": "2 time stop next morning (all)",
+    "trades": 249,
+    "expectancy_r": -0.679969123567504,
+    "expectancy_eur": -13.599382471350081,
+    "pf": 0.24268496820987448,
+    "max_dd_r": 169.31231176830852,
+    "max_dd_eur": 3386.2462353661704,
+    "total_r": -169.31231176830852,
+    "expectancy_gross_r": -0.16929487940200497,
+    "cost_r": 0.5106742441654991,
+    "win_rate": 0.285140562248996
+   },
+   {
+    "variant": "3 winners closed next morning",
+    "trades": 249,
+    "expectancy_r": -0.7034413327587222,
+    "expectancy_eur": -14.068826655174444,
+    "pf": 0.24685814174181864,
+    "max_dd_r": 175.15689185692187,
+    "max_dd_eur": 3503.1378371384376,
+    "total_r": -175.15689185692185,
+    "expectancy_gross_r": -0.19284952986986068,
+    "cost_r": 0.5105918028888615,
+    "win_rate": 0.30120481927710846
+   },
+   {
+    "variant": "4 half next morning + ATR trail",
+    "trades": 249,
+    "expectancy_r": -0.688752479669581,
+    "expectancy_eur": -13.77504959339162,
+    "pf": 0.2663160395134477,
+    "max_dd_r": 171.49936743772577,
+    "max_dd_eur": 3429.9873487545156,
+    "total_r": -171.49936743772565,
+    "expectancy_gross_r": -0.17810908522446048,
+    "cost_r": 0.5106433944451205,
+    "win_rate": 0.2570281124497992
+   }
+  ],
+  "volume_breakout": [
+   {
+    "variant": "1 system exits only",
+    "trades": 219,
+    "expectancy_r": -0.6413322321470233,
+    "expectancy_eur": -12.826644642940465,
+    "pf": 0.3047695067536152,
+    "max_dd_r": 140.45175884019807,
+    "max_dd_eur": 2809.0351768039613,
+    "total_r": -140.4517588401981,
+    "expectancy_gross_r": -0.14274819576156783,
+    "cost_r": 0.49858403638545545,
+    "win_rate": 0.2694063926940639
+   },
+   {
+    "variant": "2 time stop next morning (all)",
+    "trades": 219,
+    "expectancy_r": -0.613308823827484,
+    "expectancy_eur": -12.26617647654968,
+    "pf": 0.30218382192423215,
+    "max_dd_r": 134.31463241821896,
+    "max_dd_eur": 2686.292648364379,
+    "total_r": -134.314632418219,
+    "expectancy_gross_r": -0.11462636102043455,
+    "cost_r": 0.4986824628070494,
+    "win_rate": 0.2648401826484018
+   },
+   {
+    "variant": "3 winners closed next morning",
+    "trades": 219,
+    "expectancy_r": -0.5976722284333631,
+    "expectancy_eur": -11.953444568667262,
+    "pf": 0.32227895731767153,
+    "max_dd_r": 130.89021802690647,
+    "max_dd_eur": 2617.8043605381295,
+    "total_r": -130.89021802690652,
+    "expectancy_gross_r": -0.09893484532136702,
+    "cost_r": 0.49873738311199606,
+    "win_rate": 0.2968036529680365
+   },
+   {
+    "variant": "4 half next morning + ATR trail",
+    "trades": 219,
+    "expectancy_r": -0.6096193168432619,
+    "expectancy_eur": -12.192386336865237,
+    "pf": 0.30710609631138,
+    "max_dd_r": 133.50663038867435,
+    "max_dd_eur": 2670.132607773487,
+    "total_r": -133.50663038867435,
+    "expectancy_gross_r": -0.11092389540656401,
+    "cost_r": 0.49869542143669787,
+    "win_rate": 0.2694063926940639
+   }
+  ]
+ }
+}
