@@ -209,7 +209,7 @@ class Autopilot:
             # entry; and once more after it, only if it produced setups that may trade.
             for name, step in (("exchange_rates", self._fx), ("universe", self._seed), ("prices", self._update_prices), ("crypto", self._crypto), ("candidates", self._candidates),
                                ("company", self._company), ("intraday", self._intraday), ("live", self._live), ("scan", self._scan), ("validation", self._validate),
-                               ("rescan", self._rescan)):
+                               ("rescan", self._rescan), ("analytics", self._analytics)):
                 self.state.update(step=name, step_started=self.rt.clock().isoformat(), step_progress=None)
                 began = time.perf_counter()
                 try:
@@ -517,6 +517,18 @@ class Autopilot:
         return {"stocks_with_results_dates": status["with_earnings_dates"], "stocks_with_fundamentals": status["with_fundamentals"],
                 "sec_refreshed_now": sec.get("filings_refreshed", 0), "sec": sec.get("error") or sec.get("skipped") or "ok",
                 "new_news_items": news.get("new_items", 0), "news": news.get("error") or news.get("skipped") or "ok", "detail": {"sec": sec, "news": news}}
+
+    def _analytics(self, _: dict) -> dict:
+        """Measurement only: older trades get what they lack (once), and the shadow exits of manual closes move on."""
+        rt = self.rt
+        with rt.lock:
+            out = {}
+            if not self.state.get("analytics_backfilled"):
+                out.update(rt.analytics.backfill())
+                self.state["analytics_backfilled"] = True
+            out.update(rt.analytics.update_shadows())
+            rt.persist()
+        return out
 
     def _rescan(self, result: dict) -> dict | None:
         v = result.get("validation") or {}

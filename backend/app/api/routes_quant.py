@@ -86,8 +86,12 @@ def dashboard(_: User = Depends(viewer), session: Session = Depends(get_session)
             row["trades"] += 1
             row["wins"] += t.pnl > 0
             row["pnl_quote"] += t.pnl
-    for row in [*by_strategy.values(), *by_level.values()]:
-        row["win_rate"] = row["wins"] / row["trades"] if row["trades"] else None
+    for row in [*by_strategy.values(), *by_level.values(), *by_exit.values()]:
+        if "wins" in row:
+            row["win_rate"] = row["wins"] / row["trades"] if row["trades"] else None
+        # The amount was always in the base currency (each trade converted at its close); "pnl_quote" is kept as the old
+        # name of the same figure for existing readers.
+        row["pnl_base"] = row["pnl_quote"]
     return {
         "configuration": {"virtual_capital": capital, "base_currency": s.base_currency, "trading_mode": s.trading_mode, "risk_per_trade": s.risk.risk_per_trade,
                           "risk_amount": capital * s.risk.risk_per_trade if capital else None, "proposal_ttl_minutes": s.proposal_ttl_minutes,

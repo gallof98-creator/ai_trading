@@ -11,7 +11,7 @@ from . import __version__
 import asyncio
 from contextlib import asynccontextmanager
 
-from .api import routes_auth, routes_charts, routes_data, routes_live, routes_quant, routes_global, routes_research, routes_scanner, routes_settings, routes_trading
+from .api import routes_analytics, routes_auth, routes_charts, routes_data, routes_live, routes_quant, routes_global, routes_research, routes_scanner, routes_settings, routes_trading
 from .api.deps import Container, get_container
 from .core.config import Settings, get_settings
 from .core.logging import configure_logging, get_logger
@@ -136,7 +136,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
                 response.headers.setdefault(name, value)
         return response
 
-    for module in (routes_auth, routes_settings, routes_trading, routes_research, routes_global, routes_scanner, routes_charts, routes_live, routes_quant, routes_data):
+    for module in (routes_auth, routes_settings, routes_trading, routes_research, routes_global, routes_scanner, routes_charts, routes_live, routes_quant, routes_data, routes_analytics):
         app.include_router(module.router)
     try:
         runtime.start()

@@ -862,3 +862,48 @@ def test_alpaca_opens_short_sales_only_in_easy_to_borrow_stocks(tmp_path):
     short = Order(broker_id="alpaca-paper", instrument_id="STOCK:AAPL", side=Side.SELL, qty=2)
     assert any("easy to borrow" in r for r in rt.brokers.get("alpaca-paper").instrument_reasons(short))
     rt.live.stop()
+
+
+def test_a_manual_close_at_alpaca_is_measured_in_r_and_followed_to_the_exit_the_system_would_have_made(tmp_path):
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    held, prot = rt.portfolio.qty(key), rt.engine.protections[key]
+    stop, target = prot.stop_price, rt.portfolio.slices[key].avg_price + prot.take_profit_distance
+    close_in_alpacas_app(fake, "AAPL", held, fill * 1.002)   # a small winner, taken by hand
+    for k in range(3):
+        tick(rt, "AAPL", fill * 1.002, minute + k)
+    t = rt.portfolio.trades[-1]
+    assert t.exit_reason == "closed_at_broker" and t.initial_risk_quote and t.r_multiple is not None
+    assert t.fx_source and t.pnl_base == pytest.approx(t.pnl) and t.asset_class == "stock" and t.timeframe == "1m"
+    assert t.shadow["status"] == "pending" and t.shadow["stop"] == pytest.approx(stop) and t.shadow["target"] == pytest.approx(target)
+    # The market then falls through the stop the system had: the shadow exit is a stop-loss, at the stop.
+    for k in range(3, 6):
+        tick(rt, "AAPL", stop * 0.99, minute + k)
+    rt.analytics.update_shadows()
+    assert t.shadow["status"] == "done" and t.shadow["exit_reason"] in ("stop_loss", "signal") and t.shadow["pnl_r"] < t.r_multiple
+    report = rt.analytics.report()
+    assert report["shadow"]["manual_trades"] == 1 and report["shadow"]["compared"] == 1 and report["total"]["insufficient_sample"]
+    rt.live.stop()
+
+
+def test_older_trades_get_their_base_pnl_risk_and_shadow_backfilled_where_the_data_allow(tmp_path):
+    from app.portfolio.engine import ClosedTrade
+
+    fake = FakeAlpaca()
+    rt = alpaca_runtime(tmp_path, fake, fractional=False)
+    p, fill, minute = open_position_at_alpaca(rt, fake)
+    key = ("alpaca-paper", "STOCK:AAPL", "ema_crossover")
+    stop = rt.engine.protections[key].stop_price
+    old = ClosedTrade("alpaca-paper", "STOCK:AAPL", "ema_crossover", 1, rt.portfolio.qty(key), rt.portfolio.slices[key].entry_ts,
+                      rt.clock(), rt.portfolio.slices[key].avg_price, fill * 1.01, 0.0, 1.0, 0.9, "closed_at_broker")
+    lost = ClosedTrade("alpaca-paper", "STOCK:ZZZ", "nothing", 1, 1.0, rt.clock(), rt.clock(), 10.0, 11.0, 0.0, 1.0, 0.9, "closed_at_broker")
+    rt.portfolio.trades += [old, lost]
+    out = rt.analytics.backfill()
+    assert old.pnl_base == pytest.approx(0.9) and "rate not stored" in old.fx_source
+    assert old.initial_stop_distance == pytest.approx(abs(old.entry_price - stop), abs=0.01)   # the order's stop, rounded to the tick
+    assert old.risk_source == "recorded orders" and old.r_multiple is not None
+    assert old.shadow["status"] == "pending" and lost.shadow["status"] == "not_reconstructible"
+    assert out["shadow_seeded"] >= 1 and out["not_reconstructible"] >= 1
+    rt.live.stop()

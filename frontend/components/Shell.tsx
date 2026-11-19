@@ -6,7 +6,7 @@ import { api, ApiError, Health, User } from "@/services/api";
 
 const NAV: { label: string; href: string }[] = [
   { label: "Overview", href: "/" }, { label: "Autonomous Quant", href: "/autonomous" }, { label: "Chart", href: "/chart" }, { label: "Markets", href: "/markets" }, { label: "Global Markets", href: "/global" }, { label: "Strategies", href: "/strategies" },
-  { label: "Quant AI", href: "/quant-ai" }, { label: "Backtesting", href: "/backtesting" }, { label: "Portfolio", href: "/portfolio" },
+  { label: "Quant AI", href: "/quant-ai" }, { label: "Backtesting", href: "/backtesting" }, { label: "Portfolio", href: "/portfolio" }, { label: "Analytics", href: "/analytics" },
   { label: "Execution", href: "/execution" }, { label: "Risk Center", href: "/risk" }, { label: "Settings", href: "/settings" },
 ];
 

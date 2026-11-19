@@ -179,6 +179,9 @@ def run_backtest(spec: BacktestSpec) -> BacktestResult:
     brokers.register(broker)
     journal = Journal()
     portfolio = PortfolioEngine(registry, brokers, fx, spec.base_currency)
+    # Trades carry the same measurement as live ones: the backtest's own cost model and each deployment's timeframe.
+    portfolio.cost_bps = lambda inst: spec.execution.spread_bps / 2 + spec.execution.slippage_bps
+    portfolio.timeframe_of = lambda key: next((d.timeframe for d in spec.deployments if (d.instrument_id, d.strategy) == key[1:]), None)
     risk = RiskEngine(lambda: spec.limits, journal.risk_event)
     engine = TradingEngine(registry, brokers, portfolio, risk, fx, lambda: spec.limits, lambda: TradingMode.AUTO, journal,
                            spec.base_currency, sleep=lambda s: None)

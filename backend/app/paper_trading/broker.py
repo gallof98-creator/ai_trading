@@ -40,6 +40,9 @@ class ExecutionModel:
     commissions: dict[str, CommissionModel] = field(default_factory=lambda: dict(DEFAULT_COMMISSIONS))
     financing_long_annual: float = 0.0  # funding / margin interest on long notional
     financing_short_annual: float = 0.0  # borrow fee / funding on short notional
+    # Perpetual futures (instruments with perpetual=True): funding per 8-hour interval as a fraction of notional, paid by
+    # longs to shorts when positive. Spread evenly over time (an approximation of the 8-hourly payments).
+    funding_rate_8h: float = 0.0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -72,6 +75,7 @@ class SimulatedBroker(BrokerAdapter):
         self.initial_cash = float(initial_cash)
         self._connected = False
         self._reset_state()
+        self.on_financing = None  # set by the trading engine: (instrument, strategy, cost in quote currency)
 
     def _reset_state(self) -> None:
         self.cash = self.initial_cash  # account currency: capital + realised P&L - costs
@@ -238,14 +242,21 @@ class SimulatedBroker(BrokerAdapter):
         if instrument_id not in self.last_price:
             return
         inst = self.registry.get(instrument_id)
-        for qty, _avg in self._books(instrument_id):
-            rate = self.execution.financing_long_annual if qty > 0 else self.execution.financing_short_annual
-            if rate == 0:
+        for (iid, tag), (qty, _avg) in list(self.positions.items()):
+            if iid != instrument_id or qty == 0:
                 continue
-            cost = inst.notional(qty, self.last_price[instrument_id]) * rate * (bar_delta / pd.Timedelta(days=365))
+            rate = self.execution.financing_long_annual if qty > 0 else self.execution.financing_short_annual
+            notional = inst.notional(qty, self.last_price[instrument_id])
+            cost = notional * rate * (bar_delta / pd.Timedelta(days=365)) if rate else 0.0
+            if getattr(inst, "perpetual", False) and self.execution.funding_rate_8h:
+                cost += notional * self.execution.funding_rate_8h * (1 if qty > 0 else -1) * (bar_delta / pd.Timedelta(hours=8))
+            if cost == 0:
+                continue
             cost_acct = -self._to_account(-cost, inst.quote_currency, ts, with_cost=True)
             self.cash -= cost_acct
             self.costs["financing"] += cost_acct
+            if self.on_financing is not None:  # attributed to the position, so its trade carries it
+                self.on_financing(iid, tag, cost)
 
     def _execute(self, order: Order, ref_price: float, taker: bool, ts: datetime) -> list[Fill]:
         inst = self.registry.get(order.instrument_id)

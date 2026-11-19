@@ -124,6 +124,21 @@ class AutopilotSettings(BaseModel):
     sec_contact: str = Field("QUANT AI TRADER admin@example.com", max_length=200)
 
 
+class AnalyticsSettings(BaseModel):
+    """Measurement of closed trades (see app/analytics). Changes nothing in trading."""
+
+    min_sample: int = Field(30, ge=1, le=10_000)  # below this many trades a group shows "insufficient sample", not a win rate
+    # Exits made by hand: the platform keeps following a virtual position until the exit the system would have made.
+    shadow_exit_reasons: list[str] = Field(default_factory=lambda: ["closed_at_broker", "closed_by_user"], max_length=10)
+    shadow_max_days: int = Field(60, ge=1, le=365)  # a shadow still open after this long is closed at the last price ("expired")
+    shadow_same_bar_rule: Literal["stop_first", "target_first"] = "stop_first"  # both levels inside one bar: which one counts
+    # Currencies with no exchange rate at the FX source, priced through another one at par. An assumption, shown on each trade.
+    fx_aliases: dict[str, str] = Field(default_factory=lambda: {"USDT": "USD", "USDC": "USD"})
+    # "The next morning" for the exit comparisons: crypto at this local time; stocks and ETFs at the market open.
+    morning_time: str = Field("09:00", pattern=r"^\d{2}:\d{2}$")
+    morning_timezone: str = Field("Europe/Rome", max_length=64)
+
+
 class UserSettings(BaseModel):
     base_currency: str = Field("EUR", pattern=r"^[A-Z]{3,5}$")
     # No default on purpose: paper accounts cannot start until the user sets this.
@@ -147,6 +162,7 @@ class UserSettings(BaseModel):
     risk: RiskLimits = RiskLimits()
     notifications: NotificationSettings = NotificationSettings()
     autopilot: AutopilotSettings = AutopilotSettings()
+    analytics: AnalyticsSettings = AnalyticsSettings()
 
     @model_validator(mode="after")
     def _automatic_needs_confirmed_limits(self) -> "UserSettings":

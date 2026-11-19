@@ -7,6 +7,7 @@ currency with timestamped FX rates and only summed alongside a reconciliation st
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
@@ -15,9 +16,9 @@ import pandas as pd
 
 from ..brokers.base import BrokerError, BrokerManager
 from ..core.logging import get_logger
-from ..domain.models import AssetClass, Fill
+from ..domain.models import AssetClass, Fill, Instrument
 from ..instruments.registry import InstrumentRegistry
-from ..market_data.fx import FxRateProvider
+from ..market_data.fx import FxRateProvider, FxRateUnavailable
 from ..risk.models import Exposure, PortfolioState
 
 Key = tuple[str, str, str | None]  # broker, instrument, strategy
@@ -32,6 +33,8 @@ class Slice:
     avg_price: float
     entry_ts: datetime
     entry_commission: float  # quote currency, not yet attributed to a closed trade
+    initial_stop_distance: float | None = None  # price distance of the stop when the position was opened (for R)
+    funding: float = 0.0  # quote currency: financing / perpetual funding paid (+) or received (-), not yet attributed
 
 
 @dataclass
@@ -47,8 +50,24 @@ class ClosedTrade:
     exit_price: float
     commission: float  # quote currency, entry + exit share
     pnl_quote: float  # net of commission, quote currency
-    pnl: float  # net, base currency (converted at exit, incl. conversion cost)
+    pnl: float  # net, base currency (converted at exit, incl. conversion cost); 0 when no rate was available (see fx_source)
     exit_reason: str | None
+    # --- measurement (all optional: trades recorded before they existed load unchanged) ---
+    asset_class: str | None = None
+    timeframe: str | None = None
+    fx_rate: float | None = None      # quote -> base at the close
+    fx_source: str | None = None      # where the rate came from; "unavailable" when there was none (then pnl_base is None)
+    fx_ts: str | None = None
+    funding_quote: float = 0.0        # financing / perpetual funding over the trade's life, quote currency (paid > 0)
+    est_cost_quote: float = 0.0       # spread + slippage estimated from the cost model; ALREADY inside the fill prices
+    pnl_net_quote: float | None = None  # pnl_quote - funding: the trade's whole result, quote currency
+    pnl_base: float | None = None     # pnl_net_quote in the base currency at the close (conversion cost included)
+    initial_stop_distance: float | None = None
+    initial_risk_quote: float | None = None  # stop distance x quantity x multiplier at entry
+    initial_risk_base: float | None = None
+    r_multiple: float | None = None   # pnl_net_quote / initial_risk_quote
+    shadow: dict | None = None        # for manual closes: the exit the system would have made (see analytics.shadow)
+    risk_source: str | None = None    # how the initial risk was known: None = recorded at entry; else how it was reconstructed
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -83,7 +102,54 @@ class PortfolioEngine:
         # went out (-) that day (accounts linked or removed, virtual capital changed). Returns are computed from it,
         # so that a deposit is never mistaken for a gain.
         self.daily: dict[str, dict] = {}
+        # Set by the owner (runtime or backtest): estimated spread/2 + slippage per side in bps, the timeframe of the strategy
+        # behind a position, and currencies to price through another one (assumptions, from the analytics settings).
+        self.cost_bps: Callable[[Instrument], float] = lambda inst: 0.0
+        self.timeframe_of: Callable[[Key], str | None] = lambda key: None
+        self.fx_aliases: dict[str, str] = {}
         self.discrepancies: list[str] = []
+
+    # ------------------------------------------------------------------ measurement helpers
+    def _close_rate(self, quote_ccy: str, ts: datetime) -> tuple[float | None, str, str | None, float | None]:
+        """(rate, source, rate time, factor) converting quote -> base at a close. `factor` includes the conversion cost
+        (what converting the amount really yields). Currencies the FX source does not cover: a configured alias
+        (e.g. USDT -> USD at par, an assumption), or a crypto quote priced by the platform itself (e.g. BTC via BTC/USD).
+        None when nothing is available: the trade is then flagged, never summed in the wrong unit."""
+        def through(ccy: str, label: str, mult: float = 1.0):
+            q = self.fx.quote(ccy, self.base, ts)
+            factor = self.fx.convert(1.0, ccy, self.base, ts, with_cost=True) * mult
+            return q.rate * mult, f"{label}{q.source}", q.ts.isoformat(), factor
+
+        try:
+            return through(quote_ccy, "")
+        except FxRateUnavailable:
+            pass
+        alias = self.fx_aliases.get(quote_ccy)
+        if alias:
+            try:
+                return through(alias, f"{quote_ccy}={alias} at par (assumption) + ")
+            except FxRateUnavailable:
+                pass
+        for usd in ("USD", "USDT", "USDC"):
+            px = self.prices.get(f"CRYPTO:{quote_ccy}/{usd}")
+            if px:
+                try:
+                    rate, src, at, factor = through(self.fx_aliases.get(usd, usd), f"{quote_ccy}/{usd} platform price + ", px)
+                    return rate, src, at, factor
+                except FxRateUnavailable:
+                    continue
+        return None, "unavailable", None, None
+
+    def add_funding(self, key: Key, amount_quote: float) -> None:
+        """Financing or perpetual funding charged (+) or credited (-) to a position, quote currency."""
+        s = self.slices.get(key)
+        if s is not None:
+            s.funding += amount_quote
+
+    def set_initial_stop(self, key: Key, stop_distance: float | None) -> None:
+        s = self.slices.get(key)
+        if s is not None and s.initial_stop_distance is None and stop_distance:
+            s.initial_stop_distance = float(stop_distance)
 
     # ------------------------------------------------------------------ fills and marks
     def qty(self, key: Key) -> float:
@@ -110,10 +176,23 @@ class PortfolioEngine:
         exit_share = fill.commission * closing / fill.qty
         gross = closing * (fill.price - s.avg_price) * direction * inst.contract_multiplier
         net_quote = gross - entry_share - exit_share
+        funding = s.funding * closing / abs(s.qty)
+        net = net_quote - funding
+        rate, source, rate_ts, factor = self._close_rate(inst.quote_currency, fill.ts)
+        risk = s.initial_stop_distance * closing * inst.contract_multiplier if s.initial_stop_distance else None
+        per_side = self.cost_bps(inst) / 10_000
         trade = ClosedTrade(fill.broker_id, fill.instrument_id, fill.strategy, direction, closing, s.entry_ts, fill.ts, s.avg_price,
                             fill.price, entry_share + exit_share, net_quote,
-                            self.fx.convert(net_quote, inst.quote_currency, self.base, fill.ts, with_cost=True), reason)
+                            net_quote * factor if factor is not None else 0.0, reason,
+                            asset_class=inst.asset_class.value, timeframe=self.timeframe_of((fill.broker_id, fill.instrument_id, fill.strategy)),
+                            fx_rate=rate, fx_source=source, fx_ts=rate_ts, funding_quote=funding,
+                            est_cost_quote=closing * (s.avg_price + fill.price) * inst.contract_multiplier * per_side,
+                            pnl_net_quote=net, pnl_base=net * factor if factor is not None else None,
+                            initial_stop_distance=s.initial_stop_distance, initial_risk_quote=risk,
+                            initial_risk_base=risk * factor if risk is not None and factor is not None else None,
+                            r_multiple=net / risk if risk else None)
         self.trades.append(trade)
+        s.funding -= funding
         s.entry_commission -= entry_share
         s.qty += direction * -closing
         rest = fill.qty - closing
@@ -346,7 +425,8 @@ class PortfolioEngine:
     # ------------------------------------------------------------------ persistence
     def to_state(self, curve_tail: int = 5000) -> dict:
         return {
-            "slices": [[*k, s.qty, s.avg_price, s.entry_ts.isoformat(), s.entry_commission] for k, s in self.slices.items()],
+            "slices": [[*k, s.qty, s.avg_price, s.entry_ts.isoformat(), s.entry_commission, s.initial_stop_distance, s.funding]
+                       for k, s in self.slices.items()],
             "trades": [t.to_dict() for t in self.trades[-5000:]], "prices": self.prices,
             "equity_curve": [[t.isoformat(), e] for t, e in self.equity_curve[-curve_tail:]],
             "exposure_curve": self.exposure_curve[-curve_tail:], "day_start_equity": self.day_start_equity, "peak_equity": self.peak_equity,
@@ -357,7 +437,7 @@ class PortfolioEngine:
     def load_state(self, state: dict) -> None:
         from datetime import date
 
-        self.slices = {(b, i, st): Slice(q, a, datetime.fromisoformat(ts), c) for b, i, st, q, a, ts, c in state["slices"]}
+        self.slices = {(b, i, st): Slice(q, a, datetime.fromisoformat(ts), c, *rest) for b, i, st, q, a, ts, c, *rest in state["slices"]}
         self.trades = [ClosedTrade(**{**t, "entry_ts": datetime.fromisoformat(t["entry_ts"]), "exit_ts": datetime.fromisoformat(t["exit_ts"])})
                        for t in state["trades"]]
         self.prices = dict(state["prices"])

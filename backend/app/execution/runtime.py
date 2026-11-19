@@ -129,6 +129,11 @@ class TradingRuntime:
 
         self.live_hub = LiveHub(clock, on_bar=self._on_live_bar)
         self.live_hub.describe = self._describe_instrument
+        from ..analytics.service import TradeAnalytics
+
+        self.analytics = TradeAnalytics(self)
+        self.engine.on_trade_closed = self.analytics.on_trade_closed
+        self._wire_measurement()
         self.live = LiveFeed(self.live_hub)
         from ..market_data.intraday import IntradayData
         from ..quant_ai.autopilot import Autopilot
@@ -284,6 +289,19 @@ class TradingRuntime:
         self._apply_share_lots()
         self.fx.conversion_cost_bps = self.user_settings.fx_conversion_cost_bps
         self.portfolio.base = self.engine.base = self.user_settings.base_currency
+        self._wire_measurement()
+
+    def _wire_measurement(self) -> None:
+        """What closed trades are measured with: the cost model of the risk settings (spread / 2 + slippage per side), the
+        timeframe of the strategy behind a position, and the currency aliases of the analytics settings."""
+        risk = self.user_settings.risk
+        self.portfolio.cost_bps = lambda inst: risk.est_spread_bps / 2 + risk.est_slippage_bps
+        self.portfolio.fx_aliases = dict(self.user_settings.analytics.fx_aliases)
+
+        def timeframe_of(key) -> str | None:
+            return next((d.timeframe for d in self.deployments.values() if (d.broker_id, d.instrument_id, d.strategy.name) == key), None)
+
+        self.portfolio.timeframe_of = timeframe_of
 
     FRACTION = 0.0001  # smallest share quantity when fractional shares are on
 

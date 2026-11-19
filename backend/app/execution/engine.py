@@ -124,7 +124,8 @@ class TradingEngine:
         self._wall_clock = wall_clock  # proposals expire in real time, whatever the timestamps of the bars that produced them
         self._rationale: dict = {}  # set while a signal is being turned into orders
         self.cancel_checks, self.cancel_check_seconds = 6, 0.5  # waiting for a broker to confirm a cancellation
-        self._deferred: dict[Key, tuple] = {}  # reversal entries waiting for the close of the opposite position (Alpaca)
+        self._deferred: dict[Key, tuple] = {}
+        self.on_trade_closed: Callable | None = None  # (ClosedTrade, Protection | None) after a position is reduced or closed  # reversal entries waiting for the close of the opposite position (Alpaca)
         self._open: dict[str, Order] = {}  # id -> order, for the orders still working (see _record)
         self._external_seen: dict[tuple[str, str], tuple[float, float, datetime]] = {}  # differences with the broker awaiting confirmation
         self._unconfirmed: dict[str, str] = {}  # order id -> when: sent, no answer, unknown whether the broker has it
@@ -183,6 +184,8 @@ class TradingEngine:
     def on_bar_open(self, instrument_id: str, ts: datetime, open_: float, volume: float, delta: pd.Timedelta) -> None:
         for adapter in self.brokers.all():
             if hasattr(adapter, "process_open") and self.registry.is_mapped(adapter.broker_id, instrument_id):
+                if getattr(adapter, "on_financing", 0) is None:
+                    adapter.on_financing = (lambda b: lambda iid, strategy, cost: self.portfolio.add_funding((b, iid, strategy), cost))(adapter.broker_id)
                 self._handle_fills(adapter, adapter.process_open(instrument_id, ts, open_, volume, delta))
 
     def on_bar_close(self, instrument_id: str, ts_open: datetime, high: float, low: float, close: float, delta: pd.Timedelta) -> None:
@@ -253,11 +256,15 @@ class TradingEngine:
 
     def _apply_fill(self, fill: Fill, order: Order) -> None:
         reason = (order.reason or "").split(" | ")[0] or None
-        self.portfolio.on_fill(fill, reason)
-        self.journal.fill(fill, reason)
         key: Key = (fill.broker_id, fill.instrument_id, fill.strategy)
+        prot_before = self.protections.get(key)
+        trade = self.portfolio.on_fill(fill, reason)
+        self.journal.fill(fill, reason)
+        if trade is not None and self.on_trade_closed is not None:
+            self.on_trade_closed(trade, prot_before)  # e.g. the shadow exit of a manual close (analytics)
         if order.id in self._entry_protection:
             _, (stop, target, trailing) = self._entry_protection[order.id]
+            self.portfolio.set_initial_stop(key, stop)
             prot = self.protections.get(key)
             if prot is None:
                 prot = self.protections[key] = Protection(fill.side.sign, stop, target, trailing)

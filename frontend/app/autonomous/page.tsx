@@ -310,7 +310,7 @@ function Autonomous({ user }: { user: User }) {
           <Table max="max-h-40" empty="No closed trade yet." head={["Exit", "Trades", "P&L"]} rows={(d.data.exits_by_reason ?? []).map((x: Json) => [nice(x.exit_reason), x.trades,
             <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Closed trades by strategy</h3>
-          <Table max="max-h-40" empty="No closed trade yet." head={["Strategy", "Trades", "Win rate", "P&L (quote currency)"]} rows={d.data.performance_by_strategy.map((x: Json) => [nice(x.strategy), x.trades, pct(x.win_rate, 0), <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
+          <Table max="max-h-40" empty="No closed trade yet." head={["Strategy", "Trades", "Win rate", `P&L (${ccy})`]} rows={d.data.performance_by_strategy.map((x: Json) => [nice(x.strategy), x.trades, pct(x.win_rate, 0), <span key="p" className={tone(x.pnl_quote)}>{num(x.pnl_quote)}</span>])} />
           <h3 className="mb-1 mt-3 text-xs text-dim">Open positions</h3>
           <Table max="max-h-48" empty="No open position." head={["Instrument", "Strategy", "Evidence", "Quantity", "Entry", "Last", "Return", "Stop", "Take profit", "Account", ""]}
             rows={positions.map((x: Json) => [<Link key="s" className="text-accent hover:underline" href={chartHref(x.instrument_id)}>{sym(x.instrument_id)}</Link>, nice(x.strategy), x.evidence ?? "—",

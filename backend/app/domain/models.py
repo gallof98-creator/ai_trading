@@ -80,6 +80,7 @@ class Instrument(BaseModel):
     margin_rate: float = Field(1.0, gt=0, le=1)  # initial margin as fraction of notional
     shortable: bool = True
     expiry: datetime | None = None
+    perpetual: bool = False  # a perpetual future: funding is paid or received while the position is open
 
     def round_qty(self, qty: float) -> float:
         """Round a quantity DOWN to the lot size (never round a risk-sized order up)."""

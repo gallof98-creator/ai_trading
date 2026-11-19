@@ -346,6 +346,32 @@ and no short is opened when not even one share fits the risk limits. Crypto cann
 In semi-automatic mode a strategy's exit signal is a proposal waiting for approval, unless "close positions on the
 strategy's exit signal" is on (paper accounts): a position whose strategy turned bearish stays open until then.
 
+## Trade measurement and analytics
+
+Every closed trade records, besides its P&L in the quote currency (`pnl_quote`, after commissions):
+`pnl_net_quote` (after financing / perpetual funding as well), `pnl_base` (converted at the exchange rate of the close,
+with `fx_rate`, `fx_source`, `fx_ts`), `funding_quote`, `est_cost_quote` (spread + slippage estimated from the cost model:
+already inside the fill prices, shown apart and never deducted twice), the initial risk (stop distance at entry x
+quantity, `initial_risk_quote` / `_base`) and `r_multiple` = net P&L / initial risk. A currency without a rate at the FX
+source goes through a configured alias (USDT, USDC = USD at par: an assumption, written on the trade) or, for a crypto
+quote such as BTC, through the platform's own BTC/USD price; with none of them the trade is flagged "unavailable" and
+excluded from base-currency sums instead of being added in the wrong unit. `pnl` keeps its meaning (base currency).
+
+**Shadow exits.** A trade closed by hand (`closed_at_broker`, `closed_by_user`) keeps a virtual position with the stop,
+take profit and trailing it had, walked forward on the stored bars (only bars starting after the manual close) to the exit
+the system would have made: stop (or the open of a bar gapping through it), take profit, the strategy's own exit at a bar
+close, or "expired" after `shadow_max_days`; with stop and target inside one bar the stop counts first (configurable).
+Its `exit_reason`, `exit_price` and `pnl_r` (same quantity and costs) are stored in `shadow`. Older trades are backfilled
+once by the Autopilot (or "Update shadows & backfill" on the Analytics page): their stop from the protective orders
+recorded for them, else from the strategy's settings and the ATR at the entry bar; what cannot be reconstructed is
+marked so.
+
+**Analytics page** (`GET /api/analytics/trades`): per asset class x strategy x exit reason (or coarser groupings), in the
+base currency and in R: expectancy, profit factor, average win / loss, maximum drawdown of the closed-trade sequence, P&L
+without the best three trades, share of manual exits, cost per trade; below `min_sample` (30) trades "insufficient sample"
+replaces the win rate. A panel compares your manual exits with their shadows in R. Settings: `analytics` in the user
+settings (minimum sample, shadow reasons and horizon, same-bar rule, currency aliases, "next morning" time and zone).
+
 ## Portfolio returns
 
 The Portfolio page shows the return of all accounts together, in the base currency and after costs: today, this week, this
