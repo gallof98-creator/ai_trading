@@ -14,6 +14,8 @@ const RISK_FIELDS: { key: keyof RiskLimits; label: string; percent?: boolean }[]
   { key: "est_spread_bps", label: "Assumed spread (bps)" }, { key: "est_slippage_bps", label: "Assumed slippage per side (bps)" },
   { key: "est_commission_bps", label: "Assumed commission per side (bps)" }, { key: "max_spread_bps", label: "Refuse new risk above spread (bps)" },
   { key: "max_data_age_seconds", label: "Refuse new risk on a live price older than (s)" },
+  { key: "crypto_max_same_direction", label: "Crypto as one factor: max positions in the same direction" },
+  { key: "crypto_max_total_risk", label: "Crypto as one factor: max risk to the stops of all crypto", percent: true },
 ];
 const CATEGORIES = ["signal", "execution", "order_rejected", "approval", "broker", "risk", "reconciliation", "model", "strategy", "system"];
 
@@ -69,6 +71,9 @@ function TradingSettings({ readOnly }: { readOnly: boolean }) {
               <span>risk 0.5% per trade, at most 5% of the account per instrument, up to 20 positions, at most 30% in highly correlated instruments. Nothing changes until you press Save.</span>
             </div>
           </div>}
+          <label className="mb-3 flex items-center gap-2 text-sm"><input type="checkbox" className="!w-auto" disabled={readOnly} checked={!!s.risk.crypto_factor_cap}
+            onChange={(e) => setS({ ...s, risk: { ...s.risk, crypto_factor_cap: e.target.checked } })} />
+            Treat crypto as one risk factor (they move with bitcoin): limit the number of crypto positions in the same direction and their total risk (the two fields below)</label>
           <div className="grid gap-3 sm:grid-cols-2">
             {RISK_FIELDS.map((f) => (
               <Field key={f.key} label={`${f.label}${f.percent ? " (%)" : ""}`}>

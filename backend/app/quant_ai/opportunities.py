@@ -137,8 +137,10 @@ def prepare(session: Session, rt, strategy: str, instrument_id: str, timeframe: 
     capital = rt.user_settings.initial_paper_capital or 1000.0
     company = getattr(rt, "company", None)
     blocked_any, blocked_long, filters = company.masks(instrument_id, timeframe, data.bars.index) if company else (None, None, {})
+    ctx = rt.profile_context(instrument_id, create_strategy(strategy, {})) if hasattr(rt, "profile_context") else None
+    profile, family, regime = ctx if ctx else (None, None, None)
     return WalkForwardSpec(
-        blocked_any=blocked_any, blocked_long=blocked_long, filters=filters,
+        blocked_any=blocked_any, blocked_long=blocked_long, filters=filters, profile=profile, family=family, regime=regime,
         strategy=strategy, instrument_id=instrument_id, timeframe=timeframe, data=data, param_grid={"stop_atr": sorted({exits["stop_atr"], *STOP_GRID}),
                                                                                                  "take_profit_atr": [t for t in take_profit_grid(timeframe)
                                                                                                                      if t is not None or not always_take_profit]},
@@ -195,7 +197,8 @@ def judge(spec: WalkForwardSpec, result: dict, actor: str, now: datetime) -> tup
     payload = {
         "criteria_version": CRITERIA["version"],
         "strategy": strategy, "category": category, "family": family_of(category), "horizon": horizon_of(timeframe), "instrument_id": instrument_id,
-        "timeframe": timeframe, "params": last["best_params"] if last else None, "filters": dict(getattr(spec, "filters", {}) or {}), "data_kind": data.kind.value, "data_source": data.source,
+        "timeframe": timeframe, "params": last["best_params"] if last else None, "filters": dict(getattr(spec, "filters", {}) or {}),
+        "profile": spec.profile.signature() if getattr(spec, "profile", None) is not None else None, "data_kind": data.kind.value, "data_source": data.source,
         "bars": int(len(data.bars)),
         "data_from": data.bars.index[0].isoformat(), "data_to": data.bars.index[-1].isoformat(), "long_only": not spec.fixed_params.get("allow_short"),
         "checks": [{"name": n, "passed": bool(ok), "value": v} for n, ok, v in checks],
@@ -432,6 +435,9 @@ def scan(session: Session, rt, broker_id: str, actor: str, instrument_ids: list[
                 from .filters import apply_entry_block
 
                 frame = apply_entry_block(frame, blocked_any, blocked_long)
+        transform = rt.profile_transform(iid, instance, tf, bars) if hasattr(rt, "profile_transform") else None
+        if transform is not None:  # the crypto profile's rules, as in the validation
+            frame = transform(frame)
         last = frame.iloc[-1]
         target = int(last["target"])
         if target == 0:

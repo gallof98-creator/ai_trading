@@ -143,6 +143,17 @@ class RiskEngine:
             over(state.gross_exposure + added, limits.max_gross_leverage, "gross exposure (leverage)")
             over(state.margin_used + added * inst.margin_rate, limits.max_margin_utilization, "margin utilisation")
 
+            if limits.crypto_factor_cap and inst.asset_class.value == "crypto":
+                direction_new = 1 if after > 0 else -1
+                held = {e.instrument_id for e in state.exposures if e.asset_class == "crypto" and e.signed_notional * direction_new > 0}
+                if inst.id not in held and len(held) >= limits.crypto_max_same_direction:
+                    reasons.append(f"crypto factor: already {len(held)} crypto positions {'long' if direction_new > 0 else 'short'} "
+                                   f"(limit {limits.crypto_max_same_direction})")
+                loss = intent.loss_at_stop or 0.0
+                total = self.crypto_risk(state, limits.risk_per_trade) + loss
+                if total > limits.crypto_max_total_risk * eq * (1 + 1e-6):
+                    reasons.append(f"crypto factor: risk to the stops of all crypto positions {total / eq:.2%} would exceed {limits.crypto_max_total_risk:.2%}")
+
             open_positions = {(e.broker_id, e.instrument_id) for e in state.exposures if e.signed_notional}
             if (order.broker_id, inst.id) not in open_positions and len(open_positions) >= limits.max_concurrent_positions:
                 reasons.append(f"maximum of {limits.max_concurrent_positions} concurrent positions reached")
@@ -179,6 +190,21 @@ class RiskEngine:
             (limits.max_margin_utilization * eq - state.margin_used) / instrument.margin_rate,
         ]
         return max(0.0, min(room)) * (1 - 1e-6)
+
+    @staticmethod
+    def crypto_risk(state: PortfolioState, risk_per_trade: float) -> float:
+        """Risk to the stops of the crypto positions in this state (base currency). A position whose stop is unknown counts
+        for the budget it could have been sized with (risk per trade of the equity)."""
+        return sum(e.risk if e.risk is not None else risk_per_trade * state.equity for e in state.exposures
+                   if e.asset_class == "crypto" and e.signed_notional)
+
+    def crypto_risk_room(self, broker_id: str, instrument, state: PortfolioState) -> float | None:
+        """Base-currency risk a new crypto position may still take under the crypto factor cap; None when the cap is off."""
+        limits = self._limits()
+        if not limits.crypto_factor_cap or instrument.asset_class.value != "crypto":
+            return None
+        state = state.scoped(broker_id)
+        return max(0.0, limits.crypto_max_total_risk * state.equity - self.crypto_risk(state, limits.risk_per_trade))
 
     def to_state(self) -> dict:
         return {"kill_switch_reason": self.kill_switch_reason, "breakers": self.breakers,

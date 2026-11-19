@@ -346,6 +346,30 @@ and no short is opened when not even one share fits the risk limits. Crypto cann
 In semi-automatic mode a strategy's exit signal is a proposal waiting for approval, unless "close positions on the
 strategy's exit signal" is on (paper accounts): a position whose strategy turned bearish stays open until then.
 
+## Crypto as one risk factor
+
+`crypto_factor_cap` in the risk limits (off by default): per account, at most `crypto_max_same_direction` crypto positions in
+the same direction and the risk to the stops of all crypto positions at most `crypto_max_total_risk` of equity. New crypto
+positions are sized down to the risk still free, and refused when none is. Risk per trade stays a fraction of the account's
+equity marked to market (2% by default), so position sizes grow and shrink with it without closing anything.
+
+## Crypto profile
+
+`crypto_profile` in the user settings (everything off by default; crypto only, other instruments are never affected; see
+`strategies/profile.py`). The same transformation of the strategy's signals runs in the validation backtest, the scan and
+live trading, and a change sends crypto validations back for a retest.
+
+| Rule | Applies to | What it does |
+|---|---|---|
+| Regime filter (`trend_only` / `disable`) | mean reversion | the reference (BTC/USD) daily regime: close vs EMA200 and ADX >= 25; in a strong trend, reversion trades only with it, or not at all. A bar uses the regime of the last daily bar closed before its own close |
+| Volatility-normalised entry | mean reversion | the close at least k ATR from its moving average |
+| Exit at the mean, time stop | mean reversion | the position ends when the close crosses back to its mean, and/or after N bars |
+| Partial take profit + ATR trailing | trend, momentum, breakout, volatility | a fraction closed once +x R is reached (checked on live prices and bar closes), the stop then resized; a trailing stop of k ATR on the rest |
+| Breakout confirmation | breakout | the signal bar's volume at least m x its average |
+| Limit (maker) entries | all | a limit order better than the signal price by b bps; what has not filled after N bars goes at market, judged again by the risk engine. The paper broker fills a resting limit without spread and at the maker commission when the model has one |
+
+Crypto runs on the 24x7 calendar: sessions are always open, daily bars are UTC days, indicators use no session times.
+
 ## Trade measurement and analytics
 
 Every closed trade records, besides its P&L in the quote currency (`pnl_quote`, after commissions):

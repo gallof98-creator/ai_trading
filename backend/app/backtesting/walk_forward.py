@@ -48,6 +48,9 @@ class WalkForwardSpec:
     blocked_any: pd.Series | None = None
     blocked_long: pd.Series | None = None
     filters: dict = field(default_factory=dict)
+    profile: object | None = None
+    family: str | None = None
+    regime: pd.Series | None = None
 
 
 def _grid(spec: WalkForwardSpec) -> list[dict]:
@@ -79,7 +82,8 @@ def _run(spec: WalkForwardSpec, bars: pd.DataFrame, params: dict, trade_start: p
     return run_backtest(BacktestSpec(
         initial_capital=spec.initial_capital, base_currency=spec.base_currency, execution=execution or spec.execution, limits=spec.limits,
         static_fx=spec.static_fx, trade_start=trade_start, instruments=spec.instruments,
-        deployments=[DeploymentSpec(spec.strategy, spec.instrument_id, spec.timeframe, params, blocked_any=spec.blocked_any, blocked_long=spec.blocked_long)],
+        deployments=[DeploymentSpec(spec.strategy, spec.instrument_id, spec.timeframe, params, blocked_any=spec.blocked_any, blocked_long=spec.blocked_long,
+                                    profile=spec.profile, family=spec.family, regime=spec.regime)],
         data={(spec.instrument_id, spec.timeframe): Dataset(bars, spec.data.kind, spec.data.source)}))
 
 
@@ -103,14 +107,18 @@ def walk_forward(spec: WalkForwardSpec) -> dict:
     for k in range(spec.n_folds):
         tr0, tr1 = k * test, k * test + train
         te1 = tr1 + test if k < spec.n_folds - 1 else n
-        best_params, best_score = None, None
+        best_params, best_score, best_is = None, None, None
         for params in combos:  # deterministic order; ties keep the earlier combination
-            score = _score(_run(spec, bars.iloc[tr0:tr1], params), spec)
+            is_run = _run(spec, bars.iloc[tr0:tr1], params)
+            score = _score(is_run, spec)
             if score is not None and (best_score is None or score > best_score):
-                best_params, best_score = params, score
+                best_params, best_score, best_is = params, score, is_run
         fold = {"fold": k + 1, "train_start": bars.index[tr0].isoformat(), "train_end": bars.index[tr1 - 1].isoformat(),
                 "test_start": bars.index[tr1].isoformat(), "test_end": bars.index[te1 - 1].isoformat(),
-                "best_params": best_params, "in_sample_score": best_score, "out_of_sample": None}
+                "best_params": best_params, "in_sample_score": best_score, "out_of_sample": None,
+                # The chosen setting on the bars it was chosen on: reported apart, never mixed with the unseen results.
+                "in_sample": {m: best_is.metrics[m] for m in ("total_return", "max_drawdown", "number_of_trades", "win_rate", "profit_factor")}
+                if best_is is not None else None}
         if best_params is not None:
             # The test run sees the training bars only to warm up indicators; it may not trade before test_start.
             oos = _run(spec, bars.iloc[tr0:te1], best_params, trade_start=bars.index[tr1])
@@ -119,6 +127,7 @@ def walk_forward(spec: WalkForwardSpec) -> dict:
                                      "score": oos.metrics.get(spec.metric)}
             oos_returns.append(eq.pct_change().dropna())
             oos_trades += oos.trades
+            fold["oos_trades"] = [{**t.to_dict(), "params": best_params} for t in oos.trades]
             if spec.robustness:
                 window, start = bars.iloc[tr0:te1], bars.index[tr1]
                 again = _run(spec, window, best_params, trade_start=start, execution=costly)

@@ -420,7 +420,9 @@ class Autopilot:
                       # tested long-only but shorts are now allowed (or the reverse): the rule traded would not be the one tested
                       or bool(v.get("long_only", True)) == bool(cfg.allow_short)
                       # validated without a take profit, which the user now requires
-                      or (cfg.always_take_profit and (v.get("params") or {}).get("take_profit_atr", 0) is None) else v["status"])
+                      or (cfg.always_take_profit and (v.get("params") or {}).get("take_profit_atr", 0) is None)
+                      # the crypto profile's rules changed (or were switched on or off) since it was tested
+                      or v.get("profile") != self.rt.profile_signature(v["instrument_id"]) else v["status"])
                      for v in current}
             # Setups that were tradable (validated or candidate when last tested) are retested first: after a change of
             # criteria or filters, what could trade comes back in the first cycles instead of waiting behind every

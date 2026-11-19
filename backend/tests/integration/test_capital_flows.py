@@ -146,3 +146,72 @@ def test_portfolio_returns_day_by_day_weekly_and_monthly_exclude_capital_moves(t
     pf.daily = {}
     pf.load_state(state)
     assert pf.returns()["since_start"] == pytest.approx(r["since_start"])
+
+
+def _crypto_rt(tmp_path, **limits):
+    from app.database.settings_store import save_settings
+
+    rt = make_rt(tmp_path)
+    rt.add_instruments(["ETH/USD", "SOL/USD", "LTC/USD"], "", "crypto", "admin")
+    for i, px in (("CRYPTO:BTC/USD", 50_000.0), ("CRYPTO:ETH/USD", 3_000.0), ("CRYPTO:SOL/USD", 150.0), ("CRYPTO:LTC/USD", 80.0)):
+        rt.portfolio.mark(i, px, rt.clock())
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"risk": rt.user_settings.risk.model_copy(update=limits)}))
+        rt.reload_settings(s)
+    return rt
+
+
+def _hold(rt, iid, qty, stop_distance):
+    from app.domain.models import Fill, Side
+
+    rt.portfolio.on_fill(Fill(order_id=f"x{iid}", broker_id="paper-main", instrument_id=iid, side=Side.BUY if qty > 0 else Side.SELL,
+                              qty=abs(qty), price=rt.portfolio.prices[iid], commission=0, ts=rt.clock(), strategy="s"))
+    rt.portfolio.set_initial_stop(("paper-main", iid, "s"), stop_distance)
+
+
+def test_position_size_is_fixed_fractional_on_marked_to_market_equity():
+    from app.domain.models import AssetClass, Instrument
+    from app.risk.sizing import position_size
+
+    inst = Instrument(id="CRYPTO:BTC/USD", asset_class=AssetClass.CRYPTO, symbol="BTC/USD", quote_currency="USD", lot_size=0.00001)
+    # 2% of 1,000 EUR = 20 EUR at risk; stop 1,000 USD away at 0.9 EUR per USD: 20 / 900 BTC.
+    assert position_size(1_000, 0.02, 1_000, 50_000, inst, 0.9) == pytest.approx(20 / 900, abs=1e-5)
+    # Equity up 10% (unrealised gains count): the next position is 10% larger, without closing anything.
+    assert position_size(1_100, 0.02, 1_000, 50_000, inst, 0.9) == pytest.approx(22 / 900, abs=1e-5)
+
+
+def test_crypto_factor_cap_limits_positions_in_the_same_direction_and_their_total_risk_when_switched_on(tmp_path):
+    from app.domain.models import Order, Side
+    from app.risk.models import OrderIntent
+
+    rt = _crypto_rt(tmp_path, crypto_factor_cap=True, crypto_max_same_direction=2, crypto_max_total_risk=0.03, max_exposure_per_asset=5,
+                    max_gross_leverage=5, max_exposure_per_broker=5, max_correlated_exposure=5, max_exposure_per_strategy=5)
+    _hold(rt, "CRYPTO:BTC/USD", 0.01, 1_000.0)     # risk 10 USD = 9 EUR
+    _hold(rt, "CRYPTO:ETH/USD", 0.1, 100.0)        # risk 10 USD = 9 EUR
+    state = rt.engine._risk_state(rt.clock())
+    assert rt.risk.crypto_risk(state, 0.02) == pytest.approx(18.0)
+    sol = rt.registry.get("CRYPTO:SOL/USD")
+    third = Order(broker_id="paper-main", instrument_id=sol.id, side=Side.BUY, qty=0.1, strategy="s2")
+    d = rt.risk.evaluate(OrderIntent(third, sol, 150.0, 0.9, 10.0), state)
+    assert not d.approved and any("already 2 crypto positions long" in r for r in d.reasons)
+    short = third.model_copy(update={"side": Side.SELL})          # the other direction is not the same bet
+    assert not any("crypto positions" in r for r in rt.risk.evaluate(OrderIntent(short, sol, 150.0, 0.9, 10.0), state).reasons)
+    # Total risk: 18 EUR held, the cap is 3% of 1,000 = 30 EUR: 12 EUR of room for a new crypto position.
+    assert rt.risk.crypto_risk_room("paper-main", sol, state) == pytest.approx(12.0)
+    big_short = Order(broker_id="paper-main", instrument_id=sol.id, side=Side.SELL, qty=1.0, strategy="s2")   # 1 x 20 USD = 18 EUR at risk
+    assert any("risk to the stops of all crypto" in r for r in rt.risk.evaluate(OrderIntent(big_short, sol, 150.0, 0.9, 20.0), state).reasons)
+
+
+def test_crypto_factor_cap_is_off_by_default_and_changes_nothing_then(tmp_path):
+    from app.domain.models import Order, Side
+    from app.risk.models import OrderIntent
+
+    rt = _crypto_rt(tmp_path)
+    assert rt.user_settings.risk.crypto_factor_cap is False and rt.user_settings.risk.risk_per_trade == 0.02
+    for iid, q, sd in (("CRYPTO:BTC/USD", 0.001, 100.0), ("CRYPTO:ETH/USD", 0.01, 10.0), ("CRYPTO:SOL/USD", 0.1, 1.0)):
+        _hold(rt, iid, q, sd)
+    state = rt.engine._risk_state(rt.clock())
+    ltc = rt.registry.get("CRYPTO:LTC/USD")
+    o = Order(broker_id="paper-main", instrument_id=ltc.id, side=Side.BUY, qty=0.1, strategy="s2")
+    assert not any("crypto" in r for r in rt.risk.evaluate(OrderIntent(o, ltc, 80.0, 0.9, 2.0), state).reasons)
+    assert rt.risk.crypto_risk_room("paper-main", ltc, state) is None

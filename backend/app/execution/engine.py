@@ -51,6 +51,10 @@ class Protection:
     target_order: Order | None = None
     soft_stop: bool = False  # broker has no stop orders: the engine watches the level at each bar close
     version: int = 0
+    # Partial take profit (asset-class profile): this fraction is closed once the price is `partial_at_r` R in favour.
+    partial_fraction: float | None = None
+    partial_at_r: float | None = None
+    partial_done: bool = False
 
 
 @dataclass
@@ -125,6 +129,7 @@ class TradingEngine:
         self._rationale: dict = {}  # set while a signal is being turned into orders
         self.cancel_checks, self.cancel_check_seconds = 6, 0.5  # waiting for a broker to confirm a cancellation
         self._deferred: dict[Key, tuple] = {}
+        self._maker: dict[str, dict] = {}  # limit (maker) entries waiting: order id -> fallback rule
         self.on_trade_closed: Callable | None = None  # (ClosedTrade, Protection | None) after a position is reduced or closed  # reversal entries waiting for the close of the opposite position (Alpaca)
         self._open: dict[str, Order] = {}  # id -> order, for the orders still working (see _record)
         self._external_seen: dict[tuple[str, str], tuple[float, float, datetime]] = {}  # differences with the broker awaiting confirmation
@@ -194,6 +199,8 @@ class TradingEngine:
                 self._handle_fills(adapter, adapter.process_intrabar(instrument_id, ts_open, high, low, close, delta))
         ts = ts_open + delta
         self.portfolio.mark(instrument_id, close, ts)
+        if self._maker:
+            self._maker_fallbacks(instrument_id, ts)
         for key, prot in list(self.protections.items()):
             if key[1] == instrument_id:
                 self._update_protection_at_close(key, prot, close, ts)
@@ -263,17 +270,20 @@ class TradingEngine:
         if trade is not None and self.on_trade_closed is not None:
             self.on_trade_closed(trade, prot_before)  # e.g. the shadow exit of a manual close (analytics)
         if order.id in self._entry_protection:
-            _, (stop, target, trailing) = self._entry_protection[order.id]
+            _, (stop, target, trailing, *extra) = self._entry_protection[order.id]
             self.portfolio.set_initial_stop(key, stop)
             prot = self.protections.get(key)
             if prot is None:
-                prot = self.protections[key] = Protection(fill.side.sign, stop, target, trailing)
+                prot = self.protections[key] = Protection(fill.side.sign, stop, target, trailing, partial_fraction=extra[0] if extra else None,
+                                                          partial_at_r=extra[1] if len(extra) > 1 else None)
             self._place_protection(key, prot, fill.ts)
             if not order.is_open:
                 del self._entry_protection[order.id]
         if self.portfolio.qty(key) == 0 and key in self.protections:
             self._cancel_protection(key, fill.ts)
             del self.protections[key]
+        if (order.reason or "").startswith("partial_take_profit") and self.portfolio.qty(key) != 0 and key in self.protections and not order.is_open:
+            self._place_protection(key, self.protections[key], fill.ts)  # the stop (and target) now cover what is left
         if self.portfolio.qty(key) == 0 and key in self._deferred:
             entry, intent, protection, mode, rationale = self._deferred.pop(key)
             self._rationale = rationale
@@ -352,9 +362,56 @@ class TradingEngine:
             prot.target_order = self._protective_order(key, prot, OrderType.LIMIT, s.avg_price + prot.direction * prot.take_profit_distance,
                                                        "take_profit", qty, ts)
 
+    def _check_partial(self, key: Key, prot: Protection, price: float, ts: datetime) -> Order | None:
+        """Close the configured fraction once the price is `partial_at_r` R in favour (R = the stop distance at entry)."""
+        s = self.portfolio.slices.get(key)
+        if not prot.partial_fraction or prot.partial_done or s is None or not prot.stop_distance:
+            return None
+        if (price - s.avg_price) * prot.direction < (prot.partial_at_r or 1.0) * prot.stop_distance:
+            return None
+        prot.partial_done = True
+        inst = self.registry.get(key[1])
+        qty = inst.round_qty(abs(s.qty) * prot.partial_fraction)
+        if qty <= 0 or qty >= abs(s.qty):
+            return None
+        oid = self._new_id()
+        order = Order(id=oid, client_order_id=f"{oid}:partial_take_profit", broker_id=key[0], instrument_id=key[1],
+                      side=Side.SELL if s.qty > 0 else Side.BUY, qty=qty, reduce_only=True, strategy=key[2], reason="partial_take_profit",
+                      created_at=ts, updated_at=ts)
+        return self._submit(order, ts)
+
+    def _maker_fallbacks(self, instrument_id: str, ts: datetime) -> None:
+        """Limit entries not filled within their bars: cancelled, and what is left goes at market (risk judged again)."""
+        for oid, m in list(self._maker.items()):
+            o = self.orders.get(oid)
+            if o is None or o.instrument_id != instrument_id:
+                continue
+            if o.status is OrderStatus.PENDING_APPROVAL:
+                continue  # still a proposal: the clock starts when it is sent
+            if not o.is_open:
+                self._maker.pop(oid, None)
+                continue
+            if (ts - o.created_at).total_seconds() < m["bars"] * m["delta"]:
+                continue
+            self._maker.pop(oid, None)
+            self._cancel(o, ts)
+            current = self.orders.get(oid, o)
+            left = current.qty - current.filled_qty
+            if left <= 0 or current.status is OrderStatus.FILLED:
+                continue
+            inst = self.registry.get(o.instrument_id)
+            market = o.model_copy(update={"id": self._new_id(), "client_order_id": f"{o.client_order_id}|market", "type": OrderType.MARKET,
+                                          "limit_price": None, "qty": inst.round_qty(left), "status": OrderStatus.NEW, "filled_qty": 0.0,
+                                          "avg_fill_price": None, "created_at": ts, "updated_at": ts, "reason": "signal | maker fallback"})
+            if market.qty <= 0:
+                continue
+            intent = OrderIntent(market, inst, m["price"], m["fx"], m["stop"], cost_per_unit=m["cost"])
+            self._route(market, intent, tuple(m["protection"]), TradingMode(m["mode"]), ts)
+
     def _update_protection_at_close(self, key: Key, prot: Protection, close: float, ts: datetime) -> None:
         if prot.stop_price is None or self.portfolio.qty(key) == 0:
             return
+        self._check_partial(key, prot, close, ts)
         if prot.soft_stop and (close - prot.stop_price) * prot.direction <= 0:
             self._close_slice(key, "stop_loss", ts)
             return
@@ -379,6 +436,9 @@ class TradingEngine:
             if key[1] != instrument_id or prot.stop_price is None or self.portfolio.qty(key) == 0:
                 continue
             s = self.portfolio.slices[key]
+            partial = self._check_partial(key, prot, price, ts)
+            if partial is not None:
+                out.append(partial)
             order = None
             if prot.soft_stop and (price - prot.stop_price) * prot.direction <= 0:
                 order = self._close_slice(key, "stop_loss", ts)
@@ -485,8 +545,14 @@ class TradingEngine:
             limits = self._limits()
             fx_rate = self._fx(inst.quote_currency, ts)
             cost = self._cost_per_unit(inst, signal.price)
-            # Risk per trade is a fraction of the equity of the account that trades, not of all accounts together.
-            qty = position_size(state.scoped(dep.broker_id).equity, limits.risk_per_trade, signal.stop_distance or 0.0, signal.price, inst, fx_rate,
+            # Risk per trade is a fraction of the equity of the account that trades, not of all accounts together; under the
+            # crypto factor cap, never more than the crypto risk still free.
+            account_equity = state.scoped(dep.broker_id).equity
+            risk_fraction = limits.risk_per_trade
+            room = self.risk.crypto_risk_room(dep.broker_id, inst, state)
+            if room is not None and account_equity > 0:
+                risk_fraction = min(risk_fraction, room / account_equity)
+            qty = position_size(account_equity, risk_fraction, signal.stop_distance or 0.0, signal.price, inst, fx_rate,
                                 max_notional=self.risk.headroom(dep.broker_id, inst, dep.strategy.name, state),
                                 realized_vol=self._realized_vol(inst.id), target_vol=limits.target_volatility, cost_per_unit=cost)
             qty = self.whole_if_short(dep.broker_id, inst, -1 if target < 0 else 1, qty)
@@ -495,11 +561,22 @@ class TradingEngine:
                                    "the size allowed by the risk budget and exposure limits is below the minimum tradable quantity")
                 return created
             oid = self._new_id()
+            maker_bps = signal.meta.get("maker_offset_bps")
+            side = Side.BUY if target > 0 else Side.SELL
             entry = Order(id=oid, client_order_id=f"{dep.id}|{bar_tag}|open", broker_id=dep.broker_id, instrument_id=inst.id,
-                          side=Side.BUY if target > 0 else Side.SELL, qty=qty, strategy=dep.strategy.name, signal_id=signal.id,
-                          reason="signal", created_at=ts, updated_at=ts)
+                          side=side, qty=qty, strategy=dep.strategy.name, signal_id=signal.id, reason="signal", created_at=ts, updated_at=ts,
+                          **({"type": OrderType.LIMIT, "limit_price": inst.round_price(signal.price * (1 - side.sign * maker_bps / 10_000))}
+                             if maker_bps is not None else {}))
             intent = OrderIntent(entry, inst, signal.price, fx_rate, signal.stop_distance, cost_per_unit=cost)
-            protection = (signal.stop_distance, signal.take_profit_distance, signal.trailing_distance)
+            protection = (signal.stop_distance, signal.take_profit_distance, signal.trailing_distance,
+                          signal.meta.get("partial_fraction"), signal.meta.get("partial_at_r"))
+            if maker_bps is not None:
+                # A limit entry (maker): if it has not filled within this many bars of being sent, the rest goes at market.
+                from ..market_data.timeframes import tf_delta
+
+                self._maker[oid] = {"bars": int(signal.meta.get("maker_fallback_bars") or 1), "delta": tf_delta(dep.timeframe).total_seconds(),
+                                    "mode": (mode_override or self._mode()).value, "protection": list(protection), "price": signal.price,
+                                    "fx": fx_rate, "stop": signal.stop_distance, "cost": cost}
             self._rationale = {"strategy": dep.strategy.name, "strategy_version": dep.strategy.version, "category": dep.strategy.category,
                                "description": dep.strategy.description, "params": dep.strategy.params.model_dump(), "timeframe": dep.timeframe,
                                "signal_time": signal.ts.isoformat(), "signal_price": signal.price, "regime": signal.regime, "confidence": signal.confidence,
@@ -856,11 +933,12 @@ class TradingEngine:
         keep = {o.id for o in self.orders.values() if o.is_open or o.status is OrderStatus.PENDING_APPROVAL}
         keep |= set(list(self.orders)[-1000:])
         return {
-            "n": self._n, "working": dict(self._working), "unconfirmed": dict(self._unconfirmed), "orders": [self.orders[i].model_dump(mode="json") for i in self.orders if i in keep],
+            "n": self._n, "working": dict(self._working), "unconfirmed": dict(self._unconfirmed), "maker": dict(self._maker), "orders": [self.orders[i].model_dump(mode="json") for i in self.orders if i in keep],
             "client_ids": dict(list(self._client_ids.items())[-20000:]),
             "entry_protection": [[oid, list(key), list(p)] for oid, (key, p) in self._entry_protection.items()],
             "protections": [[list(key), p.direction, p.stop_distance, p.take_profit_distance, p.trailing_distance, p.stop_price,
-                             p.stop_order.id if p.stop_order else None, p.target_order.id if p.target_order else None, p.soft_stop]
+                             p.stop_order.id if p.stop_order else None, p.target_order.id if p.target_order else None, p.soft_stop,
+                             p.partial_fraction, p.partial_at_r, p.partial_done]
                             for key, p in self.protections.items()],
             "approvals": [[a.id, a.order.model_dump(mode="json"), a.intent.price, a.intent.fx_rate, a.intent.stop_distance,
                            list(a.protection) if a.protection else None, a.created_at.isoformat(),
@@ -874,11 +952,13 @@ class TradingEngine:
         self._client_ids = dict(state["client_ids"])
         self._working = dict(state.get("working", {}))
         self._unconfirmed = dict(state.get("unconfirmed", {}))
+        self._maker = dict(state.get("maker", {}))
         self._entry_protection = {oid: (tuple(key), tuple(p)) for oid, key, p in state["entry_protection"]}
         self.protections = {}
-        for key, direction, stop, target, trailing, stop_price, stop_id, target_id, soft in state["protections"]:
+        for key, direction, stop, target, trailing, stop_price, stop_id, target_id, soft, *partial in state["protections"]:
+            pf, pr, pdone = (partial + [None, None, False])[:3]
             self.protections[tuple(key)] = Protection(direction, stop, target, trailing, stop_price, self.orders.get(stop_id),
-                                                      self.orders.get(target_id), soft)
+                                                      self.orders.get(target_id), soft, partial_fraction=pf, partial_at_r=pr, partial_done=bool(pdone))
         self.approvals = {}
         for aid, order, price, fx_rate, stop_distance, protection, created, *more in state["approvals"]:
             expires, rationale, cost = (more + [None, {}, 0.0])[:3] if more else (None, {}, 0.0)

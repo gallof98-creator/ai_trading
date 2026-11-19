@@ -465,3 +465,61 @@ def test_a_retry_refused_as_a_duplicate_finds_the_first_attempt_instead_of_losin
     h.exchange.create_order, adapter.find_order = create, find
     (order,) = h.signal(1, T0, price=30000.0, stop=3000.0)
     assert order.status is OrderStatus.SUBMITTED and order.broker_order_id == "1" and len(h.exchange.orders) == 1
+
+
+def _signal_with_meta(h, ts, target=1, price=100.0, stop=10.0, **meta):
+    sig = Signal(ts=ts, instrument_id=BTC, timeframe="1h", strategy=h.dep.strategy.name, strategy_version="1.0.0",
+                 action=SignalAction.BUY if target > 0 else SignalAction.SELL, target=target, price=price, stop_distance=stop,
+                 meta={"bar_open": ts.isoformat(), **meta})
+    return h.engine.on_signal(sig, h.dep)
+
+
+def test_partial_take_profit_closes_the_fraction_at_plus_one_r_and_the_stop_covers_the_rest():
+    h = Harness()
+    ts = h.bar(100, 101, 99, 100)
+    _signal_with_meta(h, ts, partial_fraction=0.5, partial_at_r=1.0)
+    h.bar(100, 101, 99, 100)                                   # entry fills at the open: 100
+    qty = h.portfolio.qty(h.dep.key)
+    assert qty > 0 and h.engine.protections[h.dep.key].partial_fraction == 0.5
+    h.bar(100, 108, 99, 105)                                   # +0.5 R at the close: nothing
+    assert h.portfolio.qty(h.dep.key) == pytest.approx(qty)
+    h.bar(105, 112, 104, 111)                                  # +1.1 R at the close: half is closed (next open)
+    h.bar(111, 112, 110, 111)
+    assert h.portfolio.qty(h.dep.key) == pytest.approx(qty - h.registry.get(BTC).round_qty(qty * 0.5))
+    assert h.portfolio.trades[-1].exit_reason == "partial_take_profit" and h.engine.protections[h.dep.key].partial_done
+    stops = [o for o in h.broker.get_open_orders() if o.type is OrderType.STOP]
+    assert len(stops) == 1 and stops[0].qty == pytest.approx(h.portfolio.qty(h.dep.key))   # the stop covers what is left
+
+
+def test_a_limit_entry_not_filled_in_time_falls_back_to_market_for_what_is_left():
+    h = Harness()
+    ts = h.bar(100, 101, 99, 100)
+    (entry,) = _signal_with_meta(h, ts, maker_offset_bps=50.0, maker_fallback_bars=2)
+    assert entry.type is OrderType.LIMIT and entry.limit_price == pytest.approx(99.5)
+    h.bar(100, 101, 99.8, 100.5)                               # never trades down to 99.5
+    assert h.portfolio.qty(h.dep.key) == 0
+    h.bar(100.5, 101, 100, 100.8)                              # two bars: cancelled, sent at market
+    h.bar(101, 102, 100.5, 101.5)
+    assert h.engine.orders[entry.id].status is OrderStatus.CANCELLED and h.portfolio.qty(h.dep.key) == pytest.approx(entry.qty)
+    market = [o for o in h.engine.orders.values() if o.client_order_id.endswith("|market")]
+    assert len(market) == 1 and market[0].type is OrderType.MARKET
+
+
+def test_a_limit_entry_that_fills_in_time_is_a_maker_fill_without_spread_and_at_the_maker_rate():
+    from app.domain.fees import CommissionModel as CM
+    from app.paper_trading.broker import ExecutionModel as EM
+
+    model = EM(spread_bps=10, slippage_bps=5, participation_rate=None, commissions={"crypto": CM(rate=0.0025, maker_rate=0.0015)})
+    h = Harness(adapter_factory=lambda hh: _sim(hh, model))
+    ts = h.bar(100, 101, 99, 100)
+    (entry,) = _signal_with_meta(h, ts, maker_offset_bps=50.0, maker_fallback_bars=3)
+    h.bar(100, 100.5, 99, 99.8)                                # trades through 99.5: filled at the limit
+    o = h.engine.orders[entry.id]
+    assert o.status is OrderStatus.FILLED and o.avg_fill_price == pytest.approx(99.5) and o.commission == pytest.approx(o.qty * 99.5 * 0.0015)
+
+
+def _sim(h, model):
+    b = SimulatedBroker("paper", h.registry, h.fx, 100_000, "EUR", model)
+    b.connect()
+    b.map_all_instruments()
+    return b

@@ -35,6 +35,12 @@ class RiskLimits(BaseModel):
     est_commission_bps: float = Field(10.0, ge=0, le=500)  # per side
     max_spread_bps: float = Field(50.0, gt=0, le=2000)  # new risk is refused on a wider live spread
     max_data_age_seconds: float = Field(60.0, gt=0, le=3600)  # new risk is refused on an older live price
+    # Crypto as ONE risk factor (they mostly move with bitcoin). Off by default. When on, for each account: at most
+    # `crypto_max_same_direction` crypto positions in the same direction, and the risk to their stops together at most
+    # `crypto_max_total_risk` of the account's equity (new positions are sized down to fit, or refused).
+    crypto_factor_cap: bool = False
+    crypto_max_same_direction: int = Field(3, ge=1, le=100)
+    crypto_max_total_risk: float = Field(0.02, gt=0, le=0.5)
     # block_new_risk: reject risk-increasing orders only (default, never liquidates)
     # cancel_open_orders: additionally cancel working orders
     # flatten_positions: additionally close positions - must be chosen explicitly by an admin
@@ -124,6 +130,42 @@ class AutopilotSettings(BaseModel):
     sec_contact: str = Field("QUANT AI TRADER admin@example.com", max_length=200)
 
 
+class CryptoProfile(BaseModel):
+    """Rules applied on top of the strategies' signals for crypto only (see strategies/profile.py). Other instruments are
+    never affected. Everything is off unless `enabled` and the rule are on; changing it sends crypto validations back for
+    a retest, so the rule traded is the rule tested."""
+
+    enabled: bool = False
+    # Regime of the reference instrument on daily bars: close vs EMA, and ADX at least `regime_adx_min` (None: EMA only).
+    regime_filter: Literal["off", "trend_only", "disable"] = "off"  # in a strong trend, mean reversion trades with it only, or not at all
+    regime_reference: str = Field("CRYPTO:BTC/USD", max_length=64)
+    regime_ema: int = Field(200, ge=5, le=400)
+    regime_adx_period: int = Field(14, ge=2, le=100)
+    regime_adx_min: float | None = Field(25.0, ge=0, le=100)
+    # Mean reversion: enter only when the close is at least this many ATR from its mean; exit at the mean and/or after N bars.
+    vol_entry: bool = False
+    vol_entry_atr: float = Field(1.0, gt=0, le=10)
+    mean_period: int = Field(20, ge=2, le=400)
+    reversion_exit_at_mean: bool = False
+    time_stop_bars: int = Field(0, ge=0, le=10_000)  # 0 = no time stop
+    # Trend, momentum, breakout, volatility: a part closed at +x R, an ATR trailing stop on the rest.
+    trend_partial: bool = False
+    partial_fraction: float = Field(0.5, gt=0, lt=1)
+    partial_at_r: float = Field(1.0, gt=0, le=20)
+    trailing_atr: float | None = Field(2.0, gt=0, le=20)
+    # Breakouts: the signal bar's volume at least `breakout_volume_mult` x its average over `breakout_lookback` bars.
+    breakout_confirm: bool = False
+    breakout_volume_mult: float = Field(1.5, gt=0, le=20)
+    breakout_lookback: int = Field(20, ge=2, le=400)
+    # Limit (maker) entries at `maker_offset_bps` better than the signal price; at market after `maker_fallback_bars` bars.
+    maker_entries: bool = False
+    maker_offset_bps: float = Field(5.0, ge=0, le=500)
+    maker_fallback_bars: int = Field(1, ge=1, le=100)
+
+    def signature(self) -> dict | None:
+        return self.model_dump() if self.enabled else None
+
+
 class AnalyticsSettings(BaseModel):
     """Measurement of closed trades (see app/analytics). Changes nothing in trading."""
 
@@ -163,6 +205,7 @@ class UserSettings(BaseModel):
     notifications: NotificationSettings = NotificationSettings()
     autopilot: AutopilotSettings = AutopilotSettings()
     analytics: AnalyticsSettings = AnalyticsSettings()
+    crypto_profile: CryptoProfile = CryptoProfile()
 
     @model_validator(mode="after")
     def _automatic_needs_confirmed_limits(self) -> "UserSettings":

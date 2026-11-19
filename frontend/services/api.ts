@@ -38,6 +38,7 @@ export type RiskLimits = {
   max_concurrent_positions: number; max_margin_utilization: number; target_volatility: number | null; max_correlated_exposure: number; correlation_threshold: number;
   emergency_policy: "block_new_risk" | "cancel_open_orders" | "flatten_positions";
   est_spread_bps: number; est_slippage_bps: number; est_commission_bps: number; max_spread_bps: number; max_data_age_seconds: number;
+  crypto_factor_cap: boolean; crypto_max_same_direction: number; crypto_max_total_risk: number;
 };
 export type UserSettings = {
   base_currency: string; initial_paper_capital: number | null; trading_mode: "manual" | "semi_auto" | "auto";

@@ -301,7 +301,9 @@ class SimulatedBroker(BrokerAdapter):
         else:  # reduced
             self.positions[book] = [new_qty, avg]
 
-        commission = self.execution.commissions[inst.asset_class.value].cost(qty, price, inst.contract_multiplier)
+        # A resting limit filled at its price added liquidity: the maker rate, where the model has one.
+        commission = self.execution.commissions[inst.asset_class.value].cost(qty, price, inst.contract_multiplier,
+                                                                             maker=not taker and order.type is OrderType.LIMIT)
         commission_acct = -self._to_account(-commission, inst.quote_currency, ts, with_cost=True)
         self.cash -= commission_acct
         self.costs["commission"] += commission_acct

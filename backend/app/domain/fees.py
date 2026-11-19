@@ -11,11 +11,13 @@ class CommissionModel:
     rate: float = 0.0  # fraction of notional (crypto, forex)
     per_unit: float = 0.0  # per share / per contract (stocks, futures)
     minimum: float = 0.0
+    maker_rate: float | None = None  # fraction of notional for orders that add liquidity (resting limits); None = `rate`
 
-    def cost(self, qty: float, price: float, multiplier: float = 1.0) -> float:
+    def cost(self, qty: float, price: float, multiplier: float = 1.0, maker: bool = False) -> float:
         if qty == 0:
             return 0.0
-        return max(self.minimum, abs(qty) * price * multiplier * self.rate + abs(qty) * self.per_unit)
+        rate = self.maker_rate if maker and self.maker_rate is not None else self.rate
+        return max(self.minimum, abs(qty) * price * multiplier * rate + abs(qty) * self.per_unit)
 
 
 DEFAULT_COMMISSIONS = {

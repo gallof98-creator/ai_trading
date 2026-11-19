@@ -50,6 +50,10 @@ class DeploymentSpec:
     # Entry filters (quant_ai/filters.py): bars, by start time, on which no position may be opened (any direction / long).
     blocked_any: pd.Series | None = None
     blocked_long: pd.Series | None = None
+    # Per-asset-class rules (strategies/profile.py): the profile, the strategy's family and the reference regime (daily).
+    profile: object | None = None
+    family: str | None = None
+    regime: pd.Series | None = None
 
 
 @dataclass
@@ -214,6 +218,10 @@ def run_backtest(spec: BacktestSpec) -> BacktestResult:
             from ..quant_ai.filters import apply_entry_block
 
             signals = apply_entry_block(signals, d.blocked_any, d.blocked_long)
+        if d.profile is not None and getattr(d.profile, "enabled", False):
+            from ..strategies.profile import align_regime, apply_profile
+
+            signals = apply_profile(signals, frame, d.family or "", d.profile, align_regime(d.regime, frame.index, delta), strategy.params.atr_period)
         for ts, row in signals[signals["action"] != "HOLD"].iterrows():
             close_t = ts + delta
             if spec.trade_start is not None and close_t < spec.trade_start:

@@ -247,8 +247,10 @@ class PortfolioEngine:
         out = []
         for (broker_id, iid, strategy), s in self.slices.items():
             inst = self.registry.get(iid)
-            notional = s.qty * self.prices[iid] * inst.contract_multiplier * self._rate(inst.quote_currency, ts)
-            out.append(Exposure(broker_id, iid, strategy, inst.asset_class.value, inst.quote_currency, notional, abs(notional) * inst.margin_rate))
+            rate = self._rate(inst.quote_currency, ts)
+            notional = s.qty * self.prices[iid] * inst.contract_multiplier * rate
+            risk = abs(s.qty) * s.initial_stop_distance * inst.contract_multiplier * rate if s.initial_stop_distance else None
+            out.append(Exposure(broker_id, iid, strategy, inst.asset_class.value, inst.quote_currency, notional, abs(notional) * inst.margin_rate, risk))
         return out
 
     def correlations(self) -> dict[tuple[str, str], float]:

@@ -18,6 +18,7 @@ class Exposure:
     currency: str
     signed_notional: float  # >0 long, <0 short
     margin: float = 0.0
+    risk: float | None = None  # base currency lost if the stop set at entry is hit; None when unknown (e.g. an order on its way)
 
 
 @dataclass

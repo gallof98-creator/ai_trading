@@ -18,12 +18,17 @@ def signal_from_row(ts: pd.Timestamp, row, strategy: Strategy, instrument_id: st
         stop_distance=_opt(row.stop_distance), take_profit_distance=_opt(row.take_profit_distance),
         trailing_distance=_opt(row.trailing_distance),
         confidence=None,  # rule-based strategies have no calibrated probability; never invent one
-        meta={"bar_open": ts.isoformat(), "atr": _opt(row.atr)},
+        meta={"bar_open": ts.isoformat(), "atr": _opt(row.atr),
+              # Exit and order-type rules of an asset-class profile (strategies/profile.py), when it adds them.
+              **{k: _opt(getattr(row, k)) for k in PROFILE_COLUMNS if k in row.index and not pd.isna(getattr(row, k))}},
     )
 
 
+PROFILE_COLUMNS = ("partial_fraction", "partial_at_r", "maker_offset_bps", "maker_fallback_bars")
+
+
 class SignalEngine:
-    def latest(self, bars: pd.DataFrame, strategy: Strategy, instrument_id: str, timeframe: str) -> Signal | None:
+    def latest(self, bars: pd.DataFrame, strategy: Strategy, instrument_id: str, timeframe: str, transform=None) -> Signal | None:
         """Signal for the most recent COMPLETED bar in `bars`, or None while warming up.
         The signal is timestamped at that bar's close - the first moment it could be known."""
         from ..market_data.timeframes import tf_delta
@@ -31,5 +36,7 @@ class SignalEngine:
         if len(bars) < strategy.warmup():
             return None
         frame = strategy.generate(bars)
+        if transform is not None:  # e.g. the crypto profile's rules, the same ones the validation applied
+            frame = transform(frame)
         ts = frame.index[-1]
         return signal_from_row(ts, frame.iloc[-1], strategy, instrument_id, timeframe, ts + tf_delta(timeframe))

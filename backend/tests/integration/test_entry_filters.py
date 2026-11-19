@@ -218,3 +218,23 @@ def test_short_entries_follow_the_short_selling_switch_and_the_switch_sends_vali
         save_settings(s, rt.user_settings.model_copy(update={"autopilot": rt.user_settings.autopilot.model_copy(update={"allow_short": True})}))
         rt.reload_settings(s)
     assert rt.entry_block(short) is None
+
+
+def test_the_crypto_profile_enters_the_validation_of_crypto_only_and_a_change_sends_it_back(rt):
+    from app.database.settings_store import save_settings
+
+    with_stock(rt)
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"crypto_profile": rt.user_settings.crypto_profile.model_copy(
+            update={"enabled": True, "reversion_exit_at_mean": True, "time_stop_bars": 10})}))
+        rt.reload_settings(s)
+    with rt.db.session() as s:
+        crypto = opp.prepare(s, rt, "rsi_reversion", CYC, "1d")
+        stock = opp.prepare(s, rt, "rsi_reversion", STOCK, "1d")
+        v = opp.validate(s, rt, "rsi_reversion", CYC, "1d", "admin")
+    assert crypto.profile is not None and crypto.family == "mean_reversion" and stock.profile is None
+    assert v["profile"] == rt.profile_signature(CYC) and rt.profile_signature(STOCK) is None
+    with rt.db.session() as s:
+        save_settings(s, rt.user_settings.model_copy(update={"crypto_profile": rt.user_settings.crypto_profile.model_copy(update={"time_stop_bars": 5})}))
+        rt.reload_settings(s)
+    assert v["profile"] != rt.profile_signature(CYC)       # the Autopilot treats it as due for a retest

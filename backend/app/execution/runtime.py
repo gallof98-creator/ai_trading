@@ -171,6 +171,50 @@ class TradingRuntime:
             bps += 2 * self.user_settings.fx_conversion_cost_bps
         return price * bps / 10_000 + (spread or 0.0)
 
+    # ------------------------------------------------------------------ asset-class profiles (crypto)
+    def profile_context(self, instrument_id: str, strategy) -> tuple | None:
+        """(profile, strategy family, reference regime on daily bars) when the crypto profile applies to this instrument."""
+        prof = self.user_settings.crypto_profile
+        if not prof.enabled:
+            return None
+        try:
+            if self.registry.get(instrument_id).asset_class is not AssetClass.CRYPTO:
+                return None
+        except KeyError:
+            return None
+        from ..quant_ai.opportunities import family_of
+
+        return prof, family_of(strategy.category), self.reference_regime(prof) if prof.regime_filter != "off" else None
+
+    def profile_signature(self, instrument_id: str) -> dict | None:
+        try:
+            crypto = self.registry.get(instrument_id).asset_class is AssetClass.CRYPTO
+        except KeyError:
+            return None
+        return self.user_settings.crypto_profile.signature() if crypto else None
+
+    def reference_regime(self, prof) -> pd.Series | None:
+        """Regime of the reference instrument (bitcoin) on its stored daily bars; recomputed when a new daily bar arrives."""
+        from ..strategies.profile import regime_daily
+
+        with self.db.session() as session:
+            data = self.store.load(session, prof.regime_reference, "1d")
+        if data is None or data.bars.empty:
+            return None
+        key = (prof.regime_reference, data.bars.index[-1], prof.regime_ema, prof.regime_adx_period, prof.regime_adx_min)
+        if getattr(self, "_regime_cache", (None,))[0] != key:
+            self._regime_cache = (key, regime_daily(data.bars, prof.regime_ema, prof.regime_adx_period, prof.regime_adx_min))
+        return self._regime_cache[1]
+
+    def profile_transform(self, instrument_id: str, strategy, timeframe: str, bars: pd.DataFrame):
+        ctx = self.profile_context(instrument_id, strategy)
+        if ctx is None:
+            return None
+        from ..strategies.profile import align_regime, apply_profile
+
+        prof, family, regime = ctx
+        return lambda f: apply_profile(f, bars, family, prof, align_regime(regime, f.index, tf_delta(timeframe)), strategy.params.atr_period)
+
     def _describe_instrument(self, instrument_id: str) -> dict:
         try:
             inst = self.registry.get(instrument_id)
@@ -1023,7 +1067,8 @@ class TradingRuntime:
                         frame = resample(cache, timeframe, dep.timeframe)
                         if frame.empty or frame.index[-1] + tf_delta(dep.timeframe) != new.index[i] + delta:
                             continue  # no higher-timeframe bar completed at this moment
-                    signal = self.signals.latest(frame, dep.strategy, instrument_id, dep.timeframe)
+                    signal = self.signals.latest(frame, dep.strategy, instrument_id, dep.timeframe,
+                                                 transform=self.profile_transform(instrument_id, dep.strategy, dep.timeframe, frame))
                     if signal is not None:
                         self.engine.on_signal(signal, dep)
                 if drive:  # signal-only bars (e.g. yesterday's daily bar on a live instrument) are not a valuation moment
@@ -1579,7 +1624,7 @@ class TradingRuntime:
             for a in self.engine.approvals.values():
                 o, i, inst = a.order, a.intent, a.intent.instrument
                 sign = o.side.sign
-                stop, target, _ = a.protection or (None, None, None)
+                stop, target, *_ = a.protection or (None, None, None)
                 risk_base = i.loss_at_stop
                 quote = self.live_hub.quote(inst.id)
                 out.append({
