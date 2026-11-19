@@ -523,3 +523,17 @@ def _sim(h, model):
     b.connect()
     b.map_all_instruments()
     return b
+
+
+def test_an_entry_whose_old_order_record_was_pruned_is_reported_as_handled_never_resent_or_crashing():
+    """The saved state keeps the latest 1,000 orders but every client id ever used. After a restart an old entry signalled
+    again found its client id but no order: KeyError, and the whole scan failed."""
+    h = ccxt_harness()
+    (order,) = h.signal(1, T0, price=30000.0, stop=3000.0)
+    state = h.engine.to_state()
+    state["orders"] = [o for o in state["orders"] if o["id"] != order.id]      # pruned from the saved state
+    h.engine.load_state(state)
+    calls = h.exchange.create_calls
+    (again,) = h.signal(1, T0, price=30000.0, stop=3000.0)
+    assert again.id == order.id and again.status is OrderStatus.CANCELLED and "record no longer kept" in again.reason
+    assert h.exchange.create_calls == calls                                    # nothing sent again

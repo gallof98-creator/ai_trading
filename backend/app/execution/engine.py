@@ -247,9 +247,24 @@ class TradingEngine:
                         commission=max(new.commission - old.commission, 0.0), ts=ts, strategy=new.strategy)
             self._apply_fill(fill, new)
 
+    def _acted_on(self, order: Order) -> Order:
+        """The order already sent for this client id. Only the most recent orders are kept in the saved state while every
+        client id ever used is kept (so none is ever sent twice): an old one may have no record any more. It is then
+        reported as already handled, never sent again."""
+        earlier = self.orders.get(self._client_ids[order.client_order_id])
+        if earlier is not None:
+            return earlier
+        return order.model_copy(update={"id": self._client_ids[order.client_order_id], "status": OrderStatus.CANCELLED,
+                                        "reason": f"{order.reason or ''} | already sent earlier (record no longer kept); not sent again".strip(" |")})
+
     def _handle_fills(self, adapter, fills: list[Fill]) -> None:
         for fill in fills:
-            order = adapter.get_order_status(self.orders[fill.order_id])
+            known = self.orders.get(fill.order_id)
+            if known is None:  # a fill for an order this engine has no record of: reported, never guessed into a position
+                self.journal.alert(fill.ts, "reconciliation", "critical", f"Fill for an unknown order {fill.order_id}",
+                                   f"{fill.side.value} {fill.qty:g} {fill.instrument_id} at {fill.price:g} at {fill.broker_id}")
+                continue
+            order = adapter.get_order_status(known)
             self._record(order)
             self._apply_fill(fill, order)
         # Orders the venue closed without a fill (e.g. reduce-only with nothing left, margin rejection).
@@ -599,7 +614,7 @@ class TradingEngine:
     def _route(self, order: Order, intent: OrderIntent, protection: tuple | None, mode: TradingMode, ts: datetime,
                pending_close: bool = False) -> Order:
         if order.client_order_id in self._client_ids:  # the same signal was already acted on
-            return self.orders[self._client_ids[order.client_order_id]]
+            return self._acted_on(order)
         blocked = None if order.reduce_only else self._entry_block(order)
         if not order.reduce_only and (order.broker_id, order.instrument_id) in self.unconfirmed_instruments():
             blocked = "an earlier order on this instrument may have reached the broker without an answer; no new entry until it is found or ruled out"
@@ -683,7 +698,7 @@ class TradingEngine:
         """Send to the broker exactly once. Transient failures are retried with the same client id,
         after first asking the broker whether the earlier attempt actually arrived."""
         if order.client_order_id in self._client_ids:
-            return self.orders[self._client_ids[order.client_order_id]]
+            return self._acted_on(order)
         self._client_ids[order.client_order_id] = order.id
         self._record(order)
         try:
