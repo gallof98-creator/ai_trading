@@ -50,6 +50,17 @@ def alpaca_liquid_universe(key: str, secret: str, top: int, base_url: str = "htt
     return names
 
 
+def describe_error(exc: BaseException) -> str:
+    """An error as the panel shows it, naming the server a network error was about (httpx's own message often does not:
+    "Name or service not known" alone says nothing about which host could not be found)."""
+    text = f"{type(exc).__name__}: {str(exc)[:300]}"
+    try:
+        host = exc.request.url.host if isinstance(exc, httpx.RequestError) else None
+    except RuntimeError:  # an httpx error raised without a request attached
+        host = None
+    return f"{text} (server: {host})" if host and host not in text else text
+
+
 def alpaca_crypto_daily(symbol: str, key: str = "", secret: str = "", years: int = 6, base_url: str = "https://data.alpaca.markets",
                         client: httpx.Client | None = None, now: datetime | None = None) -> pd.DataFrame:
     """Completed daily bars of one crypto pair from Alpaca's official crypto data (works without a key, slowly)."""
@@ -217,7 +228,7 @@ class Autopilot:
                     if out is not None:
                         result[name] = out
                 except Exception as exc:  # one failing step must not stop the others or the next cycle
-                    result[name] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+                    result[name] = {"error": describe_error(exc)}
                     self._note(name, result[name]["error"], "warning")
                 timings[name] = round(time.perf_counter() - began, 1)
             result.pop("_candidates", None)

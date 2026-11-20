@@ -339,3 +339,13 @@ def test_after_a_change_of_criteria_former_candidates_are_retested_first_and_eve
     with rt.db.session() as s:
         retested = {(v["strategy"], v["instrument_id"]) for v in opp.validations(s, rt.clock()) if v["criteria_version"] == 99}
     assert retested == former, "the setups that could trade were not retested first"
+
+
+def test_a_network_error_in_a_step_names_the_server_it_could_not_reach():
+    import httpx
+
+    from app.quant_ai.autopilot import describe_error
+
+    err = httpx.ConnectError("[Errno -2] Name or service not known", request=httpx.Request("GET", "https://data.alpaca.markets/v2/stocks"))
+    assert describe_error(err) == "ConnectError: [Errno -2] Name or service not known (server: data.alpaca.markets)"
+    assert describe_error(ValueError("bad")) == "ValueError: bad"
